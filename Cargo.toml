@@ -1,0 +1,6 @@
+[package]
+name = "kafka4rust"
+version = "0.1.0"
+authors = ["Vadym Chekan <vadym.chekan@jet.com>"]
+
+[dependencies]
