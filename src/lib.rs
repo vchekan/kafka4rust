@@ -1,7 +1,9 @@
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
-}
+mod cluster;
+mod broker;
+mod connection;
+extern crate tokio;
+extern crate futures;
+
+#[macro_use] extern crate failure;
+
+

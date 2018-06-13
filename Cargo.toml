@@ -4,3 +4,6 @@ version = "0.1.0"
 authors = ["Vadym Chekan <vadym.chekan@jet.com>"]
 
 [dependencies]
+failure = "0.1.1"
+tokio = "0.1.4"
+futures = "0.2.1"
