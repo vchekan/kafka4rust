@@ -5,5 +5,7 @@ authors = ["Vadym Chekan <vadym.chekan@jet.com>"]
 
 [dependencies]
 failure = "0.1.1"
-tokio = "0.1.4"
-futures = "0.2.1"
+tokio = "0.1.7"
+futures-preview = "0.2.2"
+bytes = "0.4.8"
+byteorder = "1.2.3"

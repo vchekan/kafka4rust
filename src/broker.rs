@@ -1,4 +1,5 @@
 use connection::BrokerConnection;
+//use futures::future::Future;
 
 use failure::Error;
 
@@ -33,28 +34,25 @@ impl Broker {
             connection: BrokerConnection::new(&addr)
         })
     }
-
-    pub fn onState() -> Box<Future<>> {
-
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::ToSocketAddrs;
-    use tokio;
+    //use std::net::ToSocketAddrs;
+    //use tokio;
+    use std::env;
 
     #[test]
     fn it_works() {
-        let bootstrap = env!("kafka-bootstrap");
+        let bootstrap = env::var("kafka-bootstrap").unwrap_or("localhost".to_string());
         println!("bootstrap: {}", bootstrap);
         let addr = format!("{}:9092", bootstrap);
         let broker = Broker::new(&addr);
         println!("broker: {:?}", broker);
 
-        let kafkaClient =
+        //let kafkaClient =
 
-        tokio::run(kafkaClient);
+        //tokio::run(kafkaClient);
     }
 }
