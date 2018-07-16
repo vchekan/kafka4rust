@@ -97,37 +97,35 @@ impl SerializeKafka for Request {
 //
 // Request macros
 //
+macro_rules! tp {
+    ([String]) => {Vec<String>};
+}
+
 macro_rules! request {
     ($request_name:ident {
-        $($field_name:ident : $field_type:ty);*
-    }) => (
+        $($field:ident : $tp:tt,)*
+    }) => {
         pub struct $request_name {
-            $($field_name: $field_type,).*
+            $(pub $field : tp!($tp) ,)*
         }
 
         impl SerializeKafka for $request_name {
             fn serialize(&self, buff: &mut BufMut) {
-                $(self.$field_name.serialize(buff);)*
+                $(self.$field.serialize(buff);)*
             }
         }
-    )
+    }
 }
 
-/*
-MetadataRequest => [TopicName]
-  TopicName => string
+//
+// Request & Response
+//
 
-*/
-//trace_macros!(true);
+trace_macros!(true);
 request!(MetadataRequest {
-    topic_name: Vec<String>
+    topic_name: [String],
 });
-//trace_macros!(false);
+trace_macros!(false);
 
 
-//trace_macros!(true);
-request!(ListGroupRequest {
-
-});
-//trace_macros!(false);
-
+request!(ListGroupRequest{});
