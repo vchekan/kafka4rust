@@ -1,5 +1,7 @@
 use std::net::SocketAddr;
 use tokio::net::{TcpStream, ConnectFuture};
+use bytes::BufMut;
+use protocol::{write_request, Request};
 
 #[derive(Debug)]
 pub struct BrokerConnection {
@@ -31,10 +33,9 @@ mod tests {
     use tokio;
     use std::env;
     use tokio::prelude::*;
-    use bytes::{BytesMut, BufMut};
     use tokio::io::{write_all, read_exact};
-    //use byteorder::BigEndian;
     use byteorder::{ByteOrder, BigEndian};
+    use protocol::ListGroupRequest;
 
     #[test]
     fn it_works() {
@@ -47,20 +48,10 @@ mod tests {
             conn.tcp.
             and_then(|tcp| {
                 println!("Connected!");
-                //let mut buf = vec!(0_u8, 0_u8);
-                let mut buff = BytesMut::with_capacity(1024);
-                // ListGroupsRequest	16
-                /* RequestMessage => ApiKey ApiVersion CorrelationId ClientId RequestMessage
-                  ApiKey => int16
-                  ApiVersion => int16
-                  CorrelationId => int32
-                  ClientId => string
-                */
-                buff.put_u32_be(2*3+4+3); // size
-                buff.put_u16_be(16_u16); // api key
-                buff.put_u16_be(1_u16); // api version
-                buff.put_u32_be(30_u32); // correlation
-                buff.put_u16_be(3_u16); buff.put(&b"rst"[..]); // client id
+
+                let mut buff = Vec::with_capacity(1024);
+                let request = Request::ListGroup(ListGroupRequest{});
+                write_request(&request, 11, None, &mut buff);
                 write_all(tcp, buff)
             }).and_then(|(tcp, mut buff)| {
                 println!("Written");

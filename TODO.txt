@@ -1,3 +1,11 @@
 * IPv6 support
 * Instrumentation
 * Tracing
+
+(+) Tokio
+* Serde
+* Client API
+* Wrappers
+    ** C#
+    ** Java
+* Integration testing
