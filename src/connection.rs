@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 use tokio::net::{TcpStream, ConnectFuture};
-use bytes::BufMut;
-use protocol::{write_request, read_response, MetadataRequest0, ListGroupResponse};
+use protocol::{write_request, read_response};
 
 #[derive(Debug)]
 pub struct BrokerConnection {
@@ -35,7 +34,6 @@ mod tests {
     use tokio::prelude::*;
     use tokio::io::{write_all, read_exact};
     use byteorder::{ByteOrder, BigEndian};
-    use protocol::ListGroupRequest0;
     use std::io::Cursor;
     use protocol;
 
@@ -46,7 +44,7 @@ mod tests {
         let addr = format!("{}:9092", bootstrap);
         let addr = addr.to_socket_addrs().unwrap().next().expect(format!("Host '{}' not found", addr).as_str());
         let conn = BrokerConnection::new(&addr);
-        let res = tokio::run(
+        tokio::run(
             conn.tcp.
             and_then(|tcp| {
                 println!("Connected!");
@@ -67,7 +65,7 @@ mod tests {
                 println!("Response len: {}", len);
                 buff.resize(len as usize, 0_u8);
                 read_exact(tcp, buff)
-            }).and_then(|(tcp, mut buff)| {
+            }).and_then(|(tcp, buff)| {
                 println!("Response: {:?}", buff);
                 let mut cursor = Cursor::new(buff);
                 let (corr_id, response) = read_response::<protocol::ApiVersionsResponse1>(&mut cursor);
