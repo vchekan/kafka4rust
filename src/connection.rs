@@ -37,6 +37,7 @@ mod tests {
     use byteorder::{ByteOrder, BigEndian};
     use protocol::ListGroupRequest0;
     use std::io::Cursor;
+    use protocol;
 
     #[test]
     fn it_works() {
@@ -52,7 +53,8 @@ mod tests {
 
                 // TODO: use some size-bound structure to serialize and fail if exceed buffer size
                 let mut buff = Vec::with_capacity(1024);
-                let request = ListGroupRequest0{};
+                let request = protocol::ApiVersionsRequest{};
+                    //ListGroupRequest0{};
                 //let r2 = MetadataRequest0{topic_name: vec!["test1".to_string(), "test2".to_string()]};
                 write_request(&request, 11, None, &mut buff);
                 write_all(tcp, buff)
@@ -68,7 +70,7 @@ mod tests {
             }).and_then(|(tcp, mut buff)| {
                 println!("Response: {:?}", buff);
                 let mut cursor = Cursor::new(buff);
-                let (corr_id, response) = read_response::<ListGroupResponse>(&mut cursor);
+                let (corr_id, response) = read_response::<protocol::ApiVersionsResponse1>(&mut cursor);
                 println!("CorrId: {}, Response: {:?}", corr_id, response);
                 Ok(())
             }).

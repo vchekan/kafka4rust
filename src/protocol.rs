@@ -47,9 +47,13 @@ pub fn read_response<T>(buff: &mut Buf) -> (u32,T) where T: FromKafka {
 //
 impl ApiKey for MetadataRequest0 { fn api_key() -> u16 { 3 } }
 impl ApiKey for ListGroupRequest0 { fn api_key() -> u16 { 16 } }
+impl ApiKey for ApiVersionsRequest { fn api_key() -> u16 { 18 } }
 
 impl ApiVersion for MetadataRequest0 { fn api_version() -> u16 { 0 } }
 impl ApiVersion for ListGroupRequest0 { fn api_version() -> u16 { 0 } }
+// TODO: one struct, 2 versions
+//impl ApiVersion for ApiVersionsRequest0 { fn api_version() -> u16 { 0 } }
+impl ApiVersion for ApiVersionsRequest { fn api_version() -> u16 { 1 } }
 
 //
 // Primitive types serializtion
@@ -138,15 +142,15 @@ macro_rules! get_type {
     ([$t:ident $body:tt] ) => (Vec<get_type!($t)>);
     ($t:ident $body:tt) => ($t);
     ($t:ident) => ($t);
-    ([$t:ident]) => ($t);
+    ([$t:ident]) => (Vec<$t>);
 }
 
-macro_rules! to_kafka {
+macro_rules! request {
     ($id:ident) => {};
     ( [$id:ident] ) => {};
 
     // Array of complex type
-    ( [$sname:ident $tp:tt]) => {to_kafka!($sname $tp);};
+    ( [$sname:ident $tp:tt]) => {request!($sname $tp);};
 
     ($sname:ident { $($f:ident : $tp:tt),* } ) => {
         pub struct $sname {
@@ -159,16 +163,16 @@ macro_rules! to_kafka {
             }
         }
 
-        $(to_kafka!($tp);)*
+        $(request!($tp);)*
     };
 }
 
-macro_rules! from_kafka {
+macro_rules! response {
     ($id:ident) => {};
     ( [$id:ident] ) => {};
 
     // Array of complex type
-    ( [ $sname:ident $tp:tt ] ) => (from_kafka!($sname $tp););
+    ( [ $sname:ident $tp:tt ] ) => (response!($sname $tp););
 
 
     ($sname:ident { $($f:ident : $tp:tt),* }) => {
@@ -183,7 +187,7 @@ macro_rules! from_kafka {
             }
         }
 
-        $( from_kafka!($tp); )*
+        $( response!($tp); )*
     };
 }
 
@@ -192,7 +196,7 @@ macro_rules! from_kafka {
 //
 /*
 */
-to_kafka!(ListOffsetsRequest0 {
+request!(ListOffsetsRequest0 {
     replica_id: u32,
      topics:
         [ Topics
@@ -209,19 +213,21 @@ to_kafka!(ListOffsetsRequest0 {
     }
 );
 
-trace_macros!(true);
-to_kafka!(MetadataRequest0 {
+// 18, version 0 and 1
+request!(ApiVersionsRequest {});
+
+request!(MetadataRequest0 {
     topic_name: [String]
 });
-trace_macros!(false);
 
-to_kafka!(ListGroupRequest0{});
+
+request!(ListGroupRequest0{});
 
 //
 // Response
 //
 
-from_kafka!(ListOffsetsResponse0 {
+response!(ListOffsetsResponse0 {
     responses: [ Response {
         topic: String,
         partition_responses: [
@@ -231,11 +237,10 @@ from_kafka!(ListOffsetsResponse0 {
                 offsets: [u64]
             }
         ]
-    }
-    ]
+    }]
 });
 
-from_kafka!(ListGroupResponse {
+response!(ListGroupResponse {
     error_code: i16,
     groups : [ Group
         { group_id: String
@@ -244,3 +249,24 @@ from_kafka!(ListGroupResponse {
     ]
 });
 
+// 18
+response!(ApiVersions
+    { api_key: i16
+    , min_version: i16
+    , max_version: i16
+    }
+);
+
+response!(ApiVersionsResponse0 {
+    error_code: i16,
+    api_versions: [ApiVersions]
+});
+
+trace_macros!(true);
+response!(ApiVersionsResponse1
+    { error_code: i16
+    , api_versions: [ApiVersions]
+    , throttle_time_ms: u32
+    }
+);
+trace_macros!(false);
