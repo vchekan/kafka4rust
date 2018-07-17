@@ -45,15 +45,27 @@ pub fn read_response<T>(buff: &mut Buf) -> (u32,T) where T: FromKafka {
 //
 // Private
 //
-impl ApiKey for MetadataRequest { fn api_key() -> u16 { 3 } }
-impl ApiKey for ListGroupRequest { fn api_key() -> u16 { 16 } }
+impl ApiKey for MetadataRequest0 { fn api_key() -> u16 { 3 } }
+impl ApiKey for ListGroupRequest0 { fn api_key() -> u16 { 16 } }
 
-impl ApiVersion for MetadataRequest { fn api_version() -> u16 { 0 } }
-impl ApiVersion for ListGroupRequest { fn api_version() -> u16 { 0 } }
+impl ApiVersion for MetadataRequest0 { fn api_version() -> u16 { 0 } }
+impl ApiVersion for ListGroupRequest0 { fn api_version() -> u16 { 0 } }
 
 //
 // Primitive types serializtion
 //
+impl ToKafka for u32 {
+    fn to_kafka(&self, buff: &mut BufMut) {
+        buff.put_u32_be(*self);
+    }
+}
+
+impl ToKafka for u64 {
+    fn to_kafka(&self, buff: &mut BufMut) {
+        buff.put_u64_be(*self);
+    }
+}
+
 impl ToKafka for String {
     fn to_kafka(&self, buff: &mut BufMut) {
         self.as_str().to_kafka(buff);
@@ -67,7 +79,7 @@ impl ToKafka for str {
     }
 }
 
-impl ToKafka for Vec<String> {
+impl<T> ToKafka for Vec<T> where T: ToKafka {
     fn to_kafka(&self, buff: &mut BufMut) {
         buff.put_u32_be(self.len() as u32);
         for s in self {
@@ -95,6 +107,12 @@ impl FromKafka for u32 {
     }
 }
 
+impl FromKafka for u64 {
+    fn from_kafka(buff: &mut Buf) -> Self {
+        buff.get_u64_be()
+    }
+}
+
 impl FromKafka for i16 {
     fn from_kafka(buff: &mut Buf) -> Self {
         buff.get_i16_be()
@@ -116,39 +134,40 @@ impl<T> FromKafka for Vec<T> where T: FromKafka {
 //
 // Request macros
 //
-macro_rules! tp {
-    ([String]) => {Vec<String>};
-    (String) => {String};
-}
-
-macro_rules! to_kafka {
-    ($request_name:ident {
-        $($field:ident : $tp:tt,)*
-    }) => {
-        pub struct $request_name {
-            $(pub $field : tp!($tp) ,)*
-        }
-
-        impl ToKafka for $request_name {
-            fn to_kafka(&self, buff: &mut BufMut) {
-                $(self.$field.to_kafka(buff);)*
-            }
-        }
-    }
-}
-
 macro_rules! get_type {
     ([$t:ident $body:tt] ) => (Vec<get_type!($t)>);
     ($t:ident $body:tt) => ($t);
     ($t:ident) => ($t);
+    ([$t:ident]) => ($t);
+}
+
+macro_rules! to_kafka {
+    ($id:ident) => {};
+    ( [$id:ident] ) => {};
+
+    // Array of complex type
+    ( [$sname:ident $tp:tt]) => {to_kafka!($sname $tp);};
+
+    ($sname:ident { $($f:ident : $tp:tt),* } ) => {
+        pub struct $sname {
+            $(pub $f : get_type!($tp) ),*
+        }
+
+        impl ToKafka for $sname {
+            fn to_kafka(&self, buff: &mut BufMut) {
+                $(self.$f.to_kafka(buff);)*
+            }
+        }
+
+        $(to_kafka!($tp);)*
+    };
 }
 
 macro_rules! from_kafka {
-    (String) => {};
-    (i16) => {};
-    ([String]) => {};
+    ($id:ident) => {};
+    ( [$id:ident] ) => {};
 
-    // Array
+    // Array of complex type
     ( [ $sname:ident $tp:tt ] ) => (from_kafka!($sname $tp););
 
 
@@ -171,16 +190,50 @@ macro_rules! from_kafka {
 //
 // Request
 //
+/*
+*/
+to_kafka!(ListOffsetsRequest0 {
+    replica_id: u32,
+     topics:
+        [ Topics
+            { topic: String
+            , partitions:
+                [ Partition
+                    { partition: u32
+                    , timestamp: u64
+                    , max_num_offsets: u32
+                    }
+                ]
+            }
+        ]
+    }
+);
 
-to_kafka!(MetadataRequest {
-    topic_name: [String],
+trace_macros!(true);
+to_kafka!(MetadataRequest0 {
+    topic_name: [String]
 });
+trace_macros!(false);
 
-to_kafka!(ListGroupRequest{});
+to_kafka!(ListGroupRequest0{});
 
 //
 // Response
 //
+
+from_kafka!(ListOffsetsResponse0 {
+    responses: [ Response {
+        topic: String,
+        partition_responses: [
+            PartitionResponses {
+                partition: u32,
+                error_code: i16,
+                offsets: [u64]
+            }
+        ]
+    }
+    ]
+});
 
 from_kafka!(ListGroupResponse {
     error_code: i16,
