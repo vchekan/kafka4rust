@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use tokio::net::{TcpStream, ConnectFuture};
 use bytes::BufMut;
-use protocol::{write_request, Request};
+use protocol::{write_request, read_response, Request, MetadataRequest, ListGroupResponse};
 
 #[derive(Debug)]
 pub struct BrokerConnection {
@@ -36,6 +36,7 @@ mod tests {
     use tokio::io::{write_all, read_exact};
     use byteorder::{ByteOrder, BigEndian};
     use protocol::ListGroupRequest;
+    use std::io::Cursor;
 
     #[test]
     fn it_works() {
@@ -49,8 +50,10 @@ mod tests {
             and_then(|tcp| {
                 println!("Connected!");
 
+                // TODO: use some size-bound structure to serialize and fail if exceed buffer size
                 let mut buff = Vec::with_capacity(1024);
                 let request = Request::ListGroup(ListGroupRequest{});
+                //let r2 = Request::Metadata(MetadataRequest{topic_name: vec!["test1".to_string(), "test2".to_string()]});
                 write_request(&request, 11, None, &mut buff);
                 write_all(tcp, buff)
             }).and_then(|(tcp, mut buff)| {
@@ -64,6 +67,9 @@ mod tests {
                 read_exact(tcp, buff)
             }).and_then(|(tcp, mut buff)| {
                 println!("Response: {:?}", buff);
+                let mut cursor = Cursor::new(buff);
+                let (corr_id, response) = read_response::<ListGroupResponse>(&mut cursor);
+                println!("CorrId: {}, Response: {:?}", corr_id, response);
                 Ok(())
             }).
             map_err(|e| {
