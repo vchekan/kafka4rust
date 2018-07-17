@@ -4,12 +4,6 @@ use byteorder::BigEndian;
 //
 // Public API
 //
-// TODO: drop it in favor of generic?
-pub enum Request {
-    Metadata(MetadataRequest),
-    ListGroup(ListGroupRequest),
-}
-
 pub trait ToKafka {
     fn to_kafka(&self, buff: &mut BufMut);
 }
@@ -18,19 +12,21 @@ pub trait FromKafka {
     fn from_kafka(buff: &mut Buf) -> Self;
 }
 
-pub fn write_request(request: &Request, correlation_id: u32, client_id: Option<&str>, buff: &mut Vec<u8>) {
-    /* RequestMessage => ApiKey ApiVersion CorrelationId ClientId RequestMessage
-          ApiKey => int16
-          ApiVersion => int16
-          CorrelationId => int32
-          ClientId => string
-    */
+pub trait ApiKey {
+    fn api_key() -> u16;
+}
+
+pub trait ApiVersion {
+    fn api_version() -> u16;
+}
+
+pub fn write_request<T>(request: &T, correlation_id: u32, client_id: Option<&str>, buff: &mut Vec<u8>)
+    where T: ToKafka + ApiKey + ApiVersion
+{
     buff.clear();
-    //RequestOrResponse => Size (RequestMessage | ResponseMessage)
-    //  Size => int32
     buff.put_u32_be(0); // Size: will fix after message is serialized
-    buff.put_u16_be(api_key(request));
-    buff.put_u16_be(api_version(request));
+    buff.put_u16_be(T::api_key());
+    buff.put_u16_be(T::api_version());
     buff.put_u32_be(correlation_id);
     client_id.unwrap_or("k4r").to_kafka(buff);
     request.to_kafka(buff);
@@ -49,21 +45,11 @@ pub fn read_response<T>(buff: &mut Buf) -> (u32,T) where T: FromKafka {
 //
 // Private
 //
+impl ApiKey for MetadataRequest { fn api_key() -> u16 { 3 } }
+impl ApiKey for ListGroupRequest { fn api_key() -> u16 { 16 } }
 
-fn api_key(r: &Request) -> u16 {
-    match r {
-        Request::Metadata(_) => 3,
-        Request::ListGroup(_) => 16,
-    }
-}
-
-/// Supported Api version
-fn api_version(r: &Request) -> u16 {
-    match r {
-        Request::Metadata(_) => 0,
-        Request::ListGroup(_) => 0,
-    }
-}
+impl ApiVersion for MetadataRequest { fn api_version() -> u16 { 0 } }
+impl ApiVersion for ListGroupRequest { fn api_version() -> u16 { 0 } }
 
 //
 // Primitive types serializtion
@@ -124,19 +110,6 @@ impl<T> FromKafka for Vec<T> where T: FromKafka {
             res.push(T::from_kafka(buff));
         }
         res
-    }
-}
-
-//
-// Requests serializtion
-//
-
-impl ToKafka for Request {
-    fn to_kafka(&self, buff: &mut BufMut) {
-        match self {
-            Request::Metadata(request) => request.to_kafka(buff),
-            Request::ListGroup(request) => request.to_kafka(buff),
-        }
     }
 }
 
@@ -209,14 +182,6 @@ to_kafka!(ListGroupRequest{});
 // Response
 //
 
-/*
-ListGroups Response (Version: 0) => error_code [groups]
-  error_code => INT16
-  groups => group_id protocol_type
-    group_id => STRING
-    protocol_type => STRING
-*/
-trace_macros!(true);
 from_kafka!(ListGroupResponse {
     error_code: i16,
     groups : [ Group
@@ -225,4 +190,4 @@ from_kafka!(ListGroupResponse {
         }
     ]
 });
-trace_macros!(false);
+

@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use tokio::net::{TcpStream, ConnectFuture};
 use bytes::BufMut;
-use protocol::{write_request, read_response, Request, MetadataRequest, ListGroupResponse};
+use protocol::{write_request, read_response, MetadataRequest, ListGroupResponse};
 
 #[derive(Debug)]
 pub struct BrokerConnection {
@@ -52,7 +52,7 @@ mod tests {
 
                 // TODO: use some size-bound structure to serialize and fail if exceed buffer size
                 let mut buff = Vec::with_capacity(1024);
-                let request = Request::ListGroup(ListGroupRequest{});
+                let request = ListGroupRequest{};
                 //let r2 = Request::Metadata(MetadataRequest{topic_name: vec!["test1".to_string(), "test2".to_string()]});
                 write_request(&request, 11, None, &mut buff);
                 write_all(tcp, buff)
