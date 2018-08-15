@@ -1,6 +1,29 @@
 use super::api::*;
 use bytes::{Buf};
 
+// 3
+response!(MetadataResponse0 {
+    brokers: [Brokers],
+    topic_metadata: [TopicMetadata]
+});
+response!(Brokers {
+    node_id: i32,
+    host: String,
+    port: i32
+});
+response!(TopicMetadata{
+    error_code: i16,
+    topic: String,
+    partition_metadata: [PartitionMetadata]
+});
+response!(PartitionMetadata{
+    error_code: i16,
+    partition: i32,
+    leader: i32,
+    replicas: i32,
+    isr: i32
+});
+
 response!(ListOffsetsResponse0 {
     responses: [ Response {
         topic: String,

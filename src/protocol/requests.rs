@@ -1,6 +1,13 @@
 use super::api::*;
 use bytes::{BufMut};
 
+pub enum Request {
+    ListOffsetsRequest0,
+    ApiVersionsRequest,
+    MetadataRequest0,
+    ListGroupRequest0,
+}
+
 request!(ListOffsetsRequest0 {
     replica_id: u32,
      topics:
@@ -22,7 +29,7 @@ request!(ListOffsetsRequest0 {
 request!(ApiVersionsRequest {});
 
 request!(MetadataRequest0 {
-    topic_name: [String]
+    topics: [String]
 });
 
 

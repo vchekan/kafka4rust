@@ -3,9 +3,12 @@
 * Tracing
 
 (+) Tokio
-* Serde
+(+) Serde
 * Client API
+* CLI tools
 * Wrappers
     ** C#
     ** Java
 * Integration testing
+
+* Tcp: nodelay, experiment with tx,rx buffer size

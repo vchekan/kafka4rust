@@ -31,7 +31,7 @@ impl Broker {
         let addr = address.to_socket_addrs()?.next().expect(format!("Host '{}' not found", address).as_str());
         Ok(Broker {
             state: BrokerState::Initial,
-            connection: BrokerConnection::new(&addr)
+            connection: BrokerConnection::new(addr)
         })
     }
 }
