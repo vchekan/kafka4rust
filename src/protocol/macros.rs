@@ -38,7 +38,7 @@ macro_rules! response {
     ($sname:ident { $($f:ident : $tp:tt),* }) => {
         #[derive(Debug)]
         pub struct $sname {
-            $($f: get_type!($tp) ),*
+            $(pub $f: get_type!($tp) ),*
         }
 
         impl FromKafka for $sname {
