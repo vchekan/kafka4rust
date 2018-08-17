@@ -1,6 +1,7 @@
 #![feature(trace_macros)]
 #![feature(nll)]
 #![feature(rust_2018_preview)]
+#![feature(proc_macro, generators)]
 
 mod cluster;
 mod broker;
@@ -11,9 +12,13 @@ mod producer;
 
 extern crate failure;
 #[macro_use] extern crate failure_derive;
+
 extern crate tokio;
 extern crate tokio_io;
 extern crate futures;
+//extern crate futures_await as futures;
+
+
 extern crate bytes;
 extern crate byteorder;
 #[macro_use] extern crate derive_builder;

@@ -6,13 +6,18 @@ authors = ["Vadym Chekan <vadym.chekan@jet.com>"]
 [dependencies]
 failure = "~0.1"
 failure_derive = "~0.1"
+
 tokio = "~0.1"
 tokio-io = "~0.1"
 futures = "~0.1"
+#futures-await = "~0.1"
+
 bytes = "~0.4"
 byteorder = "~1.2"
-trust-dns-resolver = "~0.9"
+
+trust-dns-resolver = "0.10.0-alpha.2"
 
 derive_builder = "~0.5"
+
 log = "~0.4"
 clap = "^2.32.0"

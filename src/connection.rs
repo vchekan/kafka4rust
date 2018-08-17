@@ -1,12 +1,30 @@
 use std::net::SocketAddr;
-use tokio::net::{TcpStream, ConnectFuture};
-use protocol::{write_request, read_response, Response};
+use tokio::net::{TcpStream};
+use protocol::{Response};
 use futures::{
-    future::{Future, ok},
-    stream,
-    stream::{Stream, poll_fn}
+    future::{Future},
+    stream::{Stream}
 };
 use std::io;
+use std::sync::Once;
+use trust_dns_resolver::config::ResolverOpts;
+use trust_dns_resolver::config::ResolverConfig;
+use trust_dns_resolver::AsyncResolver;
+use protocol;
+
+// Static resolver
+static resolver: Option<AsyncResolver> = None; //AsyncResolver::new(ResolverConfig::default(), ResolverOpts::default());
+//static mut resolver: Option<AsyncResolver> = Some(AsyncResolver::new(ResolverConfig::default(), ResolverOpts::default()).expect("Failed to create resolver"));
+static INIT: Once = Once::new();
+fn get_resolver() -> AsyncResolver {
+    INIT.call_once(|| {
+        let (r, bg) = AsyncResolver::new(ResolverConfig::default(), ResolverOpts::default());
+        resolver = Some(r);
+        tokio::run(bg);
+    });
+    resolver.unwrap()
+}
+
 
 
 #[derive(Debug)]
@@ -42,6 +60,25 @@ impl BrokerConnection {
             addr,
             //state: ConnectionState::Connecting
         }
+    }
+
+    pub fn from_broker(broker: &protocol::Broker) -> impl Future<Item=BrokerConnection, Error=String> {
+        Self::from_host(&broker.host, broker.port as u16).
+            map(|addr|{
+                BrokerConnection {
+                    correlationId: 0,
+                    addr
+                }
+            })
+    }
+
+    pub fn from_host(host: &str, port: u16) -> impl Future<Item=SocketAddr, Error=String> {
+        get_resolver().lookup_ip(host).
+            map(|resp| {
+                let ip = resp.iter().next().unwrap();
+                SocketAddr::new(ip, port)
+            }).
+            map_err(|e| {e.to_string()})
     }
 
     fn connect(&self) -> impl Future<Item=TcpStream, Error=io::Error> {
@@ -81,11 +118,6 @@ mod tests {
     use std::net::ToSocketAddrs;
     use tokio;
     use std::env;
-    use tokio::prelude::*;
-    use tokio::io::{write_all, read_exact};
-    use byteorder::{ByteOrder, BigEndian};
-    use std::io::Cursor;
-    use protocol;
 
     #[test]
     fn it_works() {

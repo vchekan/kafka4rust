@@ -3,10 +3,10 @@ use bytes::{Buf};
 
 // 3
 response!(MetadataResponse0 {
-    brokers: [Brokers],
+    brokers: [Broker],
     topic_metadata: [TopicMetadata]
 });
-response!(Brokers {
+response!(Broker {
     node_id: i32,
     host: String,
     port: i32

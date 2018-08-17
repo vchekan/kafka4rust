@@ -1,6 +1,7 @@
 use tokio::prelude::*;
 use cluster::Cluster;
-use std::io;
+use futures::stream;
+use protocol;
 
 #[derive(Default, Builder)]
 #[builder(setter(into), default)]
@@ -21,10 +22,6 @@ pub struct Consumer {
     cluster: Cluster,
 }
 
-pub struct ConnectStateFuture {
-
-}
-
 impl Consumer {
     pub fn new(bootstrap: &str, topic: &str) -> Consumer {
         let config = ConsumerConfigBuilder::default().
@@ -38,19 +35,6 @@ impl Consumer {
         Consumer {config, cluster}
     }
 
-    pub fn connect(&mut self) -> impl Stream<Item=ConnectStateFuture, Error=()> {
-        debug!("Connecting");
-        stream::empty()
-    }
-
-    pub fn close(&mut self) -> impl Stream<Item=ConnectStateFuture, Error=()> {
-        stream::empty()
-    }
-
-    pub fn on_connect(&mut self) -> impl Stream<Item=ConnectStateFuture, Error=()> {
-        stream::empty()
-    }
-
     pub fn on_message(mut self) -> impl Stream<Item=Vec<Message>, Error=()> {
         /*stream::poll_fn(|| -> Poll<Option<Vec<Message>>, io::Error> {
             if self.
@@ -60,6 +44,28 @@ impl Consumer {
             let fut = future::ok((msg, consumer));
             Some(fut)
         })
+    }
+
+    // TODO: make Error something more meaningful (fault::)
+    pub fn consume(mut self, topics: &[&str]) -> impl Stream<Item=Vec<Message>, Error=String> {
+        stream::empty()
+        // TODO: can reuse bootstrap connection?
+        /*self.cluster.bootstrap(topics).
+            and_then(|meta| {
+                meta.topics
+            })
+     */   
+    }
+
+    fn connect_brokers(meta: protocol::MetadataResponse0) {
+        // map every broker into a stream
+        //meta.topic_metadata
+    }
+
+    fn connect_broker(broker: &protocol::Broker) {
+        //let addr =
+        //let addr = SocketAddr::new(addr, broker.port)
+        //BrokerConnection::new(addr)
     }
 }
 
