@@ -2,6 +2,7 @@
 #![feature(nll)]
 #![feature(rust_2018_preview)]
 #![feature(proc_macro, generators)]
+#![recursion_limit="128"]
 
 mod cluster;
 mod broker;

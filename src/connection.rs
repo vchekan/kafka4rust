@@ -11,20 +11,40 @@ use trust_dns_resolver::config::ResolverOpts;
 use trust_dns_resolver::config::ResolverConfig;
 use trust_dns_resolver::AsyncResolver;
 use protocol;
+use trust_dns_resolver::lookup_ip::LookupIp;
+use tokio::executor::current_thread;
 
 // Static resolver
-static resolver: Option<AsyncResolver> = None; //AsyncResolver::new(ResolverConfig::default(), ResolverOpts::default());
-//static mut resolver: Option<AsyncResolver> = Some(AsyncResolver::new(ResolverConfig::default(), ResolverOpts::default()).expect("Failed to create resolver"));
+static mut resolver: Option<AsyncResolver> = None;
 static INIT: Once = Once::new();
-fn get_resolver() -> AsyncResolver {
-    INIT.call_once(|| {
-        let (r, bg) = AsyncResolver::new(ResolverConfig::default(), ResolverOpts::default());
-        resolver = Some(r);
-        tokio::run(bg);
-    });
-    resolver.unwrap()
+fn resolve(addr: &str) -> impl Future<Item=LookupIp, Error=String> {
+    unsafe {
+        INIT.call_once(|| {
+            //let mut runtime = tokio::runtime::Runtime::new().unwrap();
+            println!("resolve:call_once()...");
+            let (r, bg) = AsyncResolver::new(ResolverConfig::default(), ResolverOpts::default());
+            println!(":1");
+            resolver = Some(r);
+            //let res = tokio::run(bg);
+            //current_thread::spawn(bg);
+            tokio::spawn(bg);
+            //runtime.spawn(bg);
+            println!(":2");
+            println!("resolve:call_once() done");
+            //res
+        });
+        resolver.as_ref().unwrap().lookup_ip(addr).
+            map_err(|e| { e.to_string() })
+    }
 }
 
+pub fn shutdown_resolver() {
+    unsafe {
+        if resolver.is_some() {
+            drop(resolver);
+        }
+    }
+}
 
 
 #[derive(Debug)]
@@ -73,8 +93,9 @@ impl BrokerConnection {
     }
 
     pub fn from_host(host: &str, port: u16) -> impl Future<Item=SocketAddr, Error=String> {
-        get_resolver().lookup_ip(host).
-            map(|resp| {
+        resolve(host).
+            map(move |resp| {
+                println!("Resolved");
                 let ip = resp.iter().next().unwrap();
                 SocketAddr::new(ip, port)
             }).
@@ -125,8 +146,8 @@ mod tests {
         println!("bootstrap: {}", bootstrap);
         let addr = format!("{}:9092", bootstrap);
         let addr = addr.to_socket_addrs().unwrap().next().expect(format!("Host '{}' not found", addr).as_str());
-        let conn = BrokerConnection::new(addr);
-        /*tokio::run(
+        /*let conn = BrokerConnection::new(addr);
+        tokio::run(
             conn.connect().
                 map_err(|e| {println!("Connection error: {}", e)}).
                 for_each(|evt| {

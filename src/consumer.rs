@@ -47,14 +47,14 @@ impl Consumer {
     }
 
     // TODO: make Error something more meaningful (fault::)
-    pub fn consume(mut self, topics: &[&str]) -> impl Stream<Item=Vec<Message>, Error=String> {
-        stream::empty()
+    pub fn consume(mut self, topics: &[&str]) -> impl Future<Item=protocol::MetadataResponse0, Error=String> {
+                                                    //Stream<Item=Vec<Message>, Error=String> {
+        //stream::empty()
         // TODO: can reuse bootstrap connection?
-        /*self.cluster.bootstrap(topics).
-            and_then(|meta| {
-                meta.topics
+        self.cluster.bootstrap(topics).
+            map(|meta| {
+                meta//.topics
             })
-     */   
     }
 
     fn connect_brokers(meta: protocol::MetadataResponse0) {
@@ -79,11 +79,16 @@ mod test {
         info!("info!");
         let consumer = Consumer::new("localhost", "test1");
 
-        let msgs = consumer.on_message().take(3).
+        /*let msgs = consumer.on_message().take(3).
             for_each(|m| {
                 println!("message: {:?}", m);
                 future::ok(())
             });
+            */
+        let msgs = consumer.consume(&vec!["test1"]).
+            map(|x| {
+                println!("consume: {:?}", x)
+            }).map_err(|e| {println!("Error: {:?}", e)});
 
         tokio::run(msgs);
     }

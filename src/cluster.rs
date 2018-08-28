@@ -38,6 +38,7 @@ impl Cluster {
 
     // TODO: Error: figure out how to use "failure"
     pub fn bootstrap(&self, topics: &[&str]) -> impl Future<Item=MetadataResponse0, Error=String> {
+        // copy topics
         let topics = topics.iter().map(|s| {s.to_string()}).collect();
 
         // TODO: port hardcoded
@@ -66,6 +67,7 @@ impl Cluster {
         }).
         */
         and_then(|tcp| {
+            println!("connected");
             // TODO: buffer management
             let mut buff = Vec::with_capacity(1024);
             let request = MetadataRequest0{topics};
@@ -99,19 +101,25 @@ mod tests {
     use super::*;
     use tokio;
     use futures::future::Future;
+    use tokio::runtime::Runtime;
+    use connection::shutdown_resolver;
 
     #[test]
     fn resolve() {
-        // TODO: host as Ip does not work
-        let mut cluster = Cluster::new(vec!["localhost".to_string()]);
-        let bs = cluster.bootstrap(&vec!["t1"]).
-            map(|x: MetadataResponse0| {
-                println!("Resolved: {:?}", x);
-            }).
-            map_err(|e| {
-                println!("Resolve failed: {}", e);
-            });
+        let p = future::lazy(||{
+            // TODO: host as Ip does not work
+            let mut cluster = Cluster::new(vec!["localhost".to_string()]);
+            let bs = cluster.bootstrap(&vec!["t1"]).
+                map(|x: MetadataResponse0| {
+                    println!("Resolved: {:?}", x);
+                    shutdown_resolver();
+                }).
+                map_err(|e| {
+                    println!("Resolve failed: {}", e);
+                });
+            bs
+        });
 
-        tokio::run(bs);
+        tokio::run(p);
     }
 }

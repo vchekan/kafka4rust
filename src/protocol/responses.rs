@@ -4,7 +4,7 @@ use bytes::{Buf};
 // 3
 response!(MetadataResponse0 {
     brokers: [Broker],
-    topic_metadata: [TopicMetadata]
+    topics: [TopicMetadata]
 });
 response!(Broker {
     node_id: i32,
