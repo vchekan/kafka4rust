@@ -2,7 +2,6 @@
 #![feature(nll)]
 #![feature(rust_2018_preview)]
 #![feature(proc_macro, generators)]
-#![recursion_limit="128"]
 
 mod cluster;
 mod broker;
@@ -17,11 +16,8 @@ extern crate failure;
 extern crate tokio;
 extern crate tokio_io;
 extern crate futures;
-//extern crate futures_await as futures;
-
 
 extern crate bytes;
 extern crate byteorder;
 #[macro_use] extern crate derive_builder;
 #[macro_use] extern crate log;
-extern crate trust_dns_resolver;

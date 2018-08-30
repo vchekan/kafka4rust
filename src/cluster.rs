@@ -10,6 +10,7 @@ use tokio::io::{write_all, read_exact};
 use std::io::Cursor;
 use byteorder::BigEndian;
 use bytes::ByteOrder;
+use std::net::SocketAddr;
 
 pub struct Cluster {
     brokers: Vec<Broker>,
@@ -42,13 +43,26 @@ impl Cluster {
         let topics = topics.iter().map(|s| {s.to_string()}).collect();
 
         // TODO: port hardcoded
-        let bootstraps = self.bootstrap.iter().map(|host| {BrokerConnection::from_host(host, 9092_u16)});
+        let bootstraps: Vec<SocketAddr> = self.bootstrap.iter().
+            filter_map(|host| {
+                BrokerConnection::from_host(host, 9092_u16)
+            }).collect();
+
+        println!("bootstraps: {:?}", bootstraps);
+
+        let bootstraps = bootstraps.iter().map(|addr|{
+            TcpStream::connect(&addr).map_err(|e| {
+                e.description().to_string()
+            })
+        });
+
+
         select_ok(bootstraps).
-            and_then(|(addr,_)|{
+            /*and_then(|(addr,_)|{
                 TcpStream::connect(&addr).map_err(|e| {
                     e.description().to_string()
                 })
-            }).
+            }). */
         /*resolver.and_then(move |r| {
             let bootstrap = names.iter().
                 map(|host|{ r.lookup_ip(host) });
@@ -66,7 +80,7 @@ impl Cluster {
             })
         }).
         */
-        and_then(|tcp| {
+        and_then(|(tcp,_)| {
             println!("connected");
             // TODO: buffer management
             let mut buff = Vec::with_capacity(1024);
@@ -101,18 +115,15 @@ mod tests {
     use super::*;
     use tokio;
     use futures::future::Future;
-    use tokio::runtime::Runtime;
-    use connection::shutdown_resolver;
 
     #[test]
     fn resolve() {
         let p = future::lazy(||{
             // TODO: host as Ip does not work
-            let mut cluster = Cluster::new(vec!["localhost".to_string()]);
+            let mut cluster = Cluster::new(vec!["localhost:9092".to_string()]);
             let bs = cluster.bootstrap(&vec!["t1"]).
                 map(|x: MetadataResponse0| {
                     println!("Resolved: {:?}", x);
-                    shutdown_resolver();
                 }).
                 map_err(|e| {
                     println!("Resolve failed: {}", e);

@@ -15,8 +15,6 @@ futures = "~0.1"
 bytes = "~0.4"
 byteorder = "~1.2"
 
-trust-dns-resolver = "0.10.0-alpha.2"
-
 derive_builder = "~0.5"
 
 log = "~0.4"
