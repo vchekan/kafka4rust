@@ -1,7 +1,7 @@
 #![feature(trace_macros)]
 #![feature(nll)]
 //#![feature(rust_2018_preview)]
-#![feature(proc_macro, generators)]
+#![feature(generators)]
 
 mod cluster;
 mod broker;

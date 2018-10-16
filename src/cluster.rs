@@ -4,8 +4,8 @@ use futures::future::*;
 use connection::BrokerConnection;
 use tokio::net::TcpStream;
 use std::error::Error;
-use protocol::{Requests, MetadataRequest0};
-use protocol::{write_request2, read_response2, /*read_response_by_request,*/ MetadataResponse0};
+use protocol::{MetadataRequest0};
+use protocol::{write_request, read_response, MetadataResponse0};
 use tokio::io::{write_all, read_exact};
 use std::io::Cursor;
 use byteorder::BigEndian;
@@ -53,7 +53,7 @@ impl Cluster {
             let mut buff = Vec::with_capacity(1024);
             let request = MetadataRequest0{topics};
             // TODO: correlation
-            write_request2(&request, 11, None, &mut buff);
+            write_request(&request, 11, None, &mut buff);
             write_all(tcp, buff).map_err(|e| {e.description().to_string()})
         }).
         and_then(|(tcp, mut buff)|{
@@ -69,7 +69,7 @@ impl Cluster {
                 map_err(|e| {e.description().to_string()})
         }).map(|(tcp, buff)| {
             let mut cursor = Cursor::new(buff);
-            let (corr_id, response) = read_response2::<MetadataResponse0>(&mut cursor);
+            let (corr_id, response) = read_response::<MetadataResponse0>(&mut cursor);
             println!("CorrId: {}, Response: {:#?}", corr_id, response);
             response
         })

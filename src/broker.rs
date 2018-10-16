@@ -5,17 +5,8 @@ use protocol;
 
 #[derive(Debug)]
 pub struct Broker {
-    //state: BrokerState,
     connection: BrokerConnection,
 }
-
-/*#[derive(Debug)]
-pub enum BrokerState {
-    Initial,
-    Connecting,
-    Connected,
-    Closed
-}*/
 
 #[derive(Debug, Fail)]
 pub enum BrokerError {

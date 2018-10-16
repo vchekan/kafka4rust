@@ -2,21 +2,6 @@ use super::api::*;
 use protocol::responses::*;
 use bytes::{BufMut};
 
-pub enum Requests {
-    //ListOffsetsRequest0,
-    ApiVersionsRequest(ApiVersionsRequest0),
-    MetadataRequest0(MetadataRequest0),
-    //ListGroupRequest0,
-}
-
-/*impl ToKafka for Requests {
-    fn to_kafka(&self, buff: &'_ mut BufMut) {
-        match self {
-            Requests::ApiVersionsRequest(req) => req.to_kafka(buff)
-        }
-    }
-}*/
-
 request!(ListOffsetsRequest0, ListOffsetsResponse0 {
     replica_id: u32,
      topics:
