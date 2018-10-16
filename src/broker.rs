@@ -1,21 +1,21 @@
 use connection::BrokerConnection;
-//use futures::future::Future;
-
-use failure::Error;
+use futures::future::Future;
+use std::io;
+use protocol;
 
 #[derive(Debug)]
 pub struct Broker {
-    state: BrokerState,
+    //state: BrokerState,
     connection: BrokerConnection,
 }
 
-#[derive(Debug)]
+/*#[derive(Debug)]
 pub enum BrokerState {
     Initial,
     Connecting,
     Connected,
     Closed
-}
+}*/
 
 #[derive(Debug, Fail)]
 pub enum BrokerError {
@@ -26,33 +26,40 @@ pub enum BrokerError {
 }
 
 impl Broker {
-    pub fn new(address: &str) -> Result<Broker,Error> {
+    pub fn new(address: &str) -> io::Result<Broker> {
         use std::net::ToSocketAddrs;
         let addr = address.to_socket_addrs()?.next().expect(format!("Host '{}' not found", address).as_str());
         Ok(Broker {
-            state: BrokerState::Initial,
+            //state: BrokerState::Initial,
             connection: BrokerConnection::new(addr)
         })
+    }
+
+    pub(crate) fn negotiate_api_versions(self) -> impl Future<Item=protocol::ApiVersionsResponse0,Error=String> {
+        self.connection.connect2().
+            map_err(|e| {e.to_string()}).
+            and_then(|conn| {
+                conn.request( protocol::ApiVersionsRequest0{})
+            }).map(|(conn, corr_id, response)| {response})
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    //use std::net::ToSocketAddrs;
-    //use tokio;
     use std::env;
 
     #[test]
     fn it_works() {
         let bootstrap = env::var("kafka-bootstrap").unwrap_or("localhost".to_string());
-        println!("bootstrap: {}", bootstrap);
         let addr = format!("{}:9092", bootstrap);
-        let broker = Broker::new(&addr);
+        let broker = Broker::new(&addr).expect("Broker creating failed");
         println!("broker: {:?}", broker);
 
-        //let kafkaClient =
+        let versions = broker.negotiate_api_versions().
+            map(|resp| {println!("{:?}", resp)}).
+            map_err(|e| {println!("Error: {}", e)});
 
-        //tokio::run(kafkaClient);
+        tokio::run(versions);
     }
 }

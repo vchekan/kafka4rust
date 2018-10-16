@@ -1,38 +1,43 @@
 use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
 use tokio::net::{TcpStream};
-use protocol::{Response};
+use tokio::io::{write_all, read_exact};
 use futures::{
     future::{Future},
     stream::{Stream}
 };
 use std::io;
 use protocol;
-use std::net::ToSocketAddrs;
+use protocol::{write_request2, read_response2 /*read_response_by_request*/};
+use std::error::Error;
+use byteorder::BigEndian;
+use bytes::ByteOrder;
+use std::io::Cursor;
+use std::collections::HashMap;
+use tokio::io::AsyncWrite;
+use bytes::Buf;
+use futures::Async;
 
 #[derive(Debug)]
 pub struct BrokerConnection {
     correlationId: u32,
     addr: SocketAddr,
-    //state: ConnectionState
 }
 
-#[derive(Debug)]
-enum ConnectionState {
-    Connecting(SocketAddr),
-    Connected(SocketAddr,TcpStream),
-    Repairing(SocketAddr),
-    Closing,
-    Closed
+//
+// States
+//
+pub struct Connected {
+    conn: BrokerConnection,
+    // TODO: this is None when tcp is moved into future
+    // and attached back when future is complete.
+    tcp: Option<TcpStream>,
 }
-
-#[derive(Debug)]
-enum ConnectionEvent {
-    Connected
-}
-
-enum ConnResponse {
-    Event(ConnectionEvent),
-    Response(Response),
+pub struct RequestSent {
+    //conn: BrokerConnection,
+    //tcp: TcpStream,
+    correlationId: u32,
+    //deserializer: (FnMut(Vec<u8>)),
 }
 
 impl BrokerConnection {
@@ -64,35 +69,58 @@ impl BrokerConnection {
         }
     }
 
-    fn connect(&self) -> impl Future<Item=TcpStream, Error=io::Error> {
+    pub fn connect(&self) -> impl Future<Item=TcpStream, Error=io::Error> {
         TcpStream::connect(&self.addr)
     }
 
-    /*
-    pub fn state(addr: SocketAddr, commands: impl Stream<Item=Request, Error=()>) -> impl Stream<Item=ConnectionEvent, Error=io::Error> {
-        stream::unfold(ConnectionState::Connecting(addr), move |state| {
-            match state {
-                ConnectionState::Connecting(addr) => {
-                    let connected = TcpStream::connect(&addr).
-                        map(move |tcp| { (ConnectionEvent::Connected, ConnectionState::Connected(addr, tcp)) });
-                    Some(connected)
-                }
-                ConnectionState::Connected(addr) => {
+    pub fn connect2(self) -> impl Future<Item=Connected, Error=io::Error> {
+        TcpStream::connect(&self.addr).
+            map(move |tcp| {Connected{conn: self, tcp: Some(tcp)}})
+    }
+}
 
-                }
-                _ => {
-                    panic!("Not implemented yet")
-                }
-            }
-        }).select(commands).map(|x| {
+impl Connected {
+    pub fn request<R>(mut self, request: R) -> impl Future<Item=(Self,u32,R::Response), Error=String>
+        where R: protocol::Request
+    {
+        // TODO: buffer management
+        let mut buff = Vec::with_capacity(1024);
+        write_request2(&request, self.conn.correlationId, None, &mut buff);
+        self.conn.correlationId += 1;
 
+        let (mut conn, tcp) = self.detach();
+
+        write_all(tcp, buff).
+        map_err(|e| {e.description().to_string()}).
+        and_then(|(tcp, mut buff)| {
+            println!("Written");
+            // Read length into buffer
+            buff.resize(4, 0_u8);
+            // TODO: ensure length is sane
+            let tcp = read_exact(tcp, buff).
+                map_err(|e| {e.description().to_string()});
+            tcp
+        }).and_then(|(tcp, mut buff)| {
+            let len = BigEndian::read_u32(&buff);
+            println!("Response len: {}", len);
+            buff.resize(len as usize, 0_u8);
+            read_exact(tcp, buff).
+                map_err(|e| { e.description().to_string()})
+        }).map(|(tcp, buff)| {
+            let mut cursor = Cursor::new(buff);
+            let (corr_id, response) = read_response2::<R::Response>(&mut cursor);
+            println!("CorrId: {}, Response: {:#?}", corr_id, response);
+            // Re-attach tcp to logical connection
+            conn.tcp = Some(tcp);
+            (conn, corr_id, response)
         })
     }
 
-    pub fn execute(&mut self, request: Request) -> impl Future<Item=Response, Error=()> {
-        self.
+    fn detach(mut self) -> (Self, TcpStream) {
+        let tcp = self.tcp;
+        self.tcp = None;
+        (self, tcp.unwrap())
     }
-    */
 }
 
 #[cfg(test)]

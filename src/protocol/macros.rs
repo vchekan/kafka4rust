@@ -12,7 +12,7 @@ macro_rules! request {
     // Array of complex type
     ( [$sname:ident $tp:tt]) => {request!($sname $tp);};
 
-    ($sname:ident { $($f:ident : $tp:tt),* } ) => {
+    ($sname:ident $(, $response:ident)* { $($f:ident : $tp:tt),* } ) => {
         pub struct $sname {
             $(pub $f : get_type!($tp) ),*
         }
@@ -22,6 +22,10 @@ macro_rules! request {
                 $(self.$f.to_kafka(buff);)*
             }
         }
+
+        $(impl Request for $sname {
+            type Response = $response;
+        })*
 
         $(request!($tp);)*
     };

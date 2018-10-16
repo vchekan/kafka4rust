@@ -1,6 +1,12 @@
 use super::api::*;
 use bytes::{Buf};
 
+#[derive(Debug)]
+pub enum Responses {
+    MetadataResponse0(MetadataResponse0),
+    ApiVersionsResponse0(ApiVersionsResponse0)
+}
+
 // 3
 response!(MetadataResponse0 {
     brokers: [Broker],
@@ -37,7 +43,7 @@ response!(ListOffsetsResponse0 {
     }]
 });
 
-response!(ListGroupResponse {
+response!(ListGroupResponse0 {
     error_code: i16,
     groups : [ Group
         { group_id: String
@@ -47,17 +53,17 @@ response!(ListGroupResponse {
 });
 
 // 18
+response!(ApiVersionsResponse0 {
+    error_code: i16,
+    api_versions: [ApiVersions]
+});
+
 response!(ApiVersions
     { api_key: i16
     , min_version: i16
     , max_version: i16
     }
 );
-
-response!(ApiVersionsResponse0 {
-    error_code: i16,
-    api_versions: [ApiVersions]
-});
 
 response!(ApiVersionsResponse1
     { error_code: i16
