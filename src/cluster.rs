@@ -48,7 +48,7 @@ impl Cluster {
         select_ok(bootstraps).
         // TODO: move it to BrokerConnection
         and_then(|(tcp,_)| {
-            println!("connected");
+            println!("Resolved and connected to {:?}", tcp);
             // TODO: buffer management
             let mut buff = Vec::with_capacity(1024);
             let request = MetadataRequest0{topics};

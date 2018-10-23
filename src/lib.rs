@@ -1,8 +1,3 @@
-#![feature(trace_macros)]
-#![feature(nll)]
-//#![feature(rust_2018_preview)]
-#![feature(generators)]
-
 mod cluster;
 mod broker;
 mod connection;

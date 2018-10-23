@@ -17,15 +17,10 @@ use std::io::Cursor;
 pub struct BrokerConnection {
     correlationId: u32,
     addr: SocketAddr,
-}
-
-//
-// States
-//
-pub struct Connected {
-    conn: BrokerConnection,
-    // TODO: this is None when tcp is moved into future
+    // This is None when tcp is moved into future
     // and attached back when future is complete.
+    // TODO: when use "Connected", as a state, then type system makes sure that
+    // no operation is performed on disconnected BrokerConnection.
     tcp: Option<TcpStream>,
 }
 
@@ -34,6 +29,7 @@ impl BrokerConnection {
         BrokerConnection {
             correlationId: 0,
             addr,
+            tcp: None
         }
     }
 
@@ -42,7 +38,8 @@ impl BrokerConnection {
             map(|addr|{
                 BrokerConnection {
                     correlationId: 0,
-                    addr
+                    addr,
+                    tcp: None
                 }
             })
     }
@@ -57,24 +54,20 @@ impl BrokerConnection {
         }
     }
 
-    pub fn connect(&self) -> impl Future<Item=TcpStream, Error=io::Error> {
-        TcpStream::connect(&self.addr)
-    }
-
-    pub fn connect2(self) -> impl Future<Item=Connected, Error=io::Error> {
+    pub fn connect(mut self) -> impl Future<Item=Self, Error=io::Error> {
         TcpStream::connect(&self.addr).
-            map(move |tcp| {Connected{conn: self, tcp: Some(tcp)}})
+            map(move |tcp| { self.tcp = Some(tcp); self })
     }
-}
+//}
 
-impl Connected {
+//impl Connected {
     pub fn request<R>(mut self, request: R) -> impl Future<Item=(Self,u32,R::Response), Error=String>
         where R: protocol::Request
     {
         // TODO: buffer management
         let mut buff = Vec::with_capacity(1024);
-        write_request(&request, self.conn.correlationId, None, &mut buff);
-        self.conn.correlationId += 1;
+        write_request(&request, self.correlationId, None, &mut buff);
+        self.correlationId += 1;
 
         let (mut conn, tcp) = self.detach();
 
@@ -97,6 +90,7 @@ impl Connected {
         }).map(|(tcp, buff)| {
             let mut cursor = Cursor::new(buff);
             let (corr_id, response) = read_response::<R::Response>(&mut cursor);
+            // TODO: check for response error
             println!("CorrId: {}, Response: {:#?}", corr_id, response);
             // Re-attach tcp to logical connection
             conn.tcp = Some(tcp);
@@ -108,6 +102,10 @@ impl Connected {
         let tcp = self.tcp;
         self.tcp = None;
         (self, tcp.unwrap())
+    }
+
+    fn attach(&mut self, tcp: TcpStream) {
+        self.tcp = Some(tcp);
     }
 }
 

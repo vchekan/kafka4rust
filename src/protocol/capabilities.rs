@@ -13,3 +13,11 @@ impl ApiVersion for ListGroupRequest0 { fn api_version() -> u16 { 0 } }
 // one request struct, 2 response versions
 impl ApiVersion for ApiVersionsRequest0 { fn api_version() -> u16 { 0 } }
 impl ApiVersion for ApiVersionsRequest1 { fn api_version() -> u16 { 1 } }
+
+/// (api_key, min_version, max_version)
+pub(crate) fn supported_versions() -> Vec<(i16,i16,i16)> {
+    vec![
+        (2, 0, 0),   // 2 ListOffset
+        (3, 0, 0),   // 3 MetadataRequest
+    ]
+}
