@@ -1,11 +1,12 @@
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
+use tokio::prelude::*;
 use tokio::net::{TcpStream};
 use tokio::io::{write_all, read_exact};
 use futures::{
-    future::{Future},
+    future::Future,
+    sync::mpsc,
 };
-use std::io;
 use protocol;
 use protocol::{write_request, read_response};
 use std::error::Error;
@@ -15,25 +16,21 @@ use std::io::Cursor;
 
 #[derive(Debug)]
 pub struct BrokerConnection {
-    correlationId: u32,
+    correlation_id: u32,
     addr: SocketAddr,
-    // This is None when tcp is moved into future
-    // and attached back when future is complete.
-    // TODO: when use "Connected", as a state, then type system makes sure that
-    // no operation is performed on disconnected BrokerConnection.
-    tcp: Option<TcpStream>,
 }
 
 impl BrokerConnection {
-    pub fn new(addr: SocketAddr) -> BrokerConnection {
+    /*pub fn new(addr: SocketAddr, rx: mpsc::UnboundedReceiver<Vec<u8>>) -> BrokerConnection {
         BrokerConnection {
             correlationId: 0,
             addr,
-            tcp: None
+            //tcp: None
+            rx
         }
-    }
+    }*/
 
-    pub fn from_broker(broker: &protocol::Broker) -> Option<BrokerConnection> {
+    /*pub fn from_broker(broker: &protocol::Broker) -> Option<BrokerConnection> {
         Self::from_host(&broker.host, broker.port as u16).
             map(|addr|{
                 BrokerConnection {
@@ -42,7 +39,7 @@ impl BrokerConnection {
                     tcp: None
                 }
             })
-    }
+    }*/
 
     pub fn from_host(host: &str, port: u16) -> Option<SocketAddr> {
         match host.to_socket_addrs() {
@@ -54,14 +51,33 @@ impl BrokerConnection {
         }
     }
 
-    pub fn connect(mut self) -> impl Future<Item=Self, Error=io::Error> {
-        TcpStream::connect(&self.addr).
-            map(move |tcp| { self.tcp = Some(tcp); self })
+    /// Returns (cmd_sender, response_receiver)
+    pub fn connect(addr: SocketAddr) -> impl Future<Item=(mpsc::UnboundedSender<Vec<u8>>, mpsc::UnboundedReceiver<Vec<u8>>), Error=()> {
+        let (cmd_sender, cmd_receiver) = mpsc::unbounded();
+        let (response_sender, response_receiver) = mpsc::unbounded();
+        TcpStream::connect(&addr).
+            // TODO: prevent thread from dying
+            map_err(move |e| {println!("Error {}", e);}).
+            map(move |tcp| {
+                let conn = BrokerConnection {
+                    correlation_id: 0,
+                    addr,
+                };
+                tokio::spawn(
+                    cmd_receiver.for_each(move |buff| {
+                        println!("Got buffer");
+                        // TODO: manage result
+                        let _res = response_sender.unbounded_send(buff);
+                        future::ok(())
+                    })
+                );
+                (cmd_sender, response_receiver)
+            })
     }
 //}
 
 //impl Connected {
-    pub fn request<R>(mut self, request: R) -> impl Future<Item=(Self,u32,R::Response), Error=String>
+/*    pub fn request<R>(mut self, request: R) -> impl Future<Item=(Self,u32,R::Response), Error=String>
         where R: protocol::Request
     {
         // TODO: buffer management
@@ -92,21 +108,10 @@ impl BrokerConnection {
             let (corr_id, response) = read_response::<R::Response>(&mut cursor);
             // TODO: check for response error
             println!("CorrId: {}, Response: {:#?}", corr_id, response);
-            // Re-attach tcp to logical connection
-            conn.tcp = Some(tcp);
             (conn, corr_id, response)
         })
     }
-
-    fn detach(mut self) -> (Self, TcpStream) {
-        let tcp = self.tcp;
-        self.tcp = None;
-        (self, tcp.unwrap())
-    }
-
-    fn attach(&mut self, tcp: TcpStream) {
-        self.tcp = Some(tcp);
-    }
+*/
 }
 
 #[cfg(test)]
@@ -122,8 +127,8 @@ mod tests {
         println!("bootstrap: {}", bootstrap);
         let addr = bootstrap.to_socket_addrs().unwrap().next().expect(format!("Host '{}' not found", bootstrap).as_str());
 
-        let conn = BrokerConnection::new(addr);
-        tokio::run(
+        let conn = BrokerConnection::connect(addr.clone());
+        /*tokio::run(
         conn.connect().
             map_err(|e| {
                 println!("Failed. {:?}", e);
@@ -131,6 +136,6 @@ mod tests {
             }).map(|tcp| {
                 println!("Connected: {:?}", tcp)
             })
-        );
+        );*/
     }
 }
