@@ -2,18 +2,18 @@ use connection::BrokerConnection;
 use futures::future::{self, Future};
 use std::io;
 use protocol;
-use protocol::write_request;
-use std::net::SocketAddr;
+use protocol::{write_request, read_response};
+use std::net::*;
 use futures::sync::mpsc::SendError;
 use tokio::prelude::*;
 use tokio;
+use tokio::io::{write_all, read_exact};
+use std::io::Cursor;
 
 #[derive(Debug)]
 pub struct Broker {
-    //connection: Option<BrokerConnection>,
     /// (api_key, agreed_version)
     negotiated_api_version: Vec<(i16,i16)>,
-    addr: SocketAddr,
     correlation_id: u32,
 }
 
@@ -26,16 +26,38 @@ pub enum BrokerError {
 }
 
 impl Broker {
-    pub fn new(address: &str) -> io::Result<Broker> {
+    /*pub fn new(address: &str) -> io::Result<Broker> {
         use std::net::ToSocketAddrs;
         let addr = address.to_socket_addrs()?.next().expect(format!("Host '{}' not found", address).as_str());
         Ok(Broker {
             negotiated_api_version: vec![],
             addr,
-            correlation_id: 0,
         })
+    }*/
+
+    pub(crate) fn connect(addr: &str) -> impl Future<Item=Self, Error=()> {
+        let addr: SocketAddr = addr.parse().expect("Can't parse address");
+        BrokerConnection::connect(addr.clone()).
+            and_then(|conn| {
+                let req = protocol::ApiVersionsRequest0 {};
+                let mut buf = Vec::with_capacity(1024);
+                // TODO: This is special case, we need correlationId and clientId before broker is created...
+                let correlation_id = 0;
+                let client_id = None;
+
+                write_request(&req, correlation_id, client_id, &mut buf);
+                conn.request(buf).
+                    map_err(|e| println!("Error {}", e))
+            }).map(|(conn, buf)| {
+                let mut cursor = Cursor::new(buf);
+                let (corr_id, response) = read_response::<protocol::ApiVersionsResponse0>(&mut cursor);
+                let negotiated_api_version = Broker::get_api_compatibility(&response);
+                Broker {negotiated_api_version, correlation_id: 1 }
+            })
+
     }
 
+    /*
     pub(crate) fn negotiate_api_versions(mut self) -> impl Future<Item=Self, Error=()> {
         let correlation_id = self.correlation_id;
         self.correlation_id += 1;
@@ -56,11 +78,14 @@ impl Broker {
                 write_request(&request, correlation_id, None, &mut buff);
                 // TODO: handle result
                 let _res = connect_request_sender.unbounded_send(buff);
-                connect_response_receiver.split()
+                connect_response_receiver.into_future().map(|(buff, receiver)| {
+
+                })
             })
     }
+    */
 
-    fn set_api_compatibility(&mut self, versions: &protocol::ApiVersionsResponse0) {
+    fn get_api_compatibility(them: &protocol::ApiVersionsResponse0) -> Vec<(i16,i16)> {
         //
         // them:  mn----mx
         // me  :             mn-------mx
@@ -69,8 +94,7 @@ impl Broker {
         // Empty join: max<min. For successful join: min<=max
         //
         let my_versions = protocol::supported_versions();
-        self.negotiated_api_version =
-            versions.api_versions.iter().map(|them| {
+            them.api_versions.iter().map(|them| {
                 match my_versions.iter().find(|(k,_,_)| {them.api_key == *k}) {
                     Some((k,mn,mx)) => {
                         let agreed_min = mn.max(&them.min_version);
@@ -83,7 +107,7 @@ impl Broker {
                     }
                     None => None
                 }
-            }).flatten().collect();
+            }).flatten().collect()
     }
 }
 
@@ -94,14 +118,14 @@ mod tests {
 
     #[test]
     fn negotiate_api_works() {
-        let bootstrap = env::var("kafka-bootstrap").unwrap_or("localhost".to_string());
+        let bootstrap = env::var("kafka-bootstrap").unwrap_or("127.0.0.1".to_string());
         let addr = format!("{}:9092", bootstrap);
-        let mut broker = Broker::new(&addr).expect("Broker creating failed");
-        println!("broker: {:?}", broker);
 
-        let versions = broker.negotiate_api_versions().
-            map(|br| {println!("Negotiated: {:#?}", br)});
-            //map_err(|e| {println!("Error: {}", e)});
+        let versions = Broker::connect(&addr).
+            map(|broker| {
+                //broker.negotiate_api_versions()
+                println!("Broker connected: {:?}", broker)
+            });
 
         tokio::run(versions);
     }

@@ -1,9 +1,10 @@
-mod cluster;
+//mod cluster;
 mod broker;
 mod connection;
 mod protocol;
-mod consumer;
-mod producer;
+//mod consumer;
+//mod producer;
+//mod write_all;
 
 extern crate failure;
 #[macro_use] extern crate failure_derive;
