@@ -1,4 +1,4 @@
-//mod cluster;
+mod cluster;
 mod broker;
 mod connection;
 mod protocol;
@@ -17,3 +17,4 @@ extern crate bytes;
 extern crate byteorder;
 #[macro_use] extern crate derive_builder;
 #[macro_use] extern crate log;
+extern crate simplelog;

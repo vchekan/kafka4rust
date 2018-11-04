@@ -25,26 +25,6 @@ pub struct BrokerConnection {
 }
 
 impl BrokerConnection {
-    /*pub fn new(addr: SocketAddr, rx: mpsc::UnboundedReceiver<Vec<u8>>) -> BrokerConnection {
-        BrokerConnection {
-            correlationId: 0,
-            addr,
-            //tcp: None
-            rx
-        }
-    }*/
-
-    /*pub fn from_broker(broker: &protocol::Broker) -> Option<BrokerConnection> {
-        Self::from_host(&broker.host, broker.port as u16).
-            map(|addr|{
-                BrokerConnection {
-                    correlationId: 0,
-                    addr,
-                    tcp: None
-                }
-            })
-    }*/
-
     pub fn from_host(host: &str, port: u16) -> Option<SocketAddr> {
         match host.to_socket_addrs() {
             Ok(addr) => addr.into_iter().next(),
@@ -56,11 +36,12 @@ impl BrokerConnection {
     }
 
     /// Returns (cmd_sender, response_receiver)
-    pub fn connect(addr: SocketAddr) -> impl Future<Item=Self, Error=()> {
+    pub fn connect(addr: SocketAddr) -> impl Future<Item=Self, Error=String> {
         TcpStream::connect(&addr).
             // TODO: prevent thread from dying
-            map_err(move |e| { println!("Error {}", e); }).
+            map_err(move |e| { e.description().to_string() }).
             map(move |tcp| {
+                debug!("Connected to {:?}", tcp);
                 BrokerConnection {
                     correlation_id: 0,
                     addr,
@@ -76,83 +57,28 @@ impl BrokerConnection {
     }
 
     pub fn request(mut self, buf: Vec<u8>) -> impl Future<Item=(Self,Vec<u8>), Error=String> {
+        debug!("Sending request[{}]", buf.len());
         let (mut conn, tcp) = self.detach();
         write_all(tcp, buf).
         and_then(|(tcp, mut buf)| {
+            debug!("Sent request, reading length...");
             // Read length into buffer
             buf.resize(4, 0_u8);
             // TODO: ensure length is sane
             read_exact(tcp, buf)
         }).and_then(|(tcp, mut buf)|{
             let len = BigEndian::read_u32(&buf);
-            println!("Response len: {}", len);
+            debug!("Response len: {}, reading body...", len);
             buf.resize(len as usize, 0_u8);
             read_exact(tcp, buf)
         }).map(move |(tcp, buf)| {
+            debug!("Read body [{}]", buf.len());
             conn.tcp = Some(tcp);
             (conn,buf)
         }).
             map_err(|e| { e.description().to_string()})
     }
 }
-
-/*
-impl Stream for BrokerConnection {
-    type Item = Vec<u8>;
-    type Error = String;
-
-    fn poll(&mut self) -> Result<Async<Option<<Self as Stream>::Item>>, <Self as Stream>::Error> {
-        match self.msg_rx.poll() {
-            Ok(Async::NotReady) => self.poll_response(),
-            Err(e) => Err(e),
-            Ok(Option(buff)) => {
-                match self.tcp.read_buf() {
-                    
-                };
-                self.poll_response()
-            },
-        }
-    }
-}
-*/
-
-//impl Connected {
-/*    fn request<R>(mut self, request: R) -> impl Future<Item=(Self,u32,R::Response), Error=String>
-        where R: protocol::Request
-    {
-        // TODO: buffer management
-        let mut buff = Vec::with_capacity(1024);
-        write_request(&request, self.correlation_id, None, &mut buff);
-        self.correlation_id += 1;
-
-        let tcp = self.tcp;
-        write_all(self.tcp, buff);
-        map_err(|e| {e.description().to_string()}).
-        and_then(|(tcp, mut buff)| {
-            println!("Written");
-            // Read length into buffer
-            buff.resize(4, 0_u8);
-            // TODO: ensure length is sane
-            let tcp = read_exact(tcp, buff).
-                map_err(|e| {e.description().to_string()});
-            tcp
-        }).and_then(|(tcp, mut buff)| {
-            let len = BigEndian::read_u32(&buff);
-            println!("Response len: {}", len);
-            buff.resize(len as usize, 0_u8);
-            read_exact(tcp, buff).
-                map_err(|e| { e.description().to_string()})
-        }).map(|(tcp, buff)| {
-            let mut cursor = Cursor::new(buff);
-            let (corr_id, response) = read_response::<R::Response>(&mut cursor);
-            // TODO: check correlationId
-            // TODO: check for response error
-            println!("CorrId: {}, Response: {:#?}", corr_id, response);
-            (tcp, corr_id, response)
-        })
-    }
-}
-*/
 
 #[cfg(test)]
 mod tests {

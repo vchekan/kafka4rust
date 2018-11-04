@@ -13,6 +13,7 @@ macro_rules! request {
     ( [$sname:ident $tp:tt]) => {request!($sname $tp);};
 
     ($sname:ident $(, $response:ident)* { $($f:ident : $tp:tt),* } ) => {
+        #[derive(Debug)]
         pub struct $sname {
             $(pub $f : get_type!($tp) ),*
         }

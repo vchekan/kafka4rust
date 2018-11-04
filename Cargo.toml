@@ -17,4 +17,5 @@ byteorder = "~1.2"
 derive_builder = "~0.5"
 
 log = "~0.4"
+simplelog = "~0.5"
 clap = "^2.32.0"
