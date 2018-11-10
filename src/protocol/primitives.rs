@@ -12,9 +12,21 @@ impl ToKafka for u32 {
     }
 }
 
+impl ToKafka for i32 {
+    fn to_kafka(&self, buff: &mut BufMut) {
+        buff.put_i32_be(*self);
+    }
+}
+
 impl ToKafka for u64 {
     fn to_kafka(&self, buff: &mut BufMut) {
         buff.put_u64_be(*self);
+    }
+}
+
+impl ToKafka for i16 {
+    fn to_kafka(&self, buff: &mut BufMut) {
+        buff.put_i16_be(*self);
     }
 }
 
@@ -37,6 +49,13 @@ impl<T> ToKafka for Vec<T> where T: ToKafka {
         for s in self {
             s.to_kafka(buff);
         }
+    }
+}
+
+/// Byte array specialization
+impl ToKafka for Vec<u8> {
+    fn to_kafka(&self, buff: &mut BufMut) {
+        buff.put_slice(&self);
     }
 }
 
@@ -70,6 +89,12 @@ impl FromKafka for i32 {
 impl FromKafka for u64 {
     fn from_kafka(buff: &mut Buf) -> Self {
         buff.get_u64_be()
+    }
+}
+
+impl FromKafka for i64 {
+    fn from_kafka(buff: &mut Buf) -> Self {
+        buff.get_i64_be()
     }
 }
 

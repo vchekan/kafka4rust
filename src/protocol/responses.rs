@@ -7,6 +7,20 @@ pub enum Responses {
     ApiVersionsResponse0(ApiVersionsResponse0)
 }
 
+// 0
+response!(ProduceResponse0 {
+    responses: [ProduceResponse]
+});
+response!(ProduceResponse {
+    topic: String,
+    partition_responses: [PartitionResponse]
+});
+response!(PartitionResponse {
+    partition: i32,
+    error_code: i16,
+    base_offset: i64
+});
+
 // 3
 response!(MetadataResponse0 {
     brokers: [Broker],
@@ -17,7 +31,7 @@ response!(Broker {
     host: String,
     port: i32
 });
-response!(TopicMetadata{
+response!(TopicMetadata {
     error_code: i16,
     topic: String,
     partition_metadata: [PartitionMetadata]
