@@ -3,7 +3,7 @@ mod broker;
 mod connection;
 mod protocol;
 //mod consumer;
-//mod producer;
+mod producer;
 //mod write_all;
 
 extern crate failure;

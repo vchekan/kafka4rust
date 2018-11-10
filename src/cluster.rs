@@ -19,7 +19,7 @@ pub struct Cluster {
 
 
 impl Cluster {
-    pub fn bootstrap(bootstrap: Vec<String>, topics: &[&str]) -> impl Future<Item=Self, Error=String> {
+    pub fn connect(bootstrap: &Vec<&str>, topics: &[&str]) -> impl Future<Item=Self, Error=String> {
         // copy topics
         let topics = topics.iter().map(|s| {s.to_string()}).collect();
 
@@ -52,7 +52,7 @@ mod tests {
     fn resolve() {
         CombinedLogger::init(vec![TermLogger::new(LevelFilter::Debug, Config::default()).unwrap()]);
         debug!("Starting test");
-        let cluster = Cluster::bootstrap(vec!["127.0.0.1:9092".to_string()], &vec!["t1"]).
+        let cluster = Cluster::connect(vec!["127.0.0.1:9092".to_string()], &vec!["t1"]).
             map(|cluster| {
                 info!("Bootstrapped: {:?}", cluster);
             }).
