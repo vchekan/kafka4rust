@@ -4,7 +4,6 @@ use std::io;
 use protocol;
 use protocol::*;
 use std::net::*;
-use futures::sync::mpsc::SendError;
 use tokio::prelude::*;
 use tokio;
 use tokio::io::{write_all, read_exact};

@@ -4,7 +4,6 @@ mod connection;
 mod protocol;
 //mod consumer;
 mod producer;
-//mod write_all;
 
 extern crate failure;
 #[macro_use] extern crate failure_derive;
@@ -12,6 +11,7 @@ extern crate failure;
 extern crate tokio;
 extern crate tokio_io;
 extern crate futures;
+extern crate futures_util;
 
 extern crate bytes;
 extern crate byteorder;

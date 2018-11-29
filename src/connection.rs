@@ -8,7 +8,6 @@ use tokio::{
 };
 use futures::{
     future::Future,
-    sync::mpsc,
 };
 use protocol;
 use protocol::{write_request, read_response};
