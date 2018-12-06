@@ -1,17 +1,4 @@
-use tokio::prelude::*;
-use broker::Broker;
-use futures::future::*;
-use connection::BrokerConnection;
-use tokio::net::TcpStream;
-use std::error::Error;
-use protocol::{self, write_request, read_response};
-use tokio::io::{write_all, read_exact};
-use std::io::Cursor;
-use byteorder::BigEndian;
-use bytes::ByteOrder;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
 
 /// Produce Request:
 ///     resolve topic metadata (if not already),
@@ -36,7 +23,7 @@ impl Cluster {
         Cluster { bootstrap, topic_meta: Arc::new(Mutex::new(Meta {})) }
     }
 
-    pub fn produce_request<R>(&self, request: R, brokerId: i32) {
+    pub fn produce_request<R>(&self, request: R, broker_id: i32) {
         let meta = self.topic_meta.lock().unwrap();
         //meta.topic_meta.get(brokerId).
     }

@@ -1,12 +1,8 @@
 use connection::BrokerConnection;
-use futures::future::{self, Future};
-use std::io;
+use futures::future::Future;
 use protocol;
 use protocol::*;
 use std::net::*;
-use tokio::prelude::*;
-use tokio;
-use tokio::io::{write_all, read_exact};
 use std::io::Cursor;
 
 #[derive(Debug)]

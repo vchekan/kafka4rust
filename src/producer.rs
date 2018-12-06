@@ -1,10 +1,6 @@
-use futures::future::Future;
 use cluster::Cluster;
-use std::sync::{Arc, Mutex};
-use futures::prelude::*;
 use futures::sync::BiLock;
 use std::collections::{VecDeque, HashMap};
-use futures::future::Either;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -86,12 +82,12 @@ trait Partitioner<M> where M: ToMessage {
 
 impl Producer {
     fn new(seed: &str) -> Self {
-        let (producerLock, timerLock) = BiLock::new(Buffer::new());
-        Self::start_timer(timerLock);
+        let (producer_lock, timer_lock) = BiLock::new(Buffer::new());
+        Self::start_timer(timer_lock);
         let cluster = Cluster::new(vec![seed.to_string()]);
         let topic_meta = HashMap::new();
         let unrouted_messages = VecDeque::new();
-        Producer {cluster, buffer: producerLock, topic_meta, unrouted_messages}
+        Producer {cluster, buffer: producer_lock, topic_meta, unrouted_messages}
     }
 
     /// Returns internal buffer status. If `false`, then internal buffer is overflown and `on_low_watermark` should be called
