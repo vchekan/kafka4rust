@@ -1,6 +1,6 @@
 use cluster::Cluster;
 use futures::sync::BiLock;
-use std::collections::{VecDeque, HashMap};
+use std::collections::{HashMap, VecDeque};
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -76,7 +76,10 @@ trait ToMessage {
     fn value(&self) -> Vec<u8>;
 }
 
-trait Partitioner<M> where M: ToMessage {
+trait Partitioner<M>
+where
+    M: ToMessage,
+{
     fn partition(message: &M) -> u32;
 }
 
@@ -87,23 +90,30 @@ impl Producer {
         let cluster = Cluster::new(vec![seed.to_string()]);
         let topic_meta = HashMap::new();
         let unrouted_messages = VecDeque::new();
-        Producer {cluster, buffer: producer_lock, topic_meta, unrouted_messages}
+        Producer {
+            cluster,
+            buffer: producer_lock,
+            topic_meta,
+            unrouted_messages,
+        }
     }
 
     /// Returns internal buffer status. If `false`, then internal buffer is overflown and `on_low_watermark` should be called
     /// to await for. If `true`, then buffer has space and more messages can be sent.
     /// Produce call will not send message but only buffer it. Sending message will happen periodically by internal timer.
     /// You can listen to sent message acknowledgement by listening to `on_message_ack`
-    fn produce<T,P>(&mut self, msg: &T, topic: String) //-> impl Future<Item=(),Error=()>
-        where T: ToMessage,
-              P: Partitioner<T>
+    fn produce<T, P>(&mut self, msg: &T, topic: String)
+    //-> impl Future<Item=(),Error=()>
+    where
+        T: ToMessage,
+        P: Partitioner<T>,
     {
         let partition = P::partition(msg);
         let msg = QueuedMessage {
             key: msg.key(),
             value: msg.value(),
             topic,
-            partition
+            partition,
         };
 
         /*
@@ -136,9 +146,7 @@ impl Producer {
 
     //fn close(&mut self) -> impl Future<Item=(), Error=String> {}
 
-    fn start_timer(timer_lock: BiLock<Buffer>) {
-
-    }
+    fn start_timer(timer_lock: BiLock<Buffer>) {}
 }
 
 ///                 | partition1 queue<messages>
@@ -160,15 +168,20 @@ struct PartitionMeta {
     leader: i32,
 }
 
-impl Buffer
-{
-    fn new() -> Self {Buffer {topics: HashMap::new()}}
+impl Buffer {
+    fn new() -> Self {
+        Buffer {
+            topics: HashMap::new(),
+        }
+    }
 
     /// Is async because topic metadata might require resolving.
     /// At the same time, we do not want to blow memory with awaiting tasks
     /// if resolving takes time and message velocity is high.
-    fn add<M>(&mut self, msg: &M, topic: &String) where M: ToMessage {
-
+    fn add<M>(&mut self, msg: &M, topic: &String)
+    where
+        M: ToMessage,
+    {
         unimplemented!();
         /*let partition = P::parttion(msg) % partition_count;
         let partitions = match self.topics.get(topic) {
@@ -184,18 +197,12 @@ impl Buffer
 //
 // Metadata discovery process
 //
-struct MetadataDiscovery {
-
-}
+struct MetadataDiscovery {}
 
 impl MetadataDiscovery {
     // TODO: how to stop when Producer is closed?
     // If recovery is in progress, it will prevent application from exiting.
-    fn start(topic: &String) {
-
-    }
-
-
+    fn start(topic: &String) {}
 }
 
 #[cfg(test)]

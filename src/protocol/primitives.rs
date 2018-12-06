@@ -1,7 +1,6 @@
-use bytes::{Buf, BufMut};
 use super::api::*;
+use bytes::{Buf, BufMut};
 use std::fmt::Debug;
-
 
 //
 // Primitive types serializtion
@@ -43,7 +42,10 @@ impl ToKafka for str {
     }
 }
 
-impl<T> ToKafka for Vec<T> where T: ToKafka {
+impl<T> ToKafka for Vec<T>
+where
+    T: ToKafka,
+{
     fn to_kafka(&self, buff: &mut BufMut) {
         buff.put_u32_be(self.len() as u32);
         for s in self {
@@ -104,7 +106,10 @@ impl FromKafka for i16 {
     }
 }
 
-impl<T> FromKafka for Vec<T> where T: FromKafka + Debug {
+impl<T> FromKafka for Vec<T>
+where
+    T: FromKafka + Debug,
+{
     fn from_kafka(buff: &mut Buf) -> Self {
         assert!(buff.remaining() >= 4);
         let len = buff.get_u32_be();
