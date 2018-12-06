@@ -1,7 +1,7 @@
-use connection::BrokerConnection;
+use crate::connection::BrokerConnection;
 use futures::future::Future;
-use protocol;
-use protocol::*;
+use crate::protocol;
+use crate::protocol::*;
 use std::io::Cursor;
 use std::net::*;
 
@@ -36,7 +36,7 @@ impl Broker {
             })
             .map(|(conn, buf)| {
                 let mut cursor = Cursor::new(buf);
-                let (corr_id, response) =
+                let (_corr_id, response) =
                     read_response::<protocol::ApiVersionsResponse0>(&mut cursor);
                 debug!("Got ApiVersionResponse {:?}", response);
                 let negotiated_api_version = Broker::get_api_compatibility(&response);

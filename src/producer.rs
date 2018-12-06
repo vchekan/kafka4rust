@@ -1,4 +1,4 @@
-use cluster::Cluster;
+use crate::cluster::Cluster;
 use futures::sync::BiLock;
 use std::collections::{HashMap, VecDeque};
 
@@ -109,7 +109,7 @@ impl Producer {
         P: Partitioner<T>,
     {
         let partition = P::partition(msg);
-        let msg = QueuedMessage {
+        let _msg = QueuedMessage {
             key: msg.key(),
             value: msg.value(),
             topic,
@@ -146,7 +146,7 @@ impl Producer {
 
     //fn close(&mut self) -> impl Future<Item=(), Error=String> {}
 
-    fn start_timer(timer_lock: BiLock<Buffer>) {}
+    fn start_timer(_timer_lock: BiLock<Buffer>) {}
 }
 
 ///                 | partition1 queue<messages>
@@ -178,7 +178,7 @@ impl Buffer {
     /// Is async because topic metadata might require resolving.
     /// At the same time, we do not want to blow memory with awaiting tasks
     /// if resolving takes time and message velocity is high.
-    fn add<M>(&mut self, msg: &M, topic: &String)
+    fn add<M>(&mut self, _msg: &M, _topic: &String)
     where
         M: ToMessage,
     {
@@ -202,7 +202,7 @@ struct MetadataDiscovery {}
 impl MetadataDiscovery {
     // TODO: how to stop when Producer is closed?
     // If recovery is in progress, it will prevent application from exiting.
-    fn start(topic: &String) {}
+    fn start(_topic: &String) {}
 }
 
 #[cfg(test)]
@@ -212,8 +212,8 @@ mod test {
     #[test]
     fn it_works() {
         let seed = "127.0.0.1:9092";
-        let topic = "test1";
-        let producer = Producer::new(&seed);
+        let _topic = "test1";
+        let _producer = Producer::new(&seed);
         /*Stream(1..100).map(|i| {
             let msg = sprintf("i:{}", i);
             producer.produce(msg)

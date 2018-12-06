@@ -24,8 +24,8 @@ impl Cluster {
         }
     }
 
-    pub fn produce_request<R>(&self, request: R, broker_id: i32) {
-        let meta = self.topic_meta.lock().unwrap();
+    pub fn produce_request<R>(&self, _request: R, _broker_id: i32) {
+        let _meta = self.topic_meta.lock().unwrap();
         //meta.topic_meta.get(brokerId).
     }
 
@@ -66,7 +66,7 @@ mod tests {
             TermLogger::new(LevelFilter::Debug, Config::default()).unwrap()
         ]);
         debug!("Starting test");
-        let cluster = Cluster::new(vec!["127.0.0.1:9092".to_string()]);
+        let _cluster = Cluster::new(vec!["127.0.0.1:9092".to_string()]);
         /*map(|cluster| {
             info!("Bootstrapped: {:?}", cluster);
         }).

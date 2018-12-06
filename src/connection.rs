@@ -1,8 +1,8 @@
 use byteorder::BigEndian;
 use bytes::ByteOrder;
 use futures::future::Future;
-use protocol;
-use protocol::{read_response, write_request};
+use crate::protocol;
+use crate::protocol::{read_response, write_request};
 use std::error::Error;
 use std::io::Cursor;
 use std::net::SocketAddr;
@@ -22,7 +22,7 @@ pub struct BrokerConnection {
 }
 
 impl BrokerConnection {
-    pub fn from_host(host: &str, port: u16) -> Option<SocketAddr> {
+    pub fn from_host(host: &str, _port: u16) -> Option<SocketAddr> {
         match host.to_socket_addrs() {
             Ok(addr) => addr.into_iter().next(),
             Err(e) => {
@@ -53,7 +53,7 @@ impl BrokerConnection {
         (self, tcp.unwrap())
     }
 
-    pub fn request(mut self, buf: Vec<u8>) -> impl Future<Item = (Self, Vec<u8>), Error = String> {
+    pub fn request(self, buf: Vec<u8>) -> impl Future<Item = (Self, Vec<u8>), Error = String> {
         debug!("Sending request[{}]", buf.len());
         let (mut conn, tcp) = self.detach();
         write_all(tcp, buf)
@@ -96,7 +96,7 @@ mod tests {
             .next()
             .expect(format!("Host '{}' not found", bootstrap).as_str());
 
-        let conn = BrokerConnection::connect(addr.clone());
+        let _conn = BrokerConnection::connect(addr.clone());
         /*tokio::run(
         conn.connect().
             map_err(|e| {
