@@ -1,81 +1,42 @@
 use byteorder::BigEndian;
 use bytes::ByteOrder;
-use futures::future::Future;
-use crate::protocol;
-use crate::protocol::{read_response, write_request};
-use std::error::Error;
-use std::io::Cursor;
+use std::io;
 use std::net::SocketAddr;
-use std::net::ToSocketAddrs;
-use tokio::{
-    self,
-    io::{read_exact, write_all},
-    net::TcpStream,
-    prelude::*,
-};
+
+use futures::io::{AsyncWriteExt, AsyncReadExt};
+use romio::tcp::TcpStream;
 
 #[derive(Debug)]
 pub struct BrokerConnection {
     correlation_id: u32,
     addr: SocketAddr,
-    tcp: Option<TcpStream>,
+    tcp: TcpStream,
 }
 
 impl BrokerConnection {
-    pub fn from_host(host: &str, _port: u16) -> Option<SocketAddr> {
-        match host.to_socket_addrs() {
-            Ok(addr) => addr.into_iter().next(),
-            Err(e) => {
-                println!("Error resolving '{}' {}", host, e.to_string());
-                None
-            }
-        }
+    pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
+        let tcp = await!(romio::tcp::TcpStream::connect(&addr))?;
+        Ok(BrokerConnection {
+            correlation_id: 0,
+            addr,
+            tcp,
+        })
     }
 
-    /// Returns (cmd_sender, response_receiver)
-    pub fn connect(addr: SocketAddr) -> impl Future<Item = Self, Error = String> {
-        TcpStream::connect(&addr).
-            // TODO: prevent thread from dying
-            map_err(move |e| { e.description().to_string() }).
-            map(move |tcp| {
-                debug!("Connected to {:?}", tcp);
-                BrokerConnection {
-                    correlation_id: 0,
-                    addr,
-                    tcp: Some(tcp),
-                }
-            })
-    }
-
-    fn detach(mut self) -> (Self, TcpStream) {
-        let tcp = self.tcp;
-        self.tcp = None;
-        (self, tcp.unwrap())
-    }
-
-    pub fn request(self, buf: Vec<u8>) -> impl Future<Item = (Self, Vec<u8>), Error = String> {
+    pub async fn request<'a>(&'a mut self, mut buf: &'a mut Vec<u8>) -> io::Result<()> {
         debug!("Sending request[{}]", buf.len());
-        let (mut conn, tcp) = self.detach();
-        write_all(tcp, buf)
-            .and_then(|(tcp, mut buf)| {
-                debug!("Sent request, reading length...");
-                // Read length into buffer
-                buf.resize(4, 0_u8);
-                // TODO: ensure length is sane
-                read_exact(tcp, buf)
-            })
-            .and_then(|(tcp, mut buf)| {
-                let len = BigEndian::read_u32(&buf);
-                debug!("Response len: {}, reading body...", len);
-                buf.resize(len as usize, 0_u8);
-                read_exact(tcp, buf)
-            })
-            .map(move |(tcp, buf)| {
-                debug!("Read body [{}]", buf.len());
-                conn.tcp = Some(tcp);
-                (conn, buf)
-            })
-            .map_err(|e| e.description().to_string())
+        await!(self.tcp.write_all(&buf))?;
+        debug!("Sent request, reading length...");
+        // Read length into buffer
+        buf.resize(4, 0_u8);
+        // TODO: ensure length is sane
+        await!(self.tcp.read_exact(&mut buf))?;
+        let len = BigEndian::read_u32(&buf);
+        debug!("Response len: {}, reading body...", len);
+        buf.resize(len as usize, 0_u8);
+        await!(self.tcp.read_exact(&mut buf))?;
+        debug!("Read body [{}]", buf.len());
+        Ok(())
     }
 }
 
@@ -84,10 +45,15 @@ mod tests {
     use super::*;
     use std::env;
     use std::net::ToSocketAddrs;
-    use tokio;
+    use futures::executor;
+    use simplelog::*;
 
     #[test]
     fn it_works() {
+        CombinedLogger::init(vec![
+            TermLogger::new(LevelFilter::Debug, Config::default()).unwrap()
+        ]).unwrap();
+
         let bootstrap = env::var("kafka-bootstrap").unwrap_or("localhost:9092".to_string());
         println!("bootstrap: {}", bootstrap);
         let addr = bootstrap
@@ -96,15 +62,10 @@ mod tests {
             .next()
             .expect(format!("Host '{}' not found", bootstrap).as_str());
 
-        let _conn = BrokerConnection::connect(addr.clone());
-        /*tokio::run(
-        conn.connect().
-            map_err(|e| {
-                println!("Failed. {:?}", e);
-                ()
-            }).map(|tcp| {
-                println!("Connected: {:?}", tcp)
-            })
-        );*/
+        executor::block_on(async {
+            let conn = await!(BrokerConnection::connect(addr)).unwrap();
+            info!("res: {:?}", conn);
+            ()
+        });
     }
 }

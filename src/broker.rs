@@ -1,8 +1,7 @@
 use crate::connection::BrokerConnection;
-use futures::future::Future;
 use crate::protocol;
 use crate::protocol::*;
-use std::io::Cursor;
+use std::io::{self, Cursor};
 use std::net::*;
 
 #[derive(Debug)]
@@ -10,7 +9,7 @@ pub(crate) struct Broker {
     /// (api_key, agreed_version)
     negotiated_api_version: Vec<(i16, i16)>,
     correlation_id: u32,
-    conn: Option<BrokerConnection>,
+    conn: BrokerConnection,
 }
 
 #[derive(Debug, Fail)]
@@ -20,38 +19,31 @@ pub enum BrokerError {
 }
 
 impl Broker {
-    pub fn connect(addr: &str) -> impl Future<Item = Self, Error = String> {
-        let addr: SocketAddr = addr.parse().expect("Can't parse address");
-        BrokerConnection::connect(addr.clone())
-            .and_then(|conn| {
-                let req = protocol::ApiVersionsRequest0 {};
-                let mut buf = Vec::with_capacity(1024);
-                // TODO: This is special case, we need correlationId and clientId before broker is created...
-                let correlation_id = 0;
-                let client_id = None;
+    pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
+        let mut conn = await!(BrokerConnection::connect(addr))?;
+        let req = protocol::ApiVersionsRequest0 {};
+        let mut buf = Vec::with_capacity(1024);
+        // TODO: This is special case, we need correlationId and clientId before broker is created...
+        let correlation_id = 0;
+        let client_id = None;
 
-                write_request(&req, correlation_id, client_id, &mut buf);
-                debug!("Connected to {:?}, Requesting {:?}", conn, req);
-                conn.request(buf)
-            })
-            .map(|(conn, buf)| {
-                let mut cursor = Cursor::new(buf);
-                let (_corr_id, response) =
-                    read_response::<protocol::ApiVersionsResponse0>(&mut cursor);
-                debug!("Got ApiVersionResponse {:?}", response);
-                let negotiated_api_version = Broker::get_api_compatibility(&response);
-                Broker {
-                    negotiated_api_version,
-                    correlation_id: 1,
-                    conn: Some(conn),
-                }
-            })
+        write_request(&req, correlation_id, client_id, &mut buf);
+        debug!("Connected to {:?}, Requesting {:?}", conn, req);
+        await!(conn.request(&mut buf))?;
+
+        let mut cursor = Cursor::new(buf);
+        let (_corr_id, response) =
+            read_response::<protocol::ApiVersionsResponse0>(&mut cursor);
+        debug!("Got ApiVersionResponse {:?}", response);
+        let negotiated_api_version = Broker::get_api_compatibility(&response);
+        Ok(Broker {
+            negotiated_api_version,
+            correlation_id: 1,
+            conn,
+        })
     }
 
-    pub fn request<R>(
-        mut self,
-        request: &R,
-    ) -> impl Future<Item = (Self, R::Response), Error = String>
+    pub async fn request<'a,R>(&'a mut self, request: &'a R) -> io::Result<R::Response>
     where
         R: protocol::Request,
     {
@@ -60,16 +52,13 @@ impl Broker {
         protocol::write_request(request, self.correlation_id, None, &mut buff);
         self.correlation_id += 1;
 
-        let (mut broker, conn) = self.detach();
-        conn.request(buff).map(move |(conn, buff)| {
-            let mut cursor = Cursor::new(buff);
-            let (corr_id, response) = read_response::<R::Response>(&mut cursor);
-            // TODO: check correlationId
-            // TODO: check for response error
-            debug!("CorrId: {}, Response: {:?}", corr_id, response);
-            broker.conn = Some(conn);
-            (broker, response)
-        })
+        await!(self.conn.request(&mut buff))?;
+        let mut cursor = Cursor::new(buff);
+        let (corr_id, response) = read_response::<R::Response>(&mut cursor);
+        // TODO: check correlationId
+        // TODO: check for response error
+        debug!("CorrId: {}, Response: {:?}", corr_id, response);
+        Ok(response)
     }
 
     fn get_api_compatibility(them: &protocol::ApiVersionsResponse0) -> Vec<(i16, i16)> {
@@ -100,28 +89,23 @@ impl Broker {
             .flatten()
             .collect()
     }
-
-    fn detach(mut self) -> (Self, BrokerConnection) {
-        let conn = self.conn;
-        self.conn = None;
-        (self, conn.unwrap())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::env;
+    use futures::executor;
 
     #[test]
     fn negotiate_api_works() {
         let bootstrap = env::var("kafka-bootstrap").unwrap_or("127.0.0.1".to_string());
         let addr = format!("{}:9092", bootstrap);
+        let addr: SocketAddr = addr.parse().unwrap();
 
-        let broker = Broker::connect(&addr)
-            .map(|broker| println!("Broker connected: {:?}", broker))
-            .map_err(|e| println!("Error: {}", e));
-
-        tokio::run(broker);
+        executor::block_on(async {
+            let broker = await!(super::Broker::connect(addr)).unwrap();
+            println!("Broker: {:?}", broker);
+        });
     }
 }
