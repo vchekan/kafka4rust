@@ -1,5 +1,4 @@
 #![feature(async_await, await_macro, futures_api)]
-#![feature(pin)]
 #![feature(arbitrary_self_types)]
 #![feature(mpsc_select)]
 
@@ -7,7 +6,7 @@ mod protocol;
 mod connection;
 mod broker;
 mod cluster;
-//mod producer;
+mod producer;
 //mod consumer;
 mod event;
 
