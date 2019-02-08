@@ -212,11 +212,10 @@ impl ProducerLoop {
 
     async fn handle_event<'a, M>(&'a mut self, e: Event<M>)
     where
-        M: Send + 'static,
+        M: 'static,
     {
         match e {
             Event::<M>::MessageIn(msg, topic, _partition) => {
-                debug!("handle_event: Got message");
                 await!(self.handle_message(&msg, &topic));
             }
             Event::<M>::Close => {
@@ -255,17 +254,14 @@ impl ProducerLoop {
 
     //fn start_timer(_timer_lock: BiLock<Buffer>) {}
 
-    async fn handle_message<'a, M>(&'a mut self, _msg: &'a M, topic: &'a str)
-    where
-        M: Send + 'static,
-    {
+    async fn handle_message<'a, M>(&'a mut self, _msg: &'a M, topic: &'a str) {
         match self.topic_meta.get(topic) {
             Some(_meta) => {
                 //buffer.add(&msg, &topic)
-                println!("Got message for topic: {}", topic);
+                debug!("Got message for topic: {}", topic);
             }
             None => {
-                println!("Topic not found: '{}'", topic);
+                debug!("Topic not found: '{}'", topic);
                 /*self.unrouted_messages.push_back(msg);
                 if self.unrouted_messages.len() > UNROUTED_BUFFER_MAX_MESSAGES {
                     Either::B(futures::future::ok(()))
