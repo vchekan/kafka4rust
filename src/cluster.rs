@@ -1,9 +1,6 @@
-use std::io;
-use futures::{
-    future,
-    stream::StreamExt
-};
 use crate::broker::Broker;
+use futures::{future, stream::StreamExt};
+use std::io;
 
 /// Produce Request:
 ///     resolve topic metadata (if not already),
@@ -35,9 +32,10 @@ impl Cluster {
     }*/
 
     pub async fn connect<'a>(bootstrap: &'a Vec<&'a str>) -> io::Result<Self> {
-        let connect_futures = bootstrap.iter().
-            filter_map(|addr| addr.parse().ok()).
-            map(|addr|Broker::connect(addr));
+        let connect_futures = bootstrap
+            .iter()
+            .filter_map(|addr| addr.parse().ok())
+            .map(|addr| Broker::connect(addr));
 
         // TODO: use `fold` to preserve and report last error if no result
         /*let resolved = futures::stream::futures_unordered(connectFutures).
@@ -76,17 +74,22 @@ impl Cluster {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use simplelog::*;
     use futures::executor;
+    use simplelog::*;
 
     #[test]
     fn resolve() {
-        CombinedLogger::init(vec![TermLogger::new(LevelFilter::Debug, Config::default()).unwrap()]).unwrap();
+        CombinedLogger::init(vec![
+            TermLogger::new(LevelFilter::Debug, Config::default()).unwrap()
+        ])
+        .unwrap();
         debug!("Starting test");
-        executor::block_on(async {
-            let addr = vec!["127.0.0.1:9092"];
-            let cluster = await!(Cluster::connect(&addr));
-            info!("Bootstrapped: {:?}", cluster);
-        });
+        executor::block_on(
+            async {
+                let addr = vec!["127.0.0.1:9092"];
+                let cluster = await!(Cluster::connect(&addr));
+                info!("Bootstrapped: {:?}", cluster);
+            },
+        );
     }
 }

@@ -3,7 +3,7 @@ use bytes::ByteOrder;
 use std::io;
 use std::net::SocketAddr;
 
-use futures::io::{AsyncWriteExt, AsyncReadExt};
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use romio::tcp::TcpStream;
 
 #[derive(Debug)]
@@ -43,16 +43,17 @@ impl BrokerConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::net::ToSocketAddrs;
     use futures::executor;
     use simplelog::*;
+    use std::env;
+    use std::net::ToSocketAddrs;
 
     #[test]
     fn it_works() {
         CombinedLogger::init(vec![
             TermLogger::new(LevelFilter::Debug, Config::default()).unwrap()
-        ]).unwrap();
+        ])
+        .unwrap();
 
         let bootstrap = env::var("kafka-bootstrap").unwrap_or("localhost:9092".to_string());
         println!("bootstrap: {}", bootstrap);
@@ -62,10 +63,12 @@ mod tests {
             .next()
             .expect(format!("Host '{}' not found", bootstrap).as_str());
 
-        executor::block_on(async {
-            let conn = await!(BrokerConnection::connect(addr)).unwrap();
-            info!("res: {:?}", conn);
-            ()
-        });
+        executor::block_on(
+            async {
+                let conn = await!(BrokerConnection::connect(addr)).unwrap();
+                info!("res: {:?}", conn);
+                ()
+            },
+        );
     }
 }

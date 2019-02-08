@@ -2,11 +2,11 @@
 #![feature(arbitrary_self_types)]
 #![feature(mpsc_select)]
 
-mod protocol;
-mod connection;
 mod broker;
 mod cluster;
+mod connection;
 mod producer;
+mod protocol;
 //mod consumer;
 mod event;
 

@@ -32,8 +32,7 @@ impl Broker {
         await!(conn.request(&mut buf))?;
 
         let mut cursor = Cursor::new(buf);
-        let (_corr_id, response) =
-            read_response::<protocol::ApiVersionsResponse0>(&mut cursor);
+        let (_corr_id, response) = read_response::<protocol::ApiVersionsResponse0>(&mut cursor);
         debug!("Got ApiVersionResponse {:?}", response);
         let negotiated_api_version = Broker::get_api_compatibility(&response);
         Ok(Broker {
@@ -43,7 +42,7 @@ impl Broker {
         })
     }
 
-    pub async fn request<'a,R>(&'a mut self, request: &'a R) -> io::Result<R::Response>
+    pub async fn request<'a, R>(&'a mut self, request: &'a R) -> io::Result<R::Response>
     where
         R: protocol::Request,
     {
@@ -94,8 +93,8 @@ impl Broker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
     use futures::executor;
+    use std::env;
 
     #[test]
     fn negotiate_api_works() {
@@ -103,9 +102,11 @@ mod tests {
         let addr = format!("{}:9092", bootstrap);
         let addr: SocketAddr = addr.parse().unwrap();
 
-        executor::block_on(async {
-            let broker = await!(super::Broker::connect(addr)).unwrap();
-            println!("Broker: {:?}", broker);
-        });
+        executor::block_on(
+            async {
+                let broker = await!(super::Broker::connect(addr)).unwrap();
+                println!("Broker: {:?}", broker);
+            },
+        );
     }
 }
