@@ -1,15 +1,16 @@
 use std::collections::{HashMap, VecDeque};
 use crate::cluster::Cluster;
-use std::thread;
-use futures::{Future, StreamExt, Sink, SinkExt};
+use futures::{Future, FutureExt, Stream, StreamExt, SinkExt};
 use futures::prelude::*;
-use futures::stream::*;
 use futures::channel::mpsc;
-use futures::executor::LocalPool;
 use futures::task::SpawnExt;
 use futures::executor::LocalSpawner;
 use std::fmt::Debug;
-use futures::task::LocalSpawn;
+use std::pin::Pin;
+use futures::Poll;
+use futures::task::LocalWaker;
+use futures::channel::mpsc::Sender;
+use futures::channel::mpsc::UnboundedReceiver;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -84,6 +85,11 @@ use futures::task::LocalSpawn;
 /// listen to overflow messages from buffer and suspend receiving messages from app when in overflow
 /// state.
 ///
+/// Q: Who is doing partitioning, buffer or Producer?
+/// A: unresolved data can be stored in unresolved buffer. Then it makes more sense to do
+/// partitioning in buffer. But on the other side buffering of unresolved, it might be considered
+/// a "buffer bloat" antipattern, robbing application from useful information and possibility to act.
+///
 /// Topic metadata discovery design: when new topic is required or partition has failed, a message is sent to
 /// topic metadata discovery process. When Metadata discovery process receive topic metadata, it
 /// publish it to Producer, which in turn, updates Buffer.
@@ -94,7 +100,7 @@ pub trait ToMessage : Send {
     fn value(&self) -> Vec<u8>;
 }
 
-trait Partitioner<M>
+pub trait Partitioner<M>
     where
         M: ToMessage,
 {
@@ -108,12 +114,11 @@ pub struct Producer<M> where M: ToMessage {
 }
 
 /// Internal Producer structure which is going to be moved to execution loop.
-struct ProducerImpl<M> where M: ToMessage {
+struct ProducerLoop {
     cluster: Cluster,
-    buffer: Buffer,
     topic_meta: HashMap<String, Vec<PartitionMeta>>,
-
-    events: mpsc::UnboundedReceiver<Event<M>>,
+    buffer: Buffer,
+    app_tx: mpsc::UnboundedSender<AppEvent>
 }
 
 /// Serialized message with topic and partition preserved because we need them in case topic
@@ -128,22 +133,26 @@ struct QueuedMessage {
 //
 // Implementations
 //
-impl<M> Producer<M> where M: ToMessage + 'static + Debug {
+impl<M> Producer<M> where
+    M: ToMessage + 'static + Debug
+{
     pub fn new(seed: &str, pool: &mut LocalSpawner) -> (Self, mpsc::UnboundedReceiver<AppEvent>) {
         // TODO: unbounded is dangerous
         let (app_cmd_channel, events) = mpsc::unbounded();
-        let cmd_channel = ProducerImpl::new(seed, app_cmd_channel, pool);
+        let cmd_channel = ProducerLoop::start(seed, app_cmd_channel, pool);
         let producer = Producer { cmd_channel, closed: false };
         (producer, events)
     }
 
     /// Will panic if called after `close()`
-    pub fn send(&mut self, msg: M, topic: String) -> impl Future + '_ {
+    pub fn send<P: Partitioner<M>>(&mut self, msg: M, topic: String) -> impl Future + '_ {
         if self.closed {
             panic!("Can't call send() after close()");
         }
 
-        self.cmd_channel.send(Event::MessageIn(msg, topic))
+        let partition = P::partition(&msg);
+
+        self.cmd_channel.send(Event::MessageIn(msg, topic, partition))
     }
 
     async fn close(&mut self) -> Result<(), mpsc::SendError> {
@@ -153,8 +162,8 @@ impl<M> Producer<M> where M: ToMessage + 'static + Debug {
 }
 
 #[derive(Debug)]
-enum Event<M> where M: ToMessage {
-    MessageIn(M, String),
+enum Event<M> {
+    MessageIn(M, String, u32),
     Close,
 }
 
@@ -168,39 +177,49 @@ pub enum AppEvent {
     Closed
 }
 
-impl<M> ProducerImpl<M> where M: ToMessage + 'static + Debug {
-    fn new(seed: &str, app_cmd_channel: mpsc::UnboundedSender<AppEvent>, pool: &mut LocalSpawner) -> mpsc::UnboundedSender<Event<M>> {
-        let (data_sender, data_receiver) = mpsc::unbounded();
+impl ProducerLoop
+{
+    fn start<M: Send + 'static>(seed: &str, app_tx: mpsc::UnboundedSender<AppEvent>, pool: &mut LocalSpawner) -> mpsc::UnboundedSender<Event<M>>
+    {
+        let (data_sender, mut data_receiver) = mpsc::unbounded();
         let seed = seed.to_string();
 
-        let producer_loop = async {
-            debug!("Started producer_loop");
-            let cluster = Cluster::new(vec![seed]);
-            let topic_meta = HashMap::new();
-            let producer = ProducerImpl {
-                cluster,
+        let producer_loop = async move {
+            let mut producer = ProducerLoop {
+                cluster: Cluster::new(vec![seed]),
+                topic_meta: HashMap::new(),
                 buffer: Buffer::new(),
-                topic_meta,
-                events: data_receiver,
+                app_tx
             };
 
-            debug!("Listening to events");
-            await!(producer.events.
-                for_each(move |e| {
-                    match e {
-                        Event::MessageIn(msg, topic) => debug!("Got message"),
-                        Event::Close => {
-                            debug!("Got Close");
-                            app_cmd_channel.unbounded_send(AppEvent::Closed);
-                        },
-                    }
-                    future::ready(())
-                })
-            );
+            loop {
+                if let Some(e) = await!(data_receiver.next()) {
+                    // TODO: any chance to pass event's reference?
+                    await!(producer.handle_event(e));
+                } else {
+                    debug!("Event channel closed, exiting producer loop");
+                }
+            }
         };
 
         pool.spawn(producer_loop).expect("Spawn failed");
         data_sender
+    }
+
+    async fn handle_event<'a, M>(&'a mut self, e: Event<M>)
+        where M: Send + 'static
+    {
+        match e {
+            Event::<M>::MessageIn(msg, topic, partition) => {
+                debug!("handle_event: Got message");
+                await!(self.handle_message(&msg, &topic));
+            },
+            Event::<M>::Close => {
+                debug!("handle_event: Got Close");
+                self.app_tx.unbounded_send(AppEvent::Closed).
+                    expect("Failed to send Close signal to the app");
+            },
+        }
     }
 
     /*
@@ -231,8 +250,10 @@ impl<M> ProducerImpl<M> where M: ToMessage + 'static + Debug {
     //fn start_timer(_timer_lock: BiLock<Buffer>) {}
 
 
-    fn handle_message(&mut self, msg: M, topic: String) {
-        match self.topic_meta.get(&topic) {
+    async fn handle_message<'a, M>(&'a mut self, msg: &'a M, topic: &'a String)
+        where M: Send + 'static
+    {
+        match self.topic_meta.get(topic) {
             Some(meta) => {
                 //buffer.add(&msg, &topic)
                 println!("Got message for topic: {}", topic);
@@ -280,19 +301,22 @@ impl Buffer {
     /// Is async because topic metadata might require resolving.
     /// At the same time, we do not want to blow memory with awaiting tasks
     /// if resolving takes time and message velocity is high.
-    fn add<M>(&mut self, _msg: &M, _topic: &String)
+    fn add<M>(&mut self, msg: &M, topic: String, partition: u32)
     where
         M: ToMessage,
     {
-        unimplemented!();
-        /*let partition = P::parttion(msg) % partition_count;
-        let partitions = match self.topics.get(topic) {
-            Some(partitions) => partitions,
+        //let partition = P::parttion(msg) % partition_count;
+        let partitions = match self.topics.get(&topic) {
+            Some(partitions) => {
+                partitions
+            },
             None => {
-                let partitions = vec![];
-                self.topics.insert(partitions);
+                unimplemented!();
+                //&vec![]
+                //let partitions = vec![PartitionQueue{}];
+                //self.topics.insert(topic, partitions);
             }
-        };*/
+        };
     }
 }
 
@@ -337,11 +361,19 @@ impl ToMessage for StringMessage {
     }
 }
 
+
 #[cfg(test)]
 mod test {
     use super::*;
-    use futures::executor;
     use simplelog::*;
+    use futures::executor::LocalPool;
+
+    struct P1 {}
+    impl Partitioner<StringMessage> for P1 {
+        fn partition(message: &StringMessage) -> u32 {
+            5
+        }
+    }
 
     #[test]
     fn it_works() {
@@ -349,7 +381,7 @@ mod test {
             TermLogger::new(LevelFilter::Debug, Config::default()).unwrap()
         ]).unwrap();
 
-        let mut localPool: LocalPool = LocalPool::new();
+        let mut localPool = LocalPool::new();
         let mut spawner = localPool.spawner();
          localPool.run_until(async {
             let seed = "127.0.0.1:9092";
@@ -360,7 +392,7 @@ mod test {
             for i in 1..100 {
                 let msg = format!("i:{}" , i);
                 let msg = StringMessage{key: i.to_string(), value: msg};
-                await!(producer.send( msg, "topic1".to_string()));
+                await!(producer.send::<P1>( msg, "topic1".to_string()));
             };
             await!(producer.close()).expect("Failure when closing producer");
 
