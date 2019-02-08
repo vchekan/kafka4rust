@@ -1,16 +1,10 @@
 use crate::cluster::Cluster;
 use futures::channel::mpsc;
-use futures::channel::mpsc::Sender;
-use futures::channel::mpsc::UnboundedReceiver;
 use futures::executor::LocalSpawner;
-use futures::prelude::*;
-use futures::task::LocalWaker;
 use futures::task::SpawnExt;
-use futures::Poll;
-use futures::{Future, FutureExt, SinkExt, Stream, StreamExt};
+use futures::{future, Future, SinkExt, StreamExt};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
-use std::pin::Pin;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -221,7 +215,7 @@ impl ProducerLoop {
         M: Send + 'static,
     {
         match e {
-            Event::<M>::MessageIn(msg, topic, partition) => {
+            Event::<M>::MessageIn(msg, topic, _partition) => {
                 debug!("handle_event: Got message");
                 await!(self.handle_message(&msg, &topic));
             }
@@ -261,12 +255,12 @@ impl ProducerLoop {
 
     //fn start_timer(_timer_lock: BiLock<Buffer>) {}
 
-    async fn handle_message<'a, M>(&'a mut self, msg: &'a M, topic: &'a String)
+    async fn handle_message<'a, M>(&'a mut self, _msg: &'a M, topic: &'a str)
     where
         M: Send + 'static,
     {
         match self.topic_meta.get(topic) {
-            Some(meta) => {
+            Some(_meta) => {
                 //buffer.add(&msg, &topic)
                 println!("Got message for topic: {}", topic);
             }
@@ -313,12 +307,12 @@ impl Buffer {
     /// Is async because topic metadata might require resolving.
     /// At the same time, we do not want to blow memory with awaiting tasks
     /// if resolving takes time and message velocity is high.
-    fn add<M>(&mut self, msg: &M, topic: String, partition: u32)
+    fn add<M>(&mut self, _msg: &M, topic: String, _partition: u32)
     where
         M: ToMessage,
     {
         //let partition = P::parttion(msg) % partition_count;
-        let partitions = match self.topics.get(&topic) {
+        let _partitions = match self.topics.get(&topic) {
             Some(partitions) => partitions,
             None => {
                 unimplemented!();

@@ -8,7 +8,6 @@ mod connection;
 mod producer;
 mod protocol;
 //mod consumer;
-mod event;
 
 extern crate failure;
 #[macro_use]

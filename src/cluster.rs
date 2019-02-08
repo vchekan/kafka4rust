@@ -31,11 +31,11 @@ impl Cluster {
         //meta.topic_meta.get(brokerId).
     }*/
 
-    pub async fn connect<'a>(bootstrap: &'a Vec<&'a str>) -> io::Result<Self> {
+    pub async fn connect<'a>(bootstrap: &'a [&'a str]) -> io::Result<Self> {
         let connect_futures = bootstrap
             .iter()
             .filter_map(|addr| addr.parse().ok())
-            .map(|addr| Broker::connect(addr));
+            .map(Broker::connect);
 
         // TODO: use `fold` to preserve and report last error if no result
         /*let resolved = futures::stream::futures_unordered(connectFutures).
