@@ -5,10 +5,23 @@
 (+) Tokio
 (+) Serde
 * Client API
-* CLI tools
+  ** Producer
+  ** Consumer
+  ** Admin
 * Wrappers
     ** C#
     ** Java
 * Integration testing
-
 * Tcp: nodelay, experiment with tx,rx buffer size
+* Dear IMGUI UI
+* Adaptive buffer size
+* Open Tracing
+* Trained dictionary for lz4
+* Stats about producer/consumer buffers waiting, server throttling
+
+== Projects
+* CLI tools
+* Wireshark decoder
+* Compaction and record batch analyzer
+* Enterprise UI
+* FS adapter
