@@ -8,6 +8,9 @@ mod connection;
 mod producer;
 mod protocol;
 //mod consumer;
+mod timer;
+mod bichannel;
+mod futures_union;
 
 extern crate failure;
 #[macro_use]

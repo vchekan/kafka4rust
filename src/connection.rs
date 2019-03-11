@@ -40,6 +40,32 @@ impl BrokerConnection {
     }
 }
 
+/*pub(crate) struct Pool {
+
+}
+
+impl Pool {
+    fn add(conn: BrokerConnection) {
+        unimplemented!();
+    }
+
+    fn any() -> ConnectionGuard {
+
+    }
+}
+
+pub(crate) struct ConnectionGuard<'p,'c> {
+    pool: &'p Pool,
+    conn: &'c BrokerConnection
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        // return connection to Pool
+        unimplemented!()
+    }
+}*/
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -43,6 +43,20 @@ use std::fmt::Debug;
 /// When broker failover happen, we need to re-discover topic metadata anyway, so we are not simplifying anything
 /// by binding topic to producer at init time.
 ///
+///    client
+///      ^
+///      |
+///      v
+///   producer/buffer <-----o
+///      ^                  |
+///      |                  |
+///      v                  |
+///   topic resolver <--o   |
+///                     |   |
+///                     v   v
+///                broker connection
+///
+/// 
 /// `Close` design
 /// Have `close()` return future?
 /// Have data channel to return Closed event?
@@ -112,8 +126,7 @@ where
 
 /// Internal Producer structure which is going to be moved to execution loop.
 struct ProducerLoop {
-    cluster: Cluster,
-    topic_meta: HashMap<String, Vec<PartitionMeta>>,
+    //cluster: Cluster,
     buffer: Buffer,
     app_tx: mpsc::UnboundedSender<AppEvent>,
 }
@@ -136,13 +149,13 @@ where
 {
     pub fn new(seed: &str, pool: &mut LocalSpawner) -> (Self, mpsc::UnboundedReceiver<AppEvent>) {
         // TODO: unbounded is dangerous
-        let (app_cmd_channel, events) = mpsc::unbounded();
-        let cmd_channel = ProducerLoop::start(seed, app_cmd_channel, pool);
+        let (response_tx, response_rx) = mpsc::unbounded();
+        let cmd_channel = ProducerLoop::start(seed, response_tx, pool);
         let producer = Producer {
             cmd_channel,
             closed: false,
         };
-        (producer, events)
+        (producer, response_rx)
     }
 
     /// Will panic if called after `close()`
@@ -183,15 +196,16 @@ impl ProducerLoop {
     fn start<M: Send + 'static>(
         seed: &str,
         app_tx: mpsc::UnboundedSender<AppEvent>,
-        pool: &mut LocalSpawner,
+        spawner: &mut LocalSpawner,
     ) -> mpsc::UnboundedSender<Event<M>> {
         let (data_sender, mut data_receiver) = mpsc::unbounded();
         let seed = seed.to_string();
 
+        //let (cluster_tx, cluster_rx) = mpsc::unbounded();
+        let cluster_channel = Cluster::new(vec![seed], /*cluster_rx,*/ spawner);
         let producer_loop = async move {
             let mut producer = ProducerLoop {
-                cluster: Cluster::new(vec![seed]),
-                topic_meta: HashMap::new(),
+                //cluster,
                 buffer: Buffer::new(),
                 app_tx,
             };
@@ -206,7 +220,7 @@ impl ProducerLoop {
             }
         };
 
-        pool.spawn(producer_loop).expect("Spawn failed");
+        spawner.spawn(producer_loop).unwrap();
         data_sender
     }
 
@@ -246,31 +260,7 @@ impl ProducerLoop {
 
     }*/
 
-    // TODO: do it as OneTimeShot
-    //fn on_low_watermark() -> impl Future<Item=(), Error=()> {}
-
-    // TODO: bounded stream?
-    //fn on_message_ack() -> {}
-
-    //fn start_timer(_timer_lock: BiLock<Buffer>) {}
-
     async fn handle_message<'a, M>(&'a mut self, _msg: &'a M, topic: &'a str) {
-        match self.topic_meta.get(topic) {
-            Some(_meta) => {
-                //buffer.add(&msg, &topic)
-                debug!("Got message for topic: {}", topic);
-            }
-            None => {
-                debug!("Topic not found: '{}'", topic);
-                /*self.unrouted_messages.push_back(msg);
-                if self.unrouted_messages.len() > UNROUTED_BUFFER_MAX_MESSAGES {
-                    Either::B(futures::future::ok(()))
-                } else {
-                    Either::B(futures::future::ok(()))
-                }
-                */
-            }
-        }
     }
 }
 
@@ -381,9 +371,9 @@ mod test {
         ])
         .unwrap();
 
-        let mut localPool = LocalPool::new();
-        let mut spawner = localPool.spawner();
-        localPool.run_until(
+        let mut local_pool = LocalPool::new();
+        let mut spawner = local_pool.spawner();
+        local_pool.run_until(
             async {
                 let seed = "127.0.0.1:9092";
                 let _topic = "test1";
