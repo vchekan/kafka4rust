@@ -1,0 +1,21 @@
+[package]
+name = "wireshark-kafka"
+version = "0.1.0"
+authors = ["Vadim Chekan <kot.begemot@gmail.com>"]
+edition = "2018"
+
+[lib]
+name = "kafka_plugin"
+crate-type = ["cdylib"]
+
+[profile.release]
+# shrink .so size
+lto = true
+panic = 'abort'
+
+[build-dependencies]
+bindgen = "0.48.0"
+
+[dependencies]
+lazy_static = "1.3.0"
+spin = "0.5.0"

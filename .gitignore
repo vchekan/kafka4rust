@@ -1,6 +1,6 @@
-/target/
+**/target/
 **/*.rs.bk
-*.iml
-/.idea/
+**/*.iml
+**/.idea/
 /bin
 /specs/*.toolbox
