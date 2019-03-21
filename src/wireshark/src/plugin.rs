@@ -3,7 +3,7 @@ use crate::dissects::dissect_kafka_tcp;
 use crate::fields::*;
 use crate::utils::i8_str;
 use lazy_static::lazy_static;
-use spin::Mutex;
+use std::sync::Mutex;
 use std::os::raw::{c_char, c_int, c_void};
 
 #[no_mangle]
@@ -17,8 +17,6 @@ pub static plugin_release: [u8; 4] = *b"2.6\0";
 pub(crate) const KAFKA_PORT: u32 = 9092;
 lazy_static! {
     pub(crate) static ref PROTO_KAFKA: Mutex<i32> = Mutex::new(-1);
-    // ett
-    pub(crate) static ref ETT_KAFKA : Mutex<i32> = Mutex::new(-1);
 }
 
 static PLUGIN: proto_plugin = proto_plugin {
@@ -35,25 +33,40 @@ pub extern "C" fn plugin_register() {
 
 extern "C" fn proto_register_kafka() {
     unsafe {
-        *PROTO_KAFKA.lock() = proto_register_protocol(
+        *PROTO_KAFKA.lock().unwrap() = proto_register_protocol(
             i8_str("Kafka4r\0"),
             i8_str("kafka4r\0"),
             i8_str("kafka4r\0"),
         );
 
         // Register fields
-        let mut hf = HF.lock();
-        proto_register_field_array(*PROTO_KAFKA.lock(), hf.as_mut_ptr(), hf.len() as i32);
+        let mut hf = HF.lock().unwrap();
+        proto_register_field_array(*PROTO_KAFKA.lock().unwrap(), hf.as_mut_ptr(), hf.len() as i32);
 
         // Register ett
-        let ett = [(&mut *ETT_KAFKA.lock()) as *mut _];
+        let ett = [
+            (&mut *ETT_KAFKA.lock().unwrap()) as *mut _,
+            (&mut *ETT_METADATA_REQ_TOPICS.lock().unwrap()) as *mut _,
+            (&mut *ETT_CLIENT_ID.lock().unwrap()) as *mut _,
+            (&mut *ETT_TOPICS.lock().unwrap()) as *mut _,
+            (&mut *ETT_SUPPORTED_API_VERSIONS.lock().unwrap()) as *mut _,
+            (&mut *ETT_RESPONSE_METADATA_BROKERS.lock().unwrap()) as *mut _,
+            (&mut *ETT_METADATA_BROKER.lock().unwrap()) as *mut _,
+            (&mut *ETT_METADATA_TOPIC.lock().unwrap()) as *mut _,
+            (&mut *ETT_CLUSTER_ID.lock().unwrap()) as *mut _,
+            (&mut *ETT_RACK.lock().unwrap()) as *mut _,
+            (&mut *ETT_TOPIC_METADATA_TOPICS.lock().unwrap()) as *mut _,
+            (&mut *ETT_PARTITION_METADATA.lock().unwrap()) as *mut _,
+            (&mut *ETT_REPLICAS.lock().unwrap()) as *mut _,
+            (&mut *ETT_ISR.lock().unwrap()) as *mut _,
+        ];
         proto_register_subtree_array(ett.as_ptr(), ett.len() as i32);
     }
 }
 
 extern "C" fn proto_reg_handoff_kafka() {
     unsafe {
-        let kafka_handle = create_dissector_handle(Some(dissect_kafka_tcp), *PROTO_KAFKA.lock());
+        let kafka_handle = create_dissector_handle(Some(dissect_kafka_tcp), *PROTO_KAFKA.lock().unwrap());
         dissector_add_uint(i8_str("tcp.port\0"), KAFKA_PORT, kafka_handle);
     }
 }

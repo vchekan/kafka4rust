@@ -2,6 +2,8 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
+#![allow(warnings)]
+
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 // These struct are not thread-safe but we are using it in single-threaded Wireshark

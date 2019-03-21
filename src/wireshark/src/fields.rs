@@ -1,7 +1,7 @@
 use crate::bindings::*;
 use crate::utils::i8_str;
 use lazy_static::lazy_static;
-use spin::Mutex;
+use std::sync::Mutex;
 use std::os::raw::{c_char, c_int, c_void};
 
 // hf
@@ -10,9 +10,45 @@ pub(crate) static mut hf_kafka_request_api_key: i32 = -1;
 pub(crate) static mut hf_kafka_correlation_id: i32 = -1;
 pub(crate) static mut hf_kafka_request_api_version: i32 = -1;
 pub(crate) static mut hf_kafka_string_len: i32 = -1;
+pub(crate) static mut hf_kafka_string: i32 = -1;
 pub(crate) static mut hf_kafka_client_id: i32 = -1;
+pub(crate) static mut hf_kafka_array_count: i32 = -1;
+pub(crate) static mut hf_kafka_topic_name: i32 = -1;
+pub(crate) static mut hf_kafka_error: i32 = -1;
+pub(crate) static mut hf_kafka_support_min_version: i32 = -1;
+pub(crate) static mut hf_kafka_support_max_version: i32 = -1;
+pub(crate) static mut hf_kafka_broker_host: i32 = -1;
+pub(crate) static mut hf_kafka_node_id: i32 = -1;
+pub(crate) static mut hf_kafka_port: i32 = -1;
+pub(crate) static mut hf_kafka_metadata_partition: i32 = -1;
+pub(crate) static mut hf_kafka_metadata_leader: i32 = -1;
+pub(crate) static mut hf_kafka_metadata_replicas: i32 = -1;
+pub(crate) static mut hf_kafka_metadata_isr: i32 = -1;
+pub(crate) static mut hf_kafka_controller_id: i32 = -1;
+pub(crate) static mut hf_kafka_cluster_id: i32 = -1;
+pub(crate) static mut hf_kafka_rack: i32 = -1;
+pub(crate) static mut hf_kafka_is_internal: i32 = -1;
 
 lazy_static! {
+    pub(crate) static ref ETT_KAFKA : Mutex<i32> = Mutex::new(-1);
+    pub(crate) static ref ETT_METADATA_REQ_TOPICS : Mutex<i32> = Mutex::new(-1);
+    pub(crate) static ref ETT_CLIENT_ID : Mutex<i32> = Mutex::new(-1);
+    pub(crate) static ref ETT_TOPICS : Mutex<i32> = Mutex::new(-1);
+    pub(crate) static ref ETT_SUPPORTED_API_VERSIONS : Mutex<i32> = Mutex::new(-1);
+    pub(crate) static ref ETT_RESPONSE_METADATA_BROKERS : Mutex<i32> = Mutex::new(-1);
+    pub(crate) static ref ETT_METADATA_BROKER : Mutex<i32> = Mutex::new(-1);
+    pub(crate) static ref ETT_METADATA_TOPIC : Mutex<i32> = Mutex::new(-1);
+    pub(crate) static ref ETT_CLUSTER_ID : Mutex<i32> = Mutex::new(-1);
+    pub(crate) static ref ETT_RACK : Mutex<i32> = Mutex::new(-1);
+    pub(crate) static ref ETT_TOPIC_METADATA_TOPICS : Mutex<i32> = Mutex::new(-1);
+    pub(crate) static ref ETT_PARTITION_METADATA : Mutex<i32> = Mutex::new(-1);
+    pub(crate) static ref ETT_REPLICAS : Mutex<i32> = Mutex::new(-1);
+    pub(crate) static ref ETT_ISR : Mutex<i32> = Mutex::new(-1);
+}
+
+
+lazy_static! {
+    // TODO: should they terminate with null tuple?
     pub(crate) static ref kafka_api_names: Vec<value_string> = api_keys
         .iter()
         .map(|(k, v)| {
@@ -22,10 +58,21 @@ lazy_static! {
             }
         })
         .collect();
+
+    pub(crate) static ref kafka_error_names: Vec<value_string> = kafka_errors
+        .iter()
+        .map(|(k, v)| {
+            value_string {
+                value: *k as u32,
+                strptr: v.as_ptr() as *const i8,
+            }
+        })
+        .collect();
+
 }
 
 lazy_static! {
-    pub(crate) static ref HF: Mutex<[hf_register_info; 6]> = Mutex::new([
+    pub(crate) static ref HF: Mutex<[hf_register_info; 23]> = Mutex::new([
         hf_register_info {
             p_id: unsafe { &mut hf_kafka_len as *mut _ },
             hfinfo: header_field_info {
@@ -112,6 +159,23 @@ lazy_static! {
             }
         },
         hf_register_info {
+            p_id: unsafe { &mut hf_kafka_string as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("String\0"),
+                abbrev: i8_str("kafka.string\0"),
+                type_: ftenum_FT_STRING,
+                display: field_display_e_BASE_NONE as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: i8_str("String primitive value.\0"),
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
             p_id: unsafe { &mut hf_kafka_client_id as *mut _ },
             hfinfo: header_field_info {
                 name: i8_str("Client Id\0"),
@@ -128,6 +192,280 @@ lazy_static! {
                 same_name_next: 0 as *mut _header_field_info,
             }
         },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_array_count as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Array Count\0"),
+                abbrev: i8_str("kafka.array_count\0"),
+                type_: ftenum_FT_INT32,
+                display: field_display_e_BASE_DEC as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: 0 as *const i8,
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_topic_name as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Topic Name\0"),
+                abbrev: i8_str("kafka.topic_name\0"),
+                type_: ftenum_FT_STRING,
+                display: field_display_e_BASE_NONE as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: 0 as *const i8,
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_error as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Error\0"),
+                abbrev: i8_str("kafka.error\0"),
+                type_: ftenum_FT_INT16,
+                display: field_display_e_BASE_DEC as i32,
+                strings: kafka_error_names.as_ptr() as *const c_void,
+                bitmask: 0,
+                blurb: 0 as *const i8,
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_support_min_version as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Min Version\0"),
+                abbrev: i8_str("kafka.api_versions.min_version\0"),
+                type_: ftenum_FT_INT16,
+                display: field_display_e_BASE_DEC as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: i8_str("Minimal version which supports api key.\0"),
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_support_max_version as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Max Version\0"),
+                abbrev: i8_str("kafka.api_versions.max_version\0"),
+                type_: ftenum_FT_INT16,
+                display: field_display_e_BASE_DEC as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: i8_str("Maximum version which supports api key.\0"),
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_broker_host as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Host\0"),
+                abbrev: i8_str("kafka.broker.host\0"),
+                type_: ftenum_FT_STRING,
+                display: field_display_e_BASE_NONE as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: i8_str("Broker host name.\0"),
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_node_id as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Node Id\0"),
+                abbrev: i8_str("kafka.broker.node\0"),
+                type_: ftenum_FT_INT32,
+                display: field_display_e_BASE_DEC as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: i8_str("Broker node Id.\0"),
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_port as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Port\0"),
+                abbrev: i8_str("kafka.broker.port\0"),
+                type_: ftenum_FT_INT32,
+                display: field_display_e_BASE_DEC as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: i8_str("Broker port.\0"),
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_metadata_partition as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Partition\0"),
+                abbrev: i8_str("kafka.topic_metadata.partition\0"),
+                type_: ftenum_FT_INT32,
+                display: field_display_e_BASE_DEC as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: i8_str("Topic metadata partition.\0"),
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_metadata_leader as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Leader\0"),
+                abbrev: i8_str("kafka.topic_metadata.leader\0"),
+                type_: ftenum_FT_INT32,
+                display: field_display_e_BASE_DEC as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: i8_str("Topic metadata leader.\0"),
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_metadata_replicas as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Replicas\0"),
+                abbrev: i8_str("kafka.topic_metadata.replicas\0"),
+                type_: ftenum_FT_INT32,
+                display: field_display_e_BASE_DEC as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: i8_str("Topic metadata replicas.\0"),
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_metadata_isr as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Isr\0"),
+                abbrev: i8_str("kafka.topic_metadata.isr\0"),
+                type_: ftenum_FT_INT32,
+                display: field_display_e_BASE_DEC as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: i8_str("Topic metadata isr.\0"),
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_controller_id as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Controller Id\0"),
+                abbrev: i8_str("kafka.topic_metadata.controller_id\0"),
+                type_: ftenum_FT_INT32,
+                display: field_display_e_BASE_DEC as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: i8_str("Topic metadata controller Id.\0"),
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_cluster_id as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Cluster Id\0"),
+                abbrev: i8_str("kafka.topic_metadata.cluster_id\0"),
+                type_: ftenum_FT_STRING,
+                display: field_display_e_BASE_NONE as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: i8_str("Topic metadata cluster Id.\0"),
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_rack as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Rack\0"),
+                abbrev: i8_str("kafka.borker.rack\0"),
+                type_: ftenum_FT_STRING,
+                display: field_display_e_BASE_NONE as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: i8_str("Broker rack.\0"),
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+        hf_register_info {
+            p_id: unsafe { &mut hf_kafka_is_internal as *mut _ },
+            hfinfo: header_field_info {
+                name: i8_str("Is internal\0"),
+                abbrev: i8_str("kafka.is_internal\0"),
+                type_: ftenum_FT_BOOLEAN,
+                display: field_display_e_BASE_NONE as i32,
+                strings: 0 as *const c_void,
+                bitmask: 0,
+                blurb: 0 as *const i8,
+                id: -1,
+                parent: 0,
+                ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+                same_name_prev_id: -1,
+                same_name_next: 0 as *mut _header_field_info,
+            }
+        },
+
+
     ]);
 }
 
@@ -175,4 +513,85 @@ pub(crate) static api_keys: [(u16, &'static str); 43] = [
     (40, "ExpireDelegationToken\0"),
     (41, "DescribeDelegationToken\0"),
     (42, "DeleteGroups\0"),
+];
+
+pub(crate) static kafka_errors: [(i32, &'static str); 78] = [
+    (-1, "UNKNOWN_SERVER_ERROR\0"),
+    (0, "NONE\0"),
+    (1, "OFFSET_OUT_OF_RANGE\0"),
+    (2, "CORRUPT_MESSAGE\0"),
+    (3, "UNKNOWN_TOPIC_OR_PARTITION\0"),
+    (4, "INVALID_FETCH_SIZE\0"),
+    (5, "LEADER_NOT_AVAILABLE\0"),
+    (6, "NOT_LEADER_FOR_PARTITION\0"),
+    (7, "REQUEST_TIMED_OUT\0"),
+    (8, "BROKER_NOT_AVAILABLE\0"),
+    (9, "REPLICA_NOT_AVAILABLE\0"),
+    (10, "MESSAGE_TOO_LARGE\0"),
+    (11, "STALE_CONTROLLER_EPOCH\0"),
+    (12, "OFFSET_METADATA_TOO_LARGE\0"),
+    (13, "NETWORK_EXCEPTION\0"),
+    (14, "COORDINATOR_LOAD_IN_PROGRESS\0"),
+    (15, "COORDINATOR_NOT_AVAILABLE\0"),
+    (16, "NOT_COORDINATOR\0"),
+    (17, "INVALID_TOPIC_EXCEPTION\0"),
+    (18, "RECORD_LIST_TOO_LARGE\0"),
+    (19, "NOT_ENOUGH_REPLICAS\0"),
+    (20, "NOT_ENOUGH_REPLICAS_AFTER_APPEND\0"),
+    (21, "INVALID_REQUIRED_ACKS\0"),
+    (22, "ILLEGAL_GENERATION\0"),
+    (23, "INCONSISTENT_GROUP_PROTOCOL\0"),
+    (24, "INVALID_GROUP_ID\0"),
+    (25, "UNKNOWN_MEMBER_ID\0"),
+    (26, "INVALID_SESSION_TIMEOUT\0"),
+    (27, "REBALANCE_IN_PROGRESS\0"),
+    (28, "INVALID_COMMIT_OFFSET_SIZE\0"),
+    (29, "TOPIC_AUTHORIZATION_FAILED\0"),
+    (30, "GROUP_AUTHORIZATION_FAILED\0"),
+    (31, "CLUSTER_AUTHORIZATION_FAILED\0"),
+    (32, "INVALID_TIMESTAMP\0"),
+    (33, "UNSUPPORTED_SASL_MECHANISM\0"),
+    (34, "ILLEGAL_SASL_STATE\0"),
+    (35, "UNSUPPORTED_VERSION\0"),
+    (36, "TOPIC_ALREADY_EXISTS\0"),
+    (37, "INVALID_PARTITIONS\0"),
+    (38, "INVALID_REPLICATION_FACTOR\0"),
+    (39, "INVALID_REPLICA_ASSIGNMENT\0"),
+    (40, "INVALID_CONFIG\0"),
+    (41, "NOT_CONTROLLER\0"),
+    (42, "INVALID_REQUEST\0"),
+    (43, "UNSUPPORTED_FOR_MESSAGE_FORMAT\0"),
+    (44, "POLICY_VIOLATION\0"),
+    (45, "OUT_OF_ORDER_SEQUENCE_NUMBER\0"),
+    (46, "DUPLICATE_SEQUENCE_NUMBER\0"),
+    (47, "INVALID_PRODUCER_EPOCH\0"),
+    (48, "INVALID_TXN_STATE\0"),
+    (49, "INVALID_PRODUCER_ID_MAPPING\0"),
+    (50, "INVALID_TRANSACTION_TIMEOUT\0"),
+    (51, "CONCURRENT_TRANSACTIONS\0"),
+    (52, "TRANSACTION_COORDINATOR_FENCED\0"),
+    (53, "TRANSACTIONAL_ID_AUTHORIZATION_FAILED\0"),
+    (54, "SECURITY_DISABLED\0"),
+    (55, "OPERATION_NOT_ATTEMPTED\0"),
+    (56, "KAFKA_STORAGE_ERROR\0"),
+    (57, "LOG_DIR_NOT_FOUND\0"),
+    (58, "SASL_AUTHENTICATION_FAILED\0"),
+    (59, "UNKNOWN_PRODUCER_ID\0"),
+    (60, "REASSIGNMENT_IN_PROGRESS\0"),
+    (61, "DELEGATION_TOKEN_AUTH_DISABLED\0"),
+    (62, "DELEGATION_TOKEN_NOT_FOUND\0"),
+    (63, "DELEGATION_TOKEN_OWNER_MISMATCH\0"),
+    (64, "DELEGATION_TOKEN_REQUEST_NOT_ALLOWED\0"),
+    (65, "DELEGATION_TOKEN_AUTHORIZATION_FAILED\0"),
+    (66, "DELEGATION_TOKEN_EXPIRED\0"),
+    (67, "INVALID_PRINCIPAL_TYPE\0"),
+    (68, "NON_EMPTY_GROUP\0"),
+    (69, "GROUP_ID_NOT_FOUND\0"),
+    (70, "FETCH_SESSION_ID_NOT_FOUND\0"),
+    (71, "INVALID_FETCH_SESSION_EPOCH\0"),
+    (72, "LISTENER_NOT_FOUND\0"),
+    (73, "TOPIC_DELETION_DISABLED\0"),
+    (74, "FENCED_LEADER_EPOCH\0"),
+    (75, "UNKNOWN_LEADER_EPOCH\0"),
+    (76, "UNSUPPORTED_COMPRESSION_TYPE\0"),
 ];

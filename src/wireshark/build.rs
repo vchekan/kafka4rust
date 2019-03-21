@@ -19,6 +19,7 @@ fn main() {
         ])
         .derive_debug(false)
         .derive_copy(false)
+        .layout_tests(false)
         .generate()
         .expect("Unable to generate bindings");
 
