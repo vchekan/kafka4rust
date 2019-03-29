@@ -44,22 +44,7 @@ extern "C" fn proto_register_kafka() {
         proto_register_field_array(*PROTO_KAFKA.lock().unwrap(), hf.as_mut_ptr(), hf.len() as i32);
 
         // Register ett
-        let ett = [
-            (&mut *ETT_KAFKA.lock().unwrap()) as *mut _,
-            (&mut *ETT_METADATA_REQ_TOPICS.lock().unwrap()) as *mut _,
-            (&mut *ETT_CLIENT_ID.lock().unwrap()) as *mut _,
-            (&mut *ETT_TOPICS.lock().unwrap()) as *mut _,
-            (&mut *ETT_SUPPORTED_API_VERSIONS.lock().unwrap()) as *mut _,
-            (&mut *ETT_RESPONSE_METADATA_BROKERS.lock().unwrap()) as *mut _,
-            (&mut *ETT_METADATA_BROKER.lock().unwrap()) as *mut _,
-            (&mut *ETT_METADATA_TOPIC.lock().unwrap()) as *mut _,
-            (&mut *ETT_CLUSTER_ID.lock().unwrap()) as *mut _,
-            (&mut *ETT_RACK.lock().unwrap()) as *mut _,
-            (&mut *ETT_TOPIC_METADATA_TOPICS.lock().unwrap()) as *mut _,
-            (&mut *ETT_PARTITION_METADATA.lock().unwrap()) as *mut _,
-            (&mut *ETT_REPLICAS.lock().unwrap()) as *mut _,
-            (&mut *ETT_ISR.lock().unwrap()) as *mut _,
-        ];
+        let mut ett = create_ett();
         proto_register_subtree_array(ett.as_ptr(), ett.len() as i32);
     }
 }
