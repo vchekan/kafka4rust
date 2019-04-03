@@ -1,7 +1,6 @@
 use crate::bindings::*;
 use std::os::raw::{c_char, c_int, c_void};
 use lazy_static::lazy_static;
-use std::sync::Mutex;
 use crate::dissects::*;
 use crate::utils::i8_str;
 use crate::fields::*;
@@ -38,8 +37,12 @@ protocol!(ProduceRequest => {
 
 protocol!(TopicData => {
     topic: {hf_kafka_topic_name: String, ETT_PRODUCE_REQUEST_TOPIC},
-    partition: {hf_kafka_partition: i32}
-    //record_set: RecordBatch
+    data: [TopicData2 ETT_TOPIC_DATA2]
+});
+
+protocol!(TopicData2 => {
+    partition: {hf_kafka_partition: i32},
+    record_set: {dissect_record_batch: fn}
 });
 
 //

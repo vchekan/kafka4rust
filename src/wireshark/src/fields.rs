@@ -18,7 +18,9 @@ ett!(ETT_KAFKA, ett_broker_host, ETT_TOPICS, ETT_CLIENT_ID,
     ETT_ISR,
     ETT_OFLINE_REPLICAS,
     ETT_TOPIC_DATA,
-    ETT_PRODUCE_REQUEST_TOPIC
+    ETT_TOPIC_DATA2,
+    ETT_PRODUCE_REQUEST_TOPIC,
+    ETT_BATCH_ATTRIBUTES
 );
 
 header_fields!(
@@ -26,9 +28,9 @@ header_fields!(
     {hf_kafka_host, "Host\0", "kafka.broker.host\0", "Broker host name.\0"},
     {hf_kafka_port, "Port\0", "kafka.broker.port\0", ftenum_FT_INT32, "Broker port.\0"},
     {hf_kafka_len, "Length\0", "kafka.len\0", ftenum_FT_INT32, "The length of this Kafka packet.\0"},
-    {hf_kafka_request_api_key, "API Key\0", "kafka.request_key\0", ftenum_FT_INT16, "Request API.\0"},
+    {hf_kafka_request_api_key, "API Key\0", "kafka.request_key\0", ftenum_FT_INT16, "Request API.\0", kafka_api_names},
     {hf_kafka_correlation_id, "Correlation Id\0", "kafka.correlation_id\0", ftenum_FT_INT32, "Correlation Id.\0"},
-    {hf_kafka_request_api_version, "API Version\0", "kafka.request.version\0", ftenum_FT_INT16, "Request API Version.\0", kafka_api_names},
+    {hf_kafka_request_api_version, "API Version\0", "kafka.request.version\0", ftenum_FT_INT16, "Request API Version.\0"},
     {hf_kafka_string_len, "String Length\0", "kafka.string_len\0", ftenum_FT_INT16, "Generic length for kafka-encoded string.\0"},
     {hf_kafka_string, "String\0", "kafka.string\0", "String primitive value.\0"},
     {hf_kafka_client_id, "Client Id\0", "kafka.client_id\0", "The ID of the sending client.\0"},
@@ -47,8 +49,173 @@ header_fields!(
     {hf_kafka_offline_replica, "Offline replicas\0", "kafka.offline_replica\0", ftenum_FT_INT32, "Offline replicas\0"},
     {hf_kafka_metadata_leader_epoch, "Leader epoch\0", "kafka.topic_metadata.leader_epoch\0", ftenum_FT_INT32, "Topic metadata leader epoch.\0"},
     {hf_kafka_acks, "Acks\0", "kafka.acks\0", ftenum_FT_INT16, "Acks requested\0"},
-    {hf_kafka_timeout, "Timeout\0", "kafka.timeout\0", ftenum_FT_INT32, "Timeout (ms)\0"}
+    {hf_kafka_timeout, "Timeout\0", "kafka.timeout\0", ftenum_FT_INT32, "Timeout (ms)\0"},
+    // Record Batch
+    {hf_kafka_recordbatch_segment_size, "Segment size\0", "kafka.recordbatch.segment_size\0", ftenum_FT_INT32, "Record batch segment size (bytes)\0"},
+    {hf_kafka_recordbatch_baseoffset, "Base offset\0", "kafka.recordbatch.baseoffset\0", ftenum_FT_INT64, "Record batch base offset\0"},
+    {hf_kafka_recordbatch_batchlength, "Batch length\0", "kafka.recordbatch.batchlength\0", ftenum_FT_INT32, "Record batch length\0"},
+    {hf_kafka_recordbatch_partition_leader_epoch, "Partition leader epoch\0", "kafka.recordbatch.partitionleaderepoch\0", ftenum_FT_INT32, "Record batch partition leader epoch\0"},
+    {hf_kafka_recordbatch_magic, "Magic\0", "kafka.recordbatch.magic\0", ftenum_FT_UINT8, "Record batch magic\0"},
+    {hf_kafka_recordbatch_crc, "Crc\0", "kafka.recordbatch.crc\0", ftenum_FT_UINT32|field_display_e_BASE_HEX, "Record batch CRC\0"},
+    {hf_kafka_recordbatch_attributes, "Attributes\0", "kafka.recordbatch.attributes\0", ftenum_FT_UINT16, "Record batch attributes\0"},
+    {hf_kafka_recordbatch_lastoffsetdelta, "Last offset delta\0", "kafka.recordbatch.lastoffsetdelta\0", ftenum_FT_INT32, "Record batch last offset delta\0"},
+    {hf_kafka_recordbatch_firsttimestamp, "First timestamp\0", "kafka.recordbatch.firsttimestamp\0", ftenum_FT_INT64, "Record batch first timestamp\0"},
+    {hf_kafka_recordbatch_maxtimestamp, "Max timestamp\0", "kafka.recordbatch.maxtimestamp\0", ftenum_FT_INT64, "Record batch max timestamp\0"},
+    {hf_kafka_recordbatch_producer_id, "Producer Id\0", "kafka.recordbatch.producerid\0", ftenum_FT_INT64, "Record batch producer id\0"},
+    {hf_kafka_recordbatch_producer_epoch, "Producer epoch\0", "kafka.recordbatch.producer_epoch\0", ftenum_FT_INT16, "Record batch producer epoch\0"},
+    {hf_kafka_recordbatch_base_sequence, "Base sequence\0", "kafka.recordbatch.base_sequence\0", ftenum_FT_INT32, "Record batch base sequence\0"},
+    {hf_kafka_recordbatch_key, "Key\0", "kafka.record.key\0", ftenum_FT_BYTES|field_display_e_BASE_NONE, "Record key\0"},
+    {hf_kafka_recordbatch_value, "Value\0", "kafka.record.value\0", ftenum_FT_BYTES|field_display_e_SEP_SPACE, "Record value\0"},
+    // MessageSet
+    {hf_kafka_messageset_offset, "Offset\0", "kafka.messageset.offset\0", ftenum_FT_INT64, "Message set offset\0"},
+    {hf_kafka_messageset_msg_size, "Message size\0", "kafka.messageset.message_size\0", ftenum_FT_INT32, "Message set message size\0"},
+    {hf_kafka_messageset_attributes, "Attributes\0", "kafka.messageset.attributes\0", ftenum_FT_UINT8, "Record batch attributes\0"},
+    {hf_kafka_recordbatch_timestamp, "Timestamp\0", "kafka.messageset.timestamp\0", ftenum_FT_ABSOLUTE_TIME|absolute_time_display_e_ABSOLUTE_TIME_UTC, "Message set timestamp\0"}
 );
+
+pub(crate) static mut hf_kafka_batch_compression: i32 = -1;
+pub(crate) static mut hf_kafka_batch_timestamp_type: i32 = -1;
+pub(crate) static mut hf_kafka_batch_istransactional: i32 = -1;
+pub(crate) static mut hf_kafka_batch_iscontrolbatch: i32 = -1;
+pub(crate) static mut hf_kafka_messageset_compression: i32 = -1;
+pub(crate) static mut hf_kafka_messagest_timestamp_type: i32 = -1;
+
+pub(crate) static mut kafka_batch_attributes: [*const i32; 5] = [
+    unsafe {&hf_kafka_batch_compression as *const i32},
+    unsafe {&hf_kafka_batch_timestamp_type as *const i32},
+    unsafe {&hf_kafka_batch_istransactional as *const i32},
+    unsafe {&hf_kafka_batch_iscontrolbatch as *const i32},
+    0 as *const i32,
+];
+
+pub(crate) static mut kafka_messageset_attributes: [*const i32; 3] = [
+    unsafe {&hf_kafka_messageset_compression as *const i32},
+    unsafe {&hf_kafka_messagest_timestamp_type as *const i32},
+    0 as *const i32,
+];
+
+
+pub(crate) fn hf2() -> Vec<hf_register_info> {vec![
+    hf_register_info {
+        p_id: unsafe { &mut hf_kafka_batch_compression as *mut _ },
+        hfinfo: header_field_info {
+            name: i8_str("Compression\0"),
+            abbrev: i8_str("kafka.recordbatch.attributes.compression\0"),
+            type_: ftenum_FT_INT16,
+            display: field_display_e_BASE_DEC as i32,
+            strings: COMPRESSION_NAMES.as_ptr() as *const c_void,
+            bitmask: 0b11,
+            blurb: 0 as *const i8,
+            id: -1,
+            parent: 0,
+            ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+            same_name_prev_id: -1,
+            same_name_next: 0 as *mut _header_field_info,
+        }
+    },
+    hf_register_info {
+        p_id: unsafe { &mut hf_kafka_batch_timestamp_type as *mut _ },
+        hfinfo: header_field_info {
+            name: i8_str("Timestamp type\0"),
+            abbrev: i8_str("kafka.recordbatch.attributes.timestamptype\0"),
+            type_: ftenum_FT_INT16,
+            display: field_display_e_BASE_DEC as i32,
+            strings: TIMESTAMP_TYPE_NAMES.as_ptr() as *const c_void,
+            bitmask: 0b100,
+            blurb: 0 as *const i8,
+            id: -1,
+            parent: 0,
+            ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+            same_name_prev_id: -1,
+            same_name_next: 0 as *mut _header_field_info,
+        }
+    },
+    hf_register_info {
+        p_id: unsafe { &mut hf_kafka_batch_istransactional as *mut _ },
+        hfinfo: header_field_info {
+            name: i8_str("Is transactional\0"),
+            abbrev: i8_str("kafka.recordbatch.attributes.istransactional\0"),
+            type_: ftenum_FT_INT16,
+            display: field_display_e_BASE_DEC as i32,
+            strings: 0 as *const c_void,
+            bitmask: 0b1000,
+            blurb: 0 as *const i8,
+            id: -1,
+            parent: 0,
+            ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+            same_name_prev_id: -1,
+            same_name_next: 0 as *mut _header_field_info,
+        }
+    },
+    hf_register_info {
+        p_id: unsafe { &mut hf_kafka_batch_iscontrolbatch as *mut _ },
+        hfinfo: header_field_info {
+            name: i8_str("Is control batch\0"),
+            abbrev: i8_str("kafka.recordbatch.attributes.iscontrolbatch\0"),
+            type_: ftenum_FT_INT16,
+            display: field_display_e_BASE_DEC as i32,
+            strings: 0 as *const c_void,
+            bitmask: 0b1_0000,
+            blurb: 0 as *const i8,
+            id: -1,
+            parent: 0,
+            ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+            same_name_prev_id: -1,
+            same_name_next: 0 as *mut _header_field_info,
+        }
+    },
+    // Message Set attributes (are u8 instead of u16)
+    hf_register_info {
+        p_id: unsafe { &mut hf_kafka_messageset_compression as *mut _ },
+        hfinfo: header_field_info {
+            name: i8_str("Compression\0"),
+            abbrev: i8_str("kafka.messageset.attributes.compression\0"),
+            type_: ftenum_FT_INT8,
+            display: field_display_e_BASE_DEC as i32,
+            strings: COMPRESSION_NAMES.as_ptr() as *const c_void,
+            bitmask: 0b11,
+            blurb: 0 as *const i8,
+            id: -1,
+            parent: 0,
+            ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+            same_name_prev_id: -1,
+            same_name_next: 0 as *mut _header_field_info,
+        }
+    },
+    hf_register_info {
+        p_id: unsafe { &mut hf_kafka_messagest_timestamp_type as *mut _ },
+        hfinfo: header_field_info {
+            name: i8_str("Timestamp type\0"),
+            abbrev: i8_str("kafka.messageset.attributes.timestamptype\0"),
+            type_: ftenum_FT_INT8,
+            display: field_display_e_BASE_DEC as i32,
+            strings: TIMESTAMP_TYPE_NAMES.as_ptr() as *const c_void,
+            bitmask: 0b100,
+            blurb: 0 as *const i8,
+            id: -1,
+            parent: 0,
+            ref_type: hf_ref_type_HF_REF_TYPE_NONE,
+            same_name_prev_id: -1,
+            same_name_next: 0 as *mut _header_field_info,
+        }
+    },
+]}
+
+static COMPRESSION_NAMES : [value_string; 6] = [
+    value_string { value: 0_u32, strptr: i8_str("none\0")},
+    value_string { value: 1_u32, strptr: i8_str("gzip\0")},
+    value_string { value: 2_u32, strptr: i8_str("snappy\0")},
+    value_string { value: 3_u32, strptr: i8_str("lz4\0")},
+    value_string { value: 4_u32, strptr: i8_str("zstd\0")},
+    // TODO: need `value_string as null`
+    value_string { value: 0_u32, strptr: 0 as *const i8},
+];
+
+static TIMESTAMP_TYPE_NAMES : [value_string; 3] = [
+    value_string { value: 0_u32, strptr: i8_str("Create\0")},
+    value_string { value: 1_u32, strptr: i8_str("LogAppend\0")},
+    value_string { value: 0_u32, strptr: 0 as *const i8},
+];
 
 
 // hf
@@ -82,6 +249,8 @@ lazy_static! {
         .collect();
 
 }
+
+
 
 /*
 lazy_static! {

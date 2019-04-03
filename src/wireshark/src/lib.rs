@@ -1,4 +1,5 @@
 #![feature(str_as_mut_ptr)]
+#![feature(const_fn)]
 #![feature(trace_macros)]
 mod bindings;
 #[macro_use] mod macros;

@@ -19,7 +19,7 @@ macro_rules! header_field_declare {
     };
 
     // Ints
-    ( { $hf:ident, $name:expr, $abbrev:expr, $type_:ident, $blurb:expr $(, $enum:ident)? } ) => {
+    ( { $hf:ident, $name:expr, $abbrev:expr, $type_:ident $(|$display:ident)?, $blurb:expr $(, $enum:ident)? } ) => {
         pub(crate) static mut $hf: i32 = -1;
     };
 }
@@ -27,6 +27,11 @@ macro_rules! header_field_declare {
 macro_rules! _resolve_strings {
     () => { 0 };
     ($strings:ident) => {$strings.as_ptr()};
+}
+
+macro_rules! _resolve_display {
+    () => { field_display_e_BASE_DEC as i32 };
+    ($display:ident) => { $display as i32 };
 }
 
 macro_rules! header_field_register {
@@ -52,14 +57,14 @@ macro_rules! header_field_register {
     };
 
     // Ints
-    ( { $hf:ident, $name:expr, $abbrev:expr, $type_:ident, $blurb:expr $(, $enum:ident)? } ) => {
+    ( { $hf:ident, $name:expr, $abbrev:expr, $type_:ident $(| $display:ident)?, $blurb:expr $(, $enum:ident)? } ) => {
         hf_register_info {
             p_id: unsafe { &mut $hf as *mut _ },
             hfinfo: header_field_info {
                 name: i8_str($name),
                 abbrev: i8_str($abbrev),
                 type_: $type_,
-                display: field_display_e_BASE_DEC as i32,
+                display: _resolve_display!($($display)?),
                 strings: _resolve_strings!($($enum)?) as *const c_void,
                 bitmask: 0,
                 blurb: _resolve_blurp!($blurb),
@@ -126,6 +131,11 @@ macro_rules! dissect_field {
                 dissect_kafka_array($tvb, $pinfo, tree, $offset, $api_version, $t::dissect)
             };
         }
+    };
+
+    // Function call
+    ($tree:ident, $tvb:ident, $pinfo:ident, $offset:ident, $api_version:ident, $f:ident, { $_fn:ident : fn }) => {
+        $_fn($tree, $tvb, $pinfo, $offset);
     };
 }
 

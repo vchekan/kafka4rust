@@ -41,7 +41,12 @@ extern "C" fn proto_register_kafka() {
 
         // Register fields
         let mut hf = HF.lock().unwrap();
+        hf.append(&mut hf2());
         proto_register_field_array(*PROTO_KAFKA.lock().unwrap(), hf.as_mut_ptr(), hf.len() as i32);
+
+        // Register RecordBatch attributes fields
+        //let mut hf = hf2();
+        //proto_register_field_array(*PROTO_KAFKA.lock().unwrap(), hf.as_mut_ptr(), hf.len() as i32);
 
         // Register ett
         let mut ett = create_ett();
