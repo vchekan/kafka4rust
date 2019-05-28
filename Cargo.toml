@@ -10,8 +10,8 @@ description = "High performance, async Kafka client"
 failure = "0.1.3"
 failure_derive = "0.1.3"
 
-futures = {version = "0.3.0-alpha.13", package = "futures-preview"}
-romio = "0.3.0-alpha.2"
+futures = {version = "0.3.0-alpha.16", package = "futures-preview"}
+romio = "0.3.0-alpha.8"
 slab = "0.4.1"
 either = "1.5.0"
 
