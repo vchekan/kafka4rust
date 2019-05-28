@@ -1,4 +1,0 @@
-(+) Shrink .so size
-(+) Nicer String tree (size and string as subitems)
-*   Generator
-*   Request-response correlation

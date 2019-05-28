@@ -133,47 +133,53 @@ impl Cluster {
         future::ready(&conn)
     }
 
-    /// Must guarantee at least one connection in `self.connections`
-    /// in case of success.
-    pub async fn connect<'a>(bootstrap: &'a [&'a str]) -> io::Result<Self> {
-        let connect_futures = bootstrap
-            .iter()
-            .filter_map(|addr| addr.parse().ok())
-            .map(Broker::connect);
+/*    /// Must guarantee at least one connection in `self.connections`
+        /// in case of success.
+        pub async fn connect<'a>(bootstrap: &'a [&'a str]) -> io::Result<Self> {
+            let connect_futures = bootstrap
+                .iter()
+                .filter_map(|addr| addr.parse().ok())
+                .map(Broker::connect);
 
-        // TODO: use `fold` to preserve and report last error if no result
-        /*let resolved = futures::stream::futures_unordered(connectFutures).
-                filter_map(|f| future::ready(f.ok())).
-                next();
-        let broker = match await!(resolved) {
-            Some(broker) => broker,
-            // TODO: failure
-            None => return Err(io::Error::from(io::ErrorKind::NotFound)),
-        };*/
 
-        let mut resolved1 = futures::stream::futures_unordered(connect_futures)
-            .filter_map(|f| future::ready(f.ok()));
-        let broker = match await!(resolved1.next()) {
-            Some(broker) => broker,
-            // TODO: failure
-            None => return Err(io::Error::from(io::ErrorKind::NotFound)),
-        };
 
-        // TODO: move it to BrokerConnection
-        debug!("Connected to {:?}", broker);
 
-        /*let request = protocol::MetadataRequest0{topics};
-        let response = await!(broker.request(&request));
-        debug!("Metadata response: {:?}", response);
-        */
+            // TODO: use `fold` to preserve and report last error if no result
+            /*let resolved = futures::stream::futures_unordered(connectFutures).
+                    filter_map(|f| future::ready(f.ok())).
+                    next();
+            let broker = match await!(resolved) {
+                Some(broker) => broker,
+                // TODO: failure
+                None => return Err(io::Error::from(io::ErrorKind::NotFound)),
+            };*/
 
-        let bootstrap: Vec<String> = bootstrap.iter().map(|&a| a.to_string()).collect();
-        /*Ok(Cluster {
-            bootstrap,
-            //topic_meta: response
-        })*/
-        Err(io::Error::from(io::ErrorKind::NotConnected))
-    }
+            let x = futures::stream::poll_fn(connect_futures);
+
+            let mut resolved1 = futures::stream::futures_unordered(connect_futures)
+                .filter_map(|f| future::ready(f.ok()));
+            let broker = match await!(resolved1.next()) {
+                Some(broker) => broker,
+                // TODO: failure
+                None => return Err(io::Error::from(io::ErrorKind::NotFound)),
+            };
+
+            // TODO: move it to BrokerConnection
+            debug!("Connected to {:?}", broker);
+
+            /*let request = protocol::MetadataRequest0{topics};
+            let response = await!(broker.request(&request));
+            debug!("Metadata response: {:?}", response);
+            */
+
+            let bootstrap: Vec<String> = bootstrap.iter().map(|&a| a.to_string()).collect();
+            /*Ok(Cluster {
+                bootstrap,
+                //topic_meta: response
+            })*/
+            Err(io::Error::from(io::ErrorKind::NotConnected))
+        }
+    */
 }
 
 fn start_topic_resolver(event_in: mpsc::UnboundedReceiver<String>, cluster_tx: mpsc::UnboundedSender<EventIn>, spawner: &mut LocalSpawner) -> mpsc::UnboundedReceiver<protocol::TopicMetadata> {
