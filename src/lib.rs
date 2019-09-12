@@ -1,16 +1,16 @@
-#![feature(async_await, await_macro, futures_api)]
+#![feature(async_await, futures_api)]
 #![feature(arbitrary_self_types)]
-#![feature(mpsc_select)]
 
-mod broker;
-mod cluster;
-mod connection;
-mod producer;
-mod protocol;
-//mod consumer;
-mod timer;
 mod bichannel;
-mod futures_union;
+mod timer;
+mod protocol;
+//mod correlation_future;
+mod connection;
+mod broker;
+//mod cluster;
+//mod producer;
+//mod consumer;
+//mod futures_union;
 
 extern crate failure;
 #[macro_use]

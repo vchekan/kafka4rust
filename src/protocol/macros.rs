@@ -19,7 +19,7 @@ macro_rules! request {
         }
 
         impl ToKafka for $sname {
-            fn to_kafka(&self, _buff: &mut BufMut) {
+            fn to_kafka(&self, _buff: &mut impl BufMut) {
                 $(self.$f.to_kafka(_buff);)*
             }
         }
@@ -47,7 +47,7 @@ macro_rules! response {
         }
 
         impl FromKafka for $sname {
-            fn from_kafka(_buff: &mut Buf) -> $sname {
+            fn from_kafka(_buff: &mut impl Buf) -> $sname {
                 $sname { $($f: <get_type!($tp)>::from_kafka(_buff)),* }
             }
         }

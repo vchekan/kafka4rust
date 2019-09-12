@@ -10,13 +10,19 @@
 /// is metadata message bus.
 ///
 /// Q: should topic resolution be a separate component or part of Cluster?
-/// A: list of unresolved topics is owned by resolver spawn, thus it can non belong to Cluster.
+/// A: list of unresolved topics is owned by resolver spawn, thus it can not belong to Cluster.
 ///
 /// Q: should connect upon initialization or first request?
 /// A: initialization because it will improve startup time. But on the other hand,
-/// if app waits for connection before sending, we achieved nothing.
+/// if app waits for connection before sending, we achieved nothing. Also, it is better to connect
+/// upon initialization for sake of Fail Fast principle.
 ///
+/// Q: Should `Connection::request()` take `&self` or `&mut self`?
+/// A: Problem with reading answer. If 2 requests were send immediately one after another, Kafka
+/// will preserve order. But do we have guaranteed order of execution of 2 tasks reading responses?
+/// I don't think so. So we need correlation_id based responses.
 
+use std::iter::FromIterator;
 use crate::broker::Broker;
 use futures::{future::{self, Future},
               channel::mpsc,
@@ -27,21 +33,21 @@ use std::io;
 use crate::protocol;
 use std::collections::HashSet;
 use std::time::Duration;
-use futures::StreamExt;
-use crate::bichannel::BiChannel;
+use futures::{StreamExt, executor};
 use crate::connection::BrokerConnection;
 use std::collections::vec_deque::VecDeque;
 use either::Either;
-use crate::futures_union::FuturesUnion2;
+use juliex;
+use crate::bichannel;
 
 #[derive(Debug)]
 pub(crate) struct Cluster {
     bootstrap: Vec<String>,
-    response_tx: mpsc::UnboundedSender<EventOut>,
+    //response_tx: mpsc::UnboundedSender<EventOut>,
     //topic_meta: Arc<Mutex<Meta>>,
-    connections: Vec<BrokerConnection>,
-    response_routes: VecDeque<(u32,RespondTo)>,
-    resolver_tx: mpsc::UnboundedSender<String>,
+    connections: Vec<Broker>,
+    //response_routes: VecDeque<(u32,RespondTo)>,
+    //resolver_tx: mpsc::UnboundedSender<String>,
 }
 
 #[derive(Debug)]
@@ -71,10 +77,13 @@ pub(crate) enum RespondTo {
 }
 
 impl Cluster {
-    pub fn new(bootstrap: Vec<String>, /*event_in: mpsc::UnboundedReceiver<EventIn>,*/ spawner: &mut LocalSpawner) ->
-        //mpsc::UnboundedReceiver<EventOut>
-        BiChannel<EventIn,EventOut>
+    /*
+    pub async fn new(bootstrap: Vec<String>) -> Cluster //(mpsc::UnboundedSender<EventIn>, mpsc::UnboundedReceiver<EventOut>)
     {
+        //bichannel::bichannel(|msg| )
+        Cluster {
+            bootstrap,
+        }
         let (cluster_request, cluster_response) = BiChannel::<EventIn,EventOut>::unbounded();
         let (response_tx, response_rx) = mpsc::unbounded();
 
@@ -91,17 +100,72 @@ impl Cluster {
         //
         // Cluster event loop
         //
-        spawner.spawn(async move {
-            await!(cluster_response.rx.for_each(|e|{
+        juliex::spawn(async move {
+            cluster_response.rx.for_each(|e|{
                 cluster.handle_event(e)
-            }));
+            }).await;
             debug!("Cluster event loop exited");
         }).unwrap();
 
         //response_rx
         cluster_request
     }
+        */
 
+    /// Connect to at least one broker successfully .
+    async fn connect(bootstrap: Vec<String>) -> io::Result<Self> {
+        let connect_futures = bootstrap
+            .iter()
+            // TODO: log bad addresses which did not parse
+            .filter_map(|addr| addr.parse().ok())
+            .map(Broker::connect);
+
+        // TODO: use `fold` to preserve and report last error if no result
+        /*let resolved = futures::stream::futures_unordered(connectFutures).
+                filter_map(|f| future::ready(f.ok())).
+                next();
+        let broker = match resolved.await {
+            Some(broker) => broker,
+            // TODO: failure
+            None => return Err(io::Error::from(io::ErrorKind::NotFound)),
+        };*/
+
+        let mut resolved = futures::stream::FuturesUnordered::from_iter(connect_futures)
+            .filter_map(|f| future::ready(f.ok()));
+        let broker = match resolved.next().await {
+            Some(broker) => broker,
+            // TODO: failure
+            None => return Err(io::Error::from(io::ErrorKind::NotFound)),
+        };
+
+        // TODO: move it to BrokerConnection
+        debug!("Connected to {:?}", broker);
+
+        let cluster = Cluster {
+            bootstrap,
+            connections: vec![broker],
+        };
+
+        //cluster.start_topic_resolver().await?;
+
+        Ok(cluster)
+    }
+
+    async fn resolve_topic(&self, topic: &str) -> Result<protocol::MetadataResponse0, String> {
+        for broker in &self.connections {
+
+            let res = broker.request(req).await;
+        }
+        // TODO: how to implement recovery policy?
+        self.connections.iter_mut().map(|conn| {
+            let req = protocol::MetadataRequest0 {topics: vec![topic]};
+            let resp = conn.request(req).await?;
+        })
+    }
+
+}
+
+    /*
     fn handle_event(&mut self, e: EventIn) -> impl Future<Output=()> {
         match e {
             EventIn::ResolveTopic(topic) => {
@@ -132,56 +196,9 @@ impl Cluster {
         let conn = self.connections.get(0);
         future::ready(&conn)
     }
-
-/*    /// Must guarantee at least one connection in `self.connections`
-        /// in case of success.
-        pub async fn connect<'a>(bootstrap: &'a [&'a str]) -> io::Result<Self> {
-            let connect_futures = bootstrap
-                .iter()
-                .filter_map(|addr| addr.parse().ok())
-                .map(Broker::connect);
-
-
-
-
-            // TODO: use `fold` to preserve and report last error if no result
-            /*let resolved = futures::stream::futures_unordered(connectFutures).
-                    filter_map(|f| future::ready(f.ok())).
-                    next();
-            let broker = match await!(resolved) {
-                Some(broker) => broker,
-                // TODO: failure
-                None => return Err(io::Error::from(io::ErrorKind::NotFound)),
-            };*/
-
-            let x = futures::stream::poll_fn(connect_futures);
-
-            let mut resolved1 = futures::stream::futures_unordered(connect_futures)
-                .filter_map(|f| future::ready(f.ok()));
-            let broker = match await!(resolved1.next()) {
-                Some(broker) => broker,
-                // TODO: failure
-                None => return Err(io::Error::from(io::ErrorKind::NotFound)),
-            };
-
-            // TODO: move it to BrokerConnection
-            debug!("Connected to {:?}", broker);
-
-            /*let request = protocol::MetadataRequest0{topics};
-            let response = await!(broker.request(&request));
-            debug!("Metadata response: {:?}", response);
-            */
-
-            let bootstrap: Vec<String> = bootstrap.iter().map(|&a| a.to_string()).collect();
-            /*Ok(Cluster {
-                bootstrap,
-                //topic_meta: response
-            })*/
-            Err(io::Error::from(io::ErrorKind::NotConnected))
-        }
     */
-}
 
+/*
 fn start_topic_resolver(event_in: mpsc::UnboundedReceiver<String>, cluster_tx: mpsc::UnboundedSender<EventIn>, spawner: &mut LocalSpawner) -> mpsc::UnboundedReceiver<protocol::TopicMetadata> {
     let (response_tx, response_rx) = mpsc::unbounded();
 
@@ -193,7 +210,7 @@ fn start_topic_resolver(event_in: mpsc::UnboundedReceiver<String>, cluster_tx: m
     let exec_loop = async move {
         let mut topic_list = HashSet::<String>::new();
         let mut topic_in_progress = HashSet::<String>::new();
-        await!(event_in.for_each(|topic_or_timer| {
+        event_in.for_each(|topic_or_timer| {
             debug!("topic_resolver: {:?}", topic_or_timer);
             match topic_or_timer {
                 Either::Left(topic) => {
@@ -224,7 +241,7 @@ fn start_topic_resolver(event_in: mpsc::UnboundedReceiver<String>, cluster_tx: m
                 }
             }
             future::ready(())
-        }));
+        }).await;
         debug!("topic_resolver loop exited");
     };
 
@@ -232,31 +249,37 @@ fn start_topic_resolver(event_in: mpsc::UnboundedReceiver<String>, cluster_tx: m
 
     response_rx
 }
+*/
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use simplelog::*;
-    use futures::executor::LocalPool;
+    use futures::executor;
+    use std::env;
+    use std::net::ToSocketAddrs;
 
     #[test]
     fn resolve() {
         CombinedLogger::init(vec![
-            TermLogger::new(LevelFilter::Debug, Config::default()).unwrap()
+            TermLogger::new(LevelFilter::Debug, Config::default(), TerminalMode::Stdout).unwrap()
         ])
         .unwrap();
-        debug!("Starting test");
 
-        let mut pool = LocalPool::new();
-        let mut spawner = pool.spawner();
-        pool.run_until(
+        executor::block_on(
             async {
-                let addr = vec!["127.0.0.1:9092".to_string()];
+                //let addr = vec!["127.0.0.1:9092".to_string()];
+                let bootstrap = vec!["no.such.host.com:9092".to_string(), env::var("kafka-bootstrap").unwrap_or("127.0.0.1:9092".to_string())];
+
                 //let (tx, rx) = mpsc::unbounded();
-                let mut channel = Cluster::new(addr, /*rx,*/ &mut spawner);
+                let mut cluster = Cluster::connect(bootstrap).await.unwrap();
+                debug!("Connected: {:?}", cluster);
+                let topic_meta = cluster.resolve_topic("test1").await.unwrap();
+                debug!("Resolved topic: {:?}", topic_meta);
+                
                 //info!("Bootstrapped: {:?}", cluster);
-                channel.tx.unbounded_send(EventIn::ResolveTopic("test1".to_string())).unwrap();
-                let res = dbg!(await!(channel.rx.next()));
+                //cluster.tx.unbounded_send(EventIn::ResolveTopic("test1".to_string())).unwrap();
+                //let res = dbg!(cluster.rx.next().await);
                 //debug!("Got response");
             },
         );

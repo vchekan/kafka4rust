@@ -172,7 +172,7 @@ where
 
     async fn close(&mut self) -> Result<(), mpsc::SendError> {
         self.closed = true;
-        await!(self.cmd_channel.send(Event::Close))
+        self.cmd_channel.send(Event::Close).await
     }
 }
 
@@ -211,9 +211,9 @@ impl ProducerLoop {
             };
 
             loop {
-                if let Some(e) = await!(data_receiver.next()) {
+                if let Some(e) = data_receiver.next().await {
                     // TODO: any chance to pass event's reference?
-                    await!(producer.handle_event(e));
+                    producer.handle_event(e).await;
                 } else {
                     debug!("Event channel closed, exiting producer loop");
                 }
@@ -230,7 +230,7 @@ impl ProducerLoop {
     {
         match e {
             Event::<M>::MessageIn(msg, topic, _partition) => {
-                await!(self.handle_message(&msg, &topic));
+                self.handle_message(&msg, &topic).await;
             }
             Event::<M>::Close => {
                 debug!("handle_event: Got Close");
@@ -386,9 +386,9 @@ mod test {
                         key: i.to_string(),
                         value: msg,
                     };
-                    await!(producer.send::<P1>(msg, "topic1".to_string()));
+                    producer.send::<P1>(msg, "topic1".to_string()).await;
                 }
-                await!(producer.close()).expect("Failure when closing producer");
+                producer.close().await.expect("Failure when closing producer");
 
                 let mut closed = events
                     .inspect(|e| println!("producer.events({:?})", e))
@@ -400,7 +400,7 @@ mod test {
                         }
                     });
                 let closed = closed.next();
-                match await!(closed) {
+                match closed.await {
                     Some(AppEvent::Closed) => println!("Got close event"),
                     None => println!("Producer events closed without sending Close. Not nice!"),
                     x => println!("That's unexpected: {:?}", x),

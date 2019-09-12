@@ -3,11 +3,11 @@ use bytes::{Buf, BufMut, ByteOrder};
 use std::fmt::Debug;
 
 pub trait ToKafka {
-    fn to_kafka(&self, buff: &mut BufMut);
+    fn to_kafka(&self, buff: &mut impl BufMut);
 }
 
 pub trait FromKafka {
-    fn from_kafka(buff: &mut Buf) -> Self;
+    fn from_kafka(buff: &mut impl Buf) -> Self;
 }
 
 pub trait ApiKey {
@@ -43,7 +43,7 @@ pub fn write_request<T>(
     BigEndian::write_u32(&mut buff[0..4], size as u32);
 }
 
-pub fn read_response<T>(buff: &mut Buf) -> (u32, T)
+pub fn read_response<T>(buff: &mut impl Buf) -> (u32, T)
 where
     T: FromKafka,
 {

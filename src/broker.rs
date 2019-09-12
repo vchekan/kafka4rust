@@ -4,11 +4,14 @@ use crate::protocol::*;
 use std::io::{self, Cursor};
 use std::net::*;
 
+// TODO: if move negotiated api and correlation to broker connection, this struct degenerates.
+// Is it redundant?
 #[derive(Debug)]
 pub(crate) struct Broker {
     /// (api_key, agreed_version)
-    negotiated_api_version: Vec<(i16, i16)>,
-    correlation_id: u32,
+    negotiated_api_version: Vec<(i16, i16)>,    // TODO: just in case, make it property of
+    // connection, to renegotiate every time we connect.
+    correlation_id: u32,    // TODO: is correlation property of broker or rather connection?
     conn: BrokerConnection,
 }
 
@@ -19,8 +22,10 @@ pub enum BrokerError {
 }
 
 impl Broker {
+    /// Connect to address and issue ApiVersion request, build compatible Api Versions for all Api
+    /// Keys
     pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
-        let mut conn = await!(BrokerConnection::connect(addr))?;
+        let mut conn = BrokerConnection::connect(addr).await?;
         let req = protocol::ApiVersionsRequest0 {};
         let mut buf = Vec::with_capacity(1024);
         // TODO: This is special case, we need correlationId and clientId before broker is created...
@@ -29,10 +34,10 @@ impl Broker {
 
         write_request(&req, correlation_id, client_id, &mut buf);
         debug!("Connected to {:?}, Requesting {:?}", conn, req);
-        await!(conn.request(&mut buf))?;
+        conn.request(&mut buf).await?;
 
         let mut cursor = Cursor::new(buf);
-        let (_corr_id, response) = read_response::<protocol::ApiVersionsResponse0>(&mut cursor);
+        let (_corr_id, response) = read_response(&mut cursor);
         debug!("Got ApiVersionResponse {:?}", response);
         let negotiated_api_version = Broker::get_api_compatibility(&response);
         Ok(Broker {
@@ -42,7 +47,7 @@ impl Broker {
         })
     }
 
-    pub async fn request<'a, R>(&'a mut self, request: &'a R) -> io::Result<R::Response>
+    pub async fn request<'a, R>(&'a self, request: &'a R) -> io::Result<R::Response>
     where
         R: protocol::Request,
     {
@@ -51,9 +56,9 @@ impl Broker {
         protocol::write_request(request, self.correlation_id, None, &mut buff);
         self.correlation_id += 1;
 
-        await!(self.conn.request(&mut buff))?;
+        self.conn.request(&mut buff).await?;
         let mut cursor = Cursor::new(buff);
-        let (corr_id, response) = read_response::<R::Response>(&mut cursor);
+        let (corr_id, response) : (_, R::Response) = read_response(&mut cursor);
         // TODO: check correlationId
         // TODO: check for response error
         debug!("CorrId: {}, Response: {:?}", corr_id, response);
@@ -98,13 +103,12 @@ mod tests {
 
     #[test]
     fn negotiate_api_works() {
-        let bootstrap = env::var("kafka-bootstrap").unwrap_or("127.0.0.1".to_string());
-        let addr = format!("{}:9092", bootstrap);
-        let addr: SocketAddr = addr.parse().unwrap();
+        let bootstrap = env::var("kafka-bootstrap").unwrap_or("127.0.0.1:9092".to_string());
+        let addr: SocketAddr = bootstrap.to_socket_addrs().unwrap().next().expect(format!("Host '{}' not found", bootstrap).as_str());
 
         executor::block_on(
             async {
-                let broker = await!(super::Broker::connect(addr)).unwrap();
+                let broker = super::Broker::connect(addr).await.unwrap();
                 println!("Broker: {:?}", broker);
             },
         );
