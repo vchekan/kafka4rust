@@ -8,7 +8,7 @@ pub fn zigzag_len(mut d: u64) -> u8 {
 
     d <<= 1;
 
-    let mut i= 0;
+    let mut i = 0;
     while d > 0 {
         d >>= 7;
         i += 1;
@@ -33,8 +33,8 @@ pub fn zigzag64(mut n: u64, buf: &mut [u8]) -> &[u8] {
         n >>= 7;
         res <<= 7;
         i += 1;
-    };
-    buf[i-1] &= 0b0111_1111;
+    }
+    buf[i - 1] &= 0b0111_1111;
     return &buf[..i];
 }
 
@@ -50,12 +50,12 @@ mod test {
         assert_eq!(zigzag_len(0b1111_1111), 2);
         // TODO: finish tests
         /*assert_eq!(zigzag_len(0b1000_0000_0111_1111), 3);
-        */
+         */
     }
 
     #[test]
     fn test_encoding() {
-        let mut buf = vec![0,0,0,0,0,0,0,0];
+        let mut buf = vec![0, 0, 0, 0, 0, 0, 0, 0];
         assert_eq!(zigzag64(0b0000_0000, &mut buf), vec![0].as_slice());
         assert_eq!(zigzag64(0b0000_0001, &mut buf), vec![2].as_slice());
         assert_eq!(zigzag64(0b0000_0011, &mut buf), vec![6].as_slice());

@@ -21,21 +21,21 @@
 
 use byteorder::BigEndian;
 use bytes::ByteOrder;
+use log::debug;
 use std::io;
 use std::net::SocketAddr;
-use log::debug;
 
-use async_std::prelude::*;
 use async_std::net::TcpStream;
+use async_std::prelude::*;
 use async_std::sync::Mutex;
 use std::sync::Arc;
 
-pub(crate) const CLIENT_ID : &str = "k4rs";
+pub(crate) const CLIENT_ID: &str = "k4rs";
 
 #[derive(Debug, Clone)]
 pub struct BrokerConnection {
     addr: SocketAddr,
-    inner : Arc<Mutex<Inner>>,
+    inner: Arc<Mutex<Inner>>,
 }
 
 #[derive(Debug)]
@@ -50,13 +50,12 @@ impl BrokerConnection {
     pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
         let tcp = TcpStream::connect(&addr).await?;
 
-
         let conn = BrokerConnection {
             addr,
             inner: Arc::new(Mutex::new(Inner {
                 //correlation_id: 0,
                 tcp,
-            }))
+            })),
         };
 
         Ok(conn)
@@ -194,7 +193,7 @@ impl AsyncRead for SequentialReader {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<Result<usize, io::Error>> {
         self.queue.push_back(cx.waker().clone());
         if self.queue.len() == 1 {
-            
+
             match self.inner.poll_read(cx, buf) {
                 Poll::Ready(res) => {
                     self.queue.pop_front();
@@ -217,16 +216,17 @@ impl AsyncRead for SequentialReader {
 }
 */
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::net::ToSocketAddrs;
-    use std::io::Cursor;
+    use crate::protocol::{
+        read_response, write_request, ApiVersionsRequest0, ApiVersionsResponse0,
+    };
     use async_std::task;
+    use std::env;
+    use std::io::Cursor;
+    use std::net::ToSocketAddrs;
     use std::sync::Arc;
-    use crate::protocol::{ApiVersionsRequest0, ApiVersionsResponse0, write_request, read_response};
 
     #[test]
     fn it_works() {
@@ -239,22 +239,24 @@ mod tests {
             .next()
             .expect(format!("Host '{}' not found", bootstrap).as_str());
 
-        task::block_on(
-            async move {
-                let conn = Arc::new(BrokerConnection::connect(addr).await.unwrap());
-                info!("conn: {:?}", conn);
-                for _ in 0..2 {
-                    let conn = conn.clone();
-                     task::spawn(async move {
-                        let request = ApiVersionsRequest0 {};
-                        let mut buff = Vec::new();
-                        write_request(&request, 0, None, &mut buff);
-                        conn.request(&mut buff).await.unwrap();
-                        let (correlation_id, versions) : (_, ApiVersionsResponse0) = read_response(&mut Cursor::new(buff));
-                        debug!("correlationId: {}, versions: {:?}", correlation_id, versions);
-                    });
-                };
-            },
-        );
+        task::block_on(async move {
+            let conn = Arc::new(BrokerConnection::connect(addr).await.unwrap());
+            info!("conn: {:?}", conn);
+            for _ in 0..2 {
+                let conn = conn.clone();
+                task::spawn(async move {
+                    let request = ApiVersionsRequest0 {};
+                    let mut buff = Vec::new();
+                    write_request(&request, 0, None, &mut buff);
+                    conn.request(&mut buff).await.unwrap();
+                    let (correlation_id, versions): (_, ApiVersionsResponse0) =
+                        read_response(&mut Cursor::new(buff));
+                    debug!(
+                        "correlationId: {}, versions: {:?}",
+                        correlation_id, versions
+                    );
+                });
+            }
+        });
     }
 }

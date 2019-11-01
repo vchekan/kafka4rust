@@ -2,12 +2,12 @@
 #![feature(arbitrary_self_types)]
 #![feature(async_closure)]
 
-mod error;
-mod protocol;
-mod connection;
 mod broker;
 mod cluster;
+mod connection;
+mod error;
 mod producer;
+mod protocol;
 //mod consumer;
 mod zigzag;
 

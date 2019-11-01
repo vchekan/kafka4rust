@@ -1,22 +1,22 @@
 use crate::connection::BrokerConnection;
+use crate::error::Result;
 use crate::protocol;
 use crate::protocol::*;
+use failure::_core::fmt::Debug;
+use log::debug;
 use std::io::{self, Cursor};
 use std::net::*;
-use failure::_core::fmt::Debug;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use crate::error::Result;
-use log::debug;
 
 // TODO: if move negotiated api and correlation to broker connection, this struct degenerates.
 // Is it redundant?
 #[derive(Debug)]
 pub(crate) struct Broker {
     /// (api_key, agreed_version)
-    negotiated_api_version: Vec<(i16, i16)>,    // TODO: just in case, make it property of
+    negotiated_api_version: Vec<(i16, i16)>, // TODO: just in case, make it property of
     // connection, to renegotiate every time we connect.
     //correlation_id: u32,    // TODO: is correlation property of broker or rather connection?
-    correlation_id : AtomicUsize,
+    correlation_id: AtomicUsize,
     conn: BrokerConnection,
 }
 
@@ -56,7 +56,7 @@ impl Broker {
 
         self.conn.request(&mut buff).await?;
         let mut cursor = Cursor::new(buff);
-        let (corr_id, response) : (_, R::Response) = read_response(&mut cursor);
+        let (corr_id, response): (_, R::Response) = read_response(&mut cursor);
         // TODO: check correlationId
         // TODO: check for response error
         debug!("CorrId: {}, Response: {:?}", corr_id, response);
@@ -72,7 +72,10 @@ impl Broker {
         // Empty join: max<min. For successful join: min<=max
         //
         let my_versions = protocol::supported_versions();
-        debug!("build_api_compatibility my_versions: {:?} them: {:?}", my_versions, them);
+        debug!(
+            "build_api_compatibility my_versions: {:?} them: {:?}",
+            my_versions, them
+        );
 
         them.api_versions
             .iter()
@@ -100,25 +103,29 @@ mod tests {
     use super::*;
     //use futures::executor;
     use async_std::task;
-    use std::env;
     use log::debug;
+    use std::env;
 
     #[test]
     fn negotiate_api_works() {
         simple_logger::init_with_level(log::Level::Debug).unwrap();
 
         let bootstrap = env::var("kafka-bootstrap").unwrap_or("127.0.0.1:9092".to_string());
-        let addr: SocketAddr = bootstrap.to_socket_addrs().unwrap().next().expect(format!("Host '{}' not found", bootstrap).as_str());
+        let addr: SocketAddr = bootstrap
+            .to_socket_addrs()
+            .unwrap()
+            .next()
+            .expect(format!("Host '{}' not found", bootstrap).as_str());
 
-        task::block_on(
-            async {
-                let mut broker = super::Broker::connect(addr).await.unwrap();
-                info!("Connected: {:?}", broker);
+        task::block_on(async {
+            let mut broker = super::Broker::connect(addr).await.unwrap();
+            info!("Connected: {:?}", broker);
 
-                let req = MetadataRequest0 {topics: vec!["test".into()]};
-                let meta = broker.request(&req).await.unwrap();
-                debug!("Meta response: {:?}", meta);
-            },
-        );
+            let req = MetadataRequest0 {
+                topics: vec!["test".into()],
+            };
+            let meta = broker.request(&req).await.unwrap();
+            debug!("Meta response: {:?}", meta);
+        });
     }
 }

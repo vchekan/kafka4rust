@@ -1,17 +1,17 @@
-use bytes::{BytesMut, BufMut};
-use std::collections::HashMap;
-use crate::zigzag::{zigzag64, zigzag_len};
-use std::time::UNIX_EPOCH;
 use crate::producer::QueuedMessage;
-use byteorder::{ByteOrder, BigEndian};
+use crate::zigzag::{zigzag64, zigzag_len};
+use byteorder::{BigEndian, ByteOrder};
+use bytes::{BufMut, BytesMut};
 use crc32fast;
+use std::collections::HashMap;
+use std::time::UNIX_EPOCH;
 
-const zero32 : [u8; 4] = [0,0,0,0];
-const zero64 : [u8; 8] = [0,0,0,0,0,0,0,0];
-const minus_one64 : [u8; 8] = [0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff];
-const minus_one32 : [u8; 4] = [0xff,0xff,0xff,0xff];
-const minus_one16 : [u8; 2] = [0xff,0xff];
-const varint_minus_one : u8 = 1;
+const zero32: [u8; 4] = [0, 0, 0, 0];
+const zero64: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
+const minus_one64: [u8; 8] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+const minus_one32: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
+const minus_one16: [u8; 2] = [0xff, 0xff];
+const varint_minus_one: u8 = 1;
 
 #[repr(u16)]
 enum CompressionType {
@@ -25,13 +25,14 @@ enum CompressionType {
 #[repr(u16)]
 enum TimestampType {
     Create = 0,
-    LogAppend = 1 << 3
+    LogAppend = 1 << 3,
 }
 
 pub(crate) struct ProducerRequest0<'a> {
-    pub acks: i16,    // 0 for no acknowledgments, 1 for only the leader and -1 for the full ISR.
+    pub acks: i16, // 0 for no acknowledgments, 1 for only the leader and -1 for the full ISR.
     pub timeout: i32, // The time to await a response in ms
-    pub topic_data: &'a HashMap<&'a String, HashMap<u32, (&'a [QueuedMessage], &'a [QueuedMessage])>>,
+    pub topic_data:
+        &'a HashMap<&'a String, HashMap<u32, (&'a [QueuedMessage], &'a [QueuedMessage])>>,
 }
 
 impl ProducerRequest0<'_> {
@@ -58,7 +59,7 @@ impl ProducerRequest0<'_> {
                 // Record batch
                 //
                 buf.reserve(
-            8  // base offset
+                    8  // base offset
                     + 4 // batch len
                     + 4 // partition leader epoch
                     + 1 // magic
@@ -70,30 +71,33 @@ impl ProducerRequest0<'_> {
                     + 8 // producer id
                     + 2 // producer epoch
                     + 4 //base sequence
-                    + 4 // recordset size
+                    + 4, // recordset size
                 );
 
-                buf.put_slice(&zero64);  // base offset
+                buf.put_slice(&zero64); // base offset
                 let batch_len_bookmark = buf.len();
                 buf.put_slice(&zero32);
                 buf.put_slice(&minus_one32); // partition leader epoch
-                buf.put_u8(2);  // magic
+                buf.put_u8(2); // magic
                 let crc_bookmark = buf.len();
-                buf.put_slice(&zero32);  // crc
+                buf.put_slice(&zero32); // crc
                 buf.put_u16_be(
                     CompressionType::None as u16    // TODO
-                    | TimestampType::Create as u16
+                    | TimestampType::Create as u16,
                 );
-                buf.put_slice(&zero32);  // last offset delta
+                buf.put_slice(&zero32); // last offset delta
 
                 // TODO: timestamp messages and get timestamp from the first one
-                let first_timestamp = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                let first_timestamp = std::time::SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
                 buf.put_u64_be(first_timestamp);
                 // TODO: max timestamp
                 buf.put_u64_be(first_timestamp);
-                buf.put_slice(&minus_one64);    // producer id
-                buf.put_slice(&minus_one16);    // producer epoch
-                buf.put_slice(&minus_one32);    // base sequence
+                buf.put_slice(&minus_one64); // producer id
+                buf.put_slice(&minus_one16); // producer epoch
+                buf.put_slice(&minus_one32); // base sequence
 
                 // records array
                 let rs_len = recordset1.len() + recordset2.len();
@@ -125,13 +129,12 @@ fn mk_record(buf: &mut BytesMut, offset_delta: u64, timestamp_delta: u64, msg: &
         Some(key) => key.len(),
         None => 0,
     };
-    let mut len : u64 =
-        1 + // attr
+    let mut len: u64 = 1 + // attr
         zigzag_len(timestamp_delta) as u64 +
         zigzag_len(offset_delta) as u64 +
         zigzag_len(key_len as u64) as u64 + key_len as u64+
         zigzag_len(msg.value.len() as u64) as u64 + msg.value.len() as u64+
-        1;  // TODO: headers
+        1; // TODO: headers
     len += zigzag_len(len) as u64; // size of len itself
     buf.reserve(len as usize);
 
@@ -143,10 +146,10 @@ fn mk_record(buf: &mut BytesMut, offset_delta: u64, timestamp_delta: u64, msg: &
         Some(key) => {
             buf.put_slice(zigzag64(key_len as u64, &mut varint_buf));
             buf.put_slice(key);
-        },
-        None => buf.put_u8(varint_minus_one)
+        }
+        None => buf.put_u8(varint_minus_one),
     }
     buf.put_slice(zigzag64(msg.value.len() as u64, &mut varint_buf));
     buf.put_slice(&msg.value);
-    buf.put_u8(0);  // TODO: headers
+    buf.put_u8(0); // TODO: headers
 }

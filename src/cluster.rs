@@ -1,3 +1,11 @@
+use crate::broker::Broker;
+use crate::error::{Error, Result};
+use crate::protocol;
+use futures::{
+    future::ready,
+    stream::{FuturesUnordered, StreamExt},
+};
+use std::io;
 /// Design questions
 /// Q: What is communication and ownership between Cluster and TopicResolver?
 /// A: channels
@@ -21,19 +29,7 @@
 /// A: Problem with reading answer. If 2 requests were send immediately one after another, Kafka
 /// will preserve order. But do we have guaranteed order of execution of 2 tasks reading responses?
 /// I don't think so. So we need correlation_id based responses.
-
 use std::iter::FromIterator;
-use crate::broker::Broker;
-use futures::{
-    future::ready,
-    stream::{
-        FuturesUnordered,
-        StreamExt,
-    }};
-use std::io;
-use crate::protocol;
-use crate::error::{Result, Error};
-
 
 #[derive(Debug)]
 pub(crate) struct Cluster {
@@ -46,8 +42,8 @@ pub(crate) struct Cluster {
 }
 
 #[derive(Debug)]
-pub (crate) enum EventOut {
-    ResolvedTopic(protocol::TopicMetadata)
+pub(crate) enum EventOut {
+    ResolvedTopic(protocol::TopicMetadata),
 }
 
 #[derive(Debug)]
@@ -109,8 +105,8 @@ impl Cluster {
             None => return Err(io::Error::from(io::ErrorKind::NotFound)),
         };*/
 
-        let mut resolved = FuturesUnordered::from_iter(connect_futures)
-            .filter_map(|f| ready(f.ok()));
+        let mut resolved =
+            FuturesUnordered::from_iter(connect_futures).filter_map(|f| ready(f.ok()));
         let broker = match resolved.next().await {
             Some(broker) => broker,
             // TODO: failure
@@ -132,10 +128,12 @@ impl Cluster {
 
     pub(crate) async fn resolve_topic(&self, topic: &str) -> Result<protocol::MetadataResponse0> {
         for broker in &self.connections {
-            let req = protocol::MetadataRequest0 {topics: vec![topic.into()]};
+            let req = protocol::MetadataRequest0 {
+                topics: vec![topic.into()],
+            };
             let res = broker.request(&req).await?;
             return Ok(res);
-        };
+        }
 
         // TODO: start recovery?
         Err(Error::NoBrokerAvailable)
@@ -148,41 +146,40 @@ impl Cluster {
         })
         */
     }
-
 }
 
-    /*
-    fn handle_event(&mut self, e: EventIn) -> impl Future<Output=()> {
-        match e {
-            EventIn::ResolveTopic(topic) => {
-                self.resolver_tx.unbounded_send(topic).unwrap();
-                FuturesUnion2::F1(future::ready(()))
-            },
-            EventIn::TopicResolved(meta) => {
-                self.response_tx.unbounded_send(EventOut::ResolvedTopic(meta)).expect("Send failed");
-                FuturesUnion2::F1(future::ready(()))
-            },
-            EventIn::FetchTopicMetadata(topic, respond_to) => {
-                FuturesUnion2::F2(self.get_any_or_connect().
-                    map(|conn| {
-                        ()
-                    }))
-            }
+/*
+fn handle_event(&mut self, e: EventIn) -> impl Future<Output=()> {
+    match e {
+        EventIn::ResolveTopic(topic) => {
+            self.resolver_tx.unbounded_send(topic).unwrap();
+            FuturesUnion2::F1(future::ready(()))
+        },
+        EventIn::TopicResolved(meta) => {
+            self.response_tx.unbounded_send(EventOut::ResolvedTopic(meta)).expect("Send failed");
+            FuturesUnion2::F1(future::ready(()))
+        },
+        EventIn::FetchTopicMetadata(topic, respond_to) => {
+            FuturesUnion2::F2(self.get_any_or_connect().
+                map(|conn| {
+                    ()
+                }))
         }
     }
+}
 
-    fn get_any_or_connect(&mut self) -> impl Future<Output=&BrokerConnection> {
-        // TODO: simple strategy for now, get first connection
-        if self.connections.len() == 0 {
-            // TODO: check result
-            self.connect();
-        }
-
-        // After connect, we have at least one connection
-        let conn = self.connections.get(0);
-        future::ready(&conn)
+fn get_any_or_connect(&mut self) -> impl Future<Output=&BrokerConnection> {
+    // TODO: simple strategy for now, get first connection
+    if self.connections.len() == 0 {
+        // TODO: check result
+        self.connect();
     }
-    */
+
+    // After connect, we have at least one connection
+    let conn = self.connections.get(0);
+    future::ready(&conn)
+}
+*/
 
 /*
 fn start_topic_resolver(event_in: mpsc::UnboundedReceiver<String>, cluster_tx: mpsc::UnboundedSender<EventIn>, spawner: &mut LocalSpawner) -> mpsc::UnboundedReceiver<protocol::TopicMetadata> {
@@ -240,28 +237,29 @@ fn start_topic_resolver(event_in: mpsc::UnboundedReceiver<String>, cluster_tx: m
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
     use async_std::task;
+    use std::env;
 
     #[test]
     fn resolve() {
         simple_logger::init_with_level(log::Level::Debug).unwrap();
 
-        task::block_on(
-            async {
-                //let addr = vec!["127.0.0.1:9092".to_string()];
-                let bootstrap = vec!["no.such.host.com:9092".to_string(), env::var("kafka-bootstrap").unwrap_or("127.0.0.1:9092".to_string())];
+        task::block_on(async {
+            //let addr = vec!["127.0.0.1:9092".to_string()];
+            let bootstrap = vec![
+                "no.such.host.com:9092".to_string(),
+                env::var("kafka-bootstrap").unwrap_or("127.0.0.1:9092".to_string()),
+            ];
 
-                //let (tx, rx) = mpsc::unbounded();
-                let mut cluster = Cluster::connect(bootstrap).await.unwrap();
-                let topic_meta = cluster.resolve_topic("test1").await.unwrap();
-                debug!("Resolved topic: {:?}", topic_meta);
-                
-                //info!("Bootstrapped: {:?}", cluster);
-                //cluster.tx.unbounded_send(EventIn::ResolveTopic("test1".to_string())).unwrap();
-                //let res = dbg!(cluster.rx.next().await);
-                //debug!("Got response");
-            },
-        );
+            //let (tx, rx) = mpsc::unbounded();
+            let mut cluster = Cluster::connect(bootstrap).await.unwrap();
+            let topic_meta = cluster.resolve_topic("test1").await.unwrap();
+            debug!("Resolved topic: {:?}", topic_meta);
+
+            //info!("Bootstrapped: {:?}", cluster);
+            //cluster.tx.unbounded_send(EventIn::ResolveTopic("test1".to_string())).unwrap();
+            //let res = dbg!(cluster.rx.next().await);
+            //debug!("Got response");
+        });
     }
 }

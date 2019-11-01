@@ -35,7 +35,9 @@ pub fn write_request<T>(
     buff.put_u16_be(T::api_key());
     buff.put_u16_be(T::api_version());
     buff.put_u32_be(correlation_id);
-    client_id.unwrap_or(crate::connection::CLIENT_ID).to_kafka(buff);
+    client_id
+        .unwrap_or(crate::connection::CLIENT_ID)
+        .to_kafka(buff);
     request.to_kafka(buff);
 
     // fix message size

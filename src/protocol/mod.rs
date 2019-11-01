@@ -3,12 +3,12 @@ mod api;
 mod macros;
 mod capabilities;
 mod primitives;
+mod producer_request;
 mod requests;
 mod responses;
-mod producer_request;
 
 pub use self::api::*;
 pub(crate) use self::capabilities::supported_versions;
+pub(crate) use self::producer_request::ProducerRequest0;
 pub use self::requests::*;
 pub use self::responses::*;
-pub(crate) use self::producer_request::ProducerRequest0;
