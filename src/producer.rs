@@ -332,16 +332,6 @@ impl Buffer {
     fn mk_recordset(&self) {
         // TODO: implement FIFO and request size bound algorithm
 
-        /*
-        let mut topic_data = vec![protocol::TopicProduceData {
-            topic: topic.clone(),
-            data: protocol::ProduceData {
-                partition: 0,
-                record_set: vec![],
-            },
-        }];
-        */
-
         debug!("self.topics: {:?}", self.topics);
         // broker_id->topic->partition->recordset[]
         let mut broker_partitioned = HashMap::<
@@ -351,7 +341,7 @@ impl Buffer {
         self.topics.iter().for_each(|(topic, partitions)| {
             // N-th partition in queue match to partition number itself, so use `enumerate()`
             // instead of storing partition number in the queue
-            let partition_message = partitions.iter().enumerate().
+            partitions.iter().enumerate().
                 // Only non-empty queues
                 filter(|(_,q)| q.len() > 0).
                 for_each(|(partition, queue)| {
@@ -363,9 +353,6 @@ impl Buffer {
                     let topics = broker_partitioned.entry(*broker_id).or_insert_with(|| HashMap::new());
                     let partitions = topics.entry(topic).or_insert_with(|| HashMap::new());
                     assert!(partitions.insert(partition, queue.as_slices()).is_none());
-                    //let recordsets = partitions.entry(partition).or_insert_with(||vec![]);
-                    //let x = queue.as_slices();
-                    //recordsets.push(x);
                 });
         });
 
@@ -378,25 +365,6 @@ impl Buffer {
         */
 
         debug!("Recordset: {:?}", broker_partitioned);
-
-        /*protocol::TopicProduceData {
-            topic: topic.clone(),
-            data: protocol::ProduceData {
-                partition: 0,
-                record_set: vec![],
-            },
-        }*/
-        //};
-
-        /*
-        let set = protocol::ProduceRequest0 {
-            acks: 1,
-            timeout: 5000,
-            topic_data
-        };
-
-        set
-        */
     }
 }
 
@@ -438,7 +406,6 @@ impl ToMessage for StringMessage {
 mod test {
     use super::*;
     use async_std::task;
-    use std::time::UNIX_EPOCH;
 
     struct P1 {}
     impl Partitioner<StringMessage> for P1 {
@@ -462,7 +429,7 @@ mod test {
                     key: i.to_string(),
                     value: msg,
                 };
-                producer.send::<P1, _>(msg, "topic1".to_string()).await;
+                producer.send::<P1, _>(msg, "topic1".to_string()).await.expect("Send failed");
             }
             debug!("{:?}", producer);
             producer

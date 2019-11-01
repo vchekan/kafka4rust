@@ -25,13 +25,10 @@ pub fn zigzag64(mut n: u64, buf: &mut [u8]) -> &[u8] {
 
     n <<= 1;
 
-    let mut res = 0;
     let mut i = 0;
     while n != 0 {
         buf[i] = n as u8 & 0b0111_1111 | 0b1000_0000;
-        res |= n & 0b0111_1111;
         n >>= 7;
-        res <<= 7;
         i += 1;
     }
     buf[i - 1] &= 0b0111_1111;

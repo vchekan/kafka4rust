@@ -1,4 +1,3 @@
-#![feature(async_await)]
 #![feature(arbitrary_self_types)]
 #![feature(async_closure)]
 
