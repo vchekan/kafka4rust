@@ -1,26 +1,19 @@
-#![feature(async_await, futures_api)]
+#![feature(async_await)]
 #![feature(arbitrary_self_types)]
+#![feature(async_closure)]
 
-mod bichannel;
-mod timer;
+mod error;
 mod protocol;
-//mod correlation_future;
 mod connection;
 mod broker;
-//mod cluster;
-//mod producer;
+mod cluster;
+mod producer;
 //mod consumer;
-//mod futures_union;
+mod zigzag;
 
 extern crate failure;
-#[macro_use]
-extern crate failure_derive;
-
-extern crate futures;
 
 extern crate byteorder;
 extern crate bytes;
-extern crate derive_builder;
 #[macro_use]
 extern crate log;
-extern crate simplelog;

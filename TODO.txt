@@ -18,6 +18,10 @@
 * Open Tracing
 * Trained dictionary for lz4
 * Stats about producer/consumer buffers waiting, server throttling
+* Use crate::tracing
+* CI: do `cargo audit`
+* Failure model: fail up to connection reset instead of panic.
+* Use hashmap's raw_entry
 
 == Projects
 * CLI tools

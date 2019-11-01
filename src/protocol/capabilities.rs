@@ -69,5 +69,6 @@ pub(crate) fn supported_versions() -> Vec<(i16, i16, i16)> {
     vec![
         (2, 0, 0), // 2 ListOffset
         (3, 0, 0), // 3 MetadataRequest
+        //(18, 0, 1), // ApiVersionsRequest
     ]
 }

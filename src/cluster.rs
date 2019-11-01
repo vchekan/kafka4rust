@@ -24,21 +24,16 @@
 
 use std::iter::FromIterator;
 use crate::broker::Broker;
-use futures::{future::{self, Future},
-              channel::mpsc,
-              executor::LocalSpawner,
-              task::SpawnExt,
-              FutureExt};
+use futures::{
+    future::ready,
+    stream::{
+        FuturesUnordered,
+        StreamExt,
+    }};
 use std::io;
 use crate::protocol;
-use std::collections::HashSet;
-use std::time::Duration;
-use futures::{StreamExt, executor};
-use crate::connection::BrokerConnection;
-use std::collections::vec_deque::VecDeque;
-use either::Either;
-use juliex;
-use crate::bichannel;
+use crate::error::{Result, Error};
+
 
 #[derive(Debug)]
 pub(crate) struct Cluster {
@@ -51,14 +46,6 @@ pub(crate) struct Cluster {
 }
 
 #[derive(Debug)]
-pub(crate) enum EventIn {
-    ResolveTopic(String),
-    TopicResolved(protocol::TopicMetadata),
-    // TODO: make this member private (move to internal events enum?)
-    FetchTopicMetadata(Vec<String>, RespondTo),
-}
-
-#[derive(Debug)]
 pub (crate) enum EventOut {
     ResolvedTopic(protocol::TopicMetadata)
 }
@@ -66,14 +53,6 @@ pub (crate) enum EventOut {
 #[derive(Debug)]
 pub(crate) struct Meta {
     //topic_meta: HashMap<i32, protocol::TopicMetadata>
-}
-
-/// When response from kafka comes back, whom to route response to
-/// (who requested the info).
-#[derive(Debug)]
-pub(crate) enum RespondTo {
-    Out,
-    TopicResolver,
 }
 
 impl Cluster {
@@ -113,7 +92,7 @@ impl Cluster {
         */
 
     /// Connect to at least one broker successfully .
-    async fn connect(bootstrap: Vec<String>) -> io::Result<Self> {
+    pub async fn connect(bootstrap: Vec<String>) -> io::Result<Self> {
         let connect_futures = bootstrap
             .iter()
             // TODO: log bad addresses which did not parse
@@ -130,8 +109,8 @@ impl Cluster {
             None => return Err(io::Error::from(io::ErrorKind::NotFound)),
         };*/
 
-        let mut resolved = futures::stream::FuturesUnordered::from_iter(connect_futures)
-            .filter_map(|f| future::ready(f.ok()));
+        let mut resolved = FuturesUnordered::from_iter(connect_futures)
+            .filter_map(|f| ready(f.ok()));
         let broker = match resolved.next().await {
             Some(broker) => broker,
             // TODO: failure
@@ -151,16 +130,23 @@ impl Cluster {
         Ok(cluster)
     }
 
-    async fn resolve_topic(&self, topic: &str) -> Result<protocol::MetadataResponse0, String> {
+    pub(crate) async fn resolve_topic(&self, topic: &str) -> Result<protocol::MetadataResponse0> {
         for broker in &self.connections {
+            let req = protocol::MetadataRequest0 {topics: vec![topic.into()]};
+            let res = broker.request(&req).await?;
+            return Ok(res);
+        };
 
-            let res = broker.request(req).await;
-        }
+        // TODO: start recovery?
+        Err(Error::NoBrokerAvailable)
+
+        /*
         // TODO: how to implement recovery policy?
         self.connections.iter_mut().map(|conn| {
             let req = protocol::MetadataRequest0 {topics: vec![topic]};
             let resp = conn.request(req).await?;
         })
+        */
     }
 
 }
@@ -254,26 +240,20 @@ fn start_topic_resolver(event_in: mpsc::UnboundedReceiver<String>, cluster_tx: m
 #[cfg(test)]
 mod tests {
     use super::*;
-    use simplelog::*;
-    use futures::executor;
     use std::env;
-    use std::net::ToSocketAddrs;
+    use async_std::task;
 
     #[test]
     fn resolve() {
-        CombinedLogger::init(vec![
-            TermLogger::new(LevelFilter::Debug, Config::default(), TerminalMode::Stdout).unwrap()
-        ])
-        .unwrap();
+        simple_logger::init_with_level(log::Level::Debug).unwrap();
 
-        executor::block_on(
+        task::block_on(
             async {
                 //let addr = vec!["127.0.0.1:9092".to_string()];
                 let bootstrap = vec!["no.such.host.com:9092".to_string(), env::var("kafka-bootstrap").unwrap_or("127.0.0.1:9092".to_string())];
 
                 //let (tx, rx) = mpsc::unbounded();
                 let mut cluster = Cluster::connect(bootstrap).await.unwrap();
-                debug!("Connected: {:?}", cluster);
                 let topic_meta = cluster.resolve_topic("test1").await.unwrap();
                 debug!("Resolved topic: {:?}", topic_meta);
                 
