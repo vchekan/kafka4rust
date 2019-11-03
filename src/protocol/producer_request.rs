@@ -5,6 +5,7 @@ use bytes::{BufMut, BytesMut};
 use crc32fast;
 use std::collections::HashMap;
 use std::time::UNIX_EPOCH;
+use crate::protocol::{ApiKey, HasApiKey};
 
 const zero32: [u8; 4] = [0, 0, 0, 0];
 const zero64: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
@@ -28,15 +29,19 @@ enum TimestampType {
     LogAppend = 1 << 3,
 }
 
-pub(crate) struct ProducerRequest0<'a> {
+pub(crate) struct ProduceRequest0<'a> {
     pub acks: i16, // 0 for no acknowledgments, 1 for only the leader and -1 for the full ISR.
     pub timeout: i32, // The time to await a response in ms
     pub topic_data:
         &'a HashMap<&'a String, HashMap<u32, (&'a [QueuedMessage], &'a [QueuedMessage])>>,
 }
 
-impl ProducerRequest0<'_> {
-    fn serialize(&self, buf: &mut BytesMut) {
+impl HasApiKey for ProduceRequest0<'_> {
+    fn api_key() -> ApiKey { ApiKey::Produce }
+}
+
+impl ProduceRequest0<'_> {
+    pub(crate) fn serialize(&self, buf: &mut BytesMut) {
         let start_bookmark = buf.len();
         buf.reserve(2 + 4);
         buf.put_i16_be(self.acks);

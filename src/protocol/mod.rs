@@ -9,6 +9,6 @@ mod responses;
 
 pub use self::api::*;
 pub(crate) use self::capabilities::supported_versions;
-pub(crate) use self::producer_request::ProducerRequest0;
+pub(crate) use self::producer_request::ProduceRequest0;
 pub use self::requests::*;
 pub use self::responses::*;

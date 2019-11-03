@@ -8,6 +8,8 @@ use failure::_core::time::Duration;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::time::UNIX_EPOCH;
+use bytes::{BytesMut, Bytes};
+use crate::protocol::write_request;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -126,7 +128,7 @@ pub struct Producer {
     // It is behind `Arc` because it is used also by sending spawn.
     // TODO: maybe RWLock is better, because while sending, no change occur and truncate and append
     // are short.
-    buffer: Arc<Mutex<Buffer>>,
+    inner: Arc<Mutex<Inner>>,
     // TODO: is kafka topic case-sensitive?
     topics_meta: TopicMetaCache,
     //topics_meta : HashMap<String,protocol::MetadataResponse0>,
@@ -141,13 +143,12 @@ type TopicMetaCache = HashMap<String, protocol::MetadataResponse0>;
 //
 impl Producer {
     pub async fn new(seed: &str) -> Result<Self> {
-        let buffer = Arc::new(Mutex::new(Buffer::new()));
+        let inner = Arc::new(Mutex::new(Inner{buffer: Buffer::new()}));
         let producer = Producer {
-            //cmd_channel,
-            buffer: buffer.clone(),
+            inner: inner.clone(),
             topics_meta: HashMap::new(),
             cluster: Cluster::connect(vec![seed.to_string()]).await?,
-            buffer_handler: task::spawn(Buffer::run_loop(buffer)),
+            buffer_handler: task::spawn(Self::run_loop(inner)),
         };
 
         Ok(producer)
@@ -167,9 +168,9 @@ impl Producer {
         let partition = P::partition(&msg) % partitions_count;
         // TODO: make buffer locking more granular. While topic is being resolved,
         // no new messages can be appended and no datarecords can be sent to broker.
-        let mut buffer = self.buffer.lock().await;
-        buffer.ensure_topic(&meta);
-        match buffer.add(&msg, topic, partition, partitions_count) {
+        let mut inner = self.inner.lock().await;
+        inner.buffer.ensure_topic(&meta);
+        match inner.buffer.add(&msg, topic, partition, partitions_count) {
             BufferingResult::Ok => {}
             BufferingResult::Overflow => {
                 // TODO:
@@ -209,6 +210,36 @@ impl Producer {
         let meta = topics_meta.get(topic).unwrap();
         return Ok(meta);
     }
+
+    async fn run_loop(inner: Arc<Mutex<Inner>>) {
+        debug!("Run loop timer started");
+        loop {
+            // TODO: make delay configurable
+            // TODO: init send upon treshold or timeout
+            task::sleep(Duration::from_secs(5)).await;
+            debug!("Run loop timer woke up");
+            {
+                let inner = inner.lock().await;
+                /*let request_starter = | broker_id: BrokerId | {
+                    write_request()
+                };*/
+                let requests = inner.buffer.mk_requests();
+                
+                /*
+                for (broker_id, request) in &requests {
+
+                }
+                */
+            }
+        }
+    }
+
+}
+
+/// Shared inner structures, which are accessed by Producer and background thread
+#[derive(Debug)]
+struct Inner {
+    buffer: Buffer,
 }
 
 /// Q: should buffer data be shared or copied when sending to broker?
@@ -238,24 +269,6 @@ struct Buffer {
     size_limit: u32,
     /// Vector of partitions
     meta_cache: HashMap<String, Vec<BrokerId>>,
-}
-
-type PartitionQueue = VecDeque<QueuedMessage>;
-type BrokerId = i32;
-
-/// Serialized message with topic and partition preserved because we need them in case topic
-/// resolved or topology change.
-#[derive(Debug)]
-pub(crate) struct QueuedMessage {
-    pub key: Option<Vec<u8>>,
-    pub value: Vec<u8>,
-    pub timestamp: u64,
-}
-
-#[derive(PartialEq, Debug)]
-enum BufferingResult {
-    Ok,
-    Overflow,
 }
 
 impl Buffer {
@@ -320,22 +333,14 @@ impl Buffer {
         BufferingResult::Ok
     }
 
-    async fn run_loop(buffer: Arc<Mutex<Self>>) {
-        loop {
-            // TODO: make delay configurable
-            // TODO: init send upon treshold or timeout
-            task::sleep(Duration::from_secs(10)).await;
-            debug!("Buffer timer woke up");
-        }
-    }
-
-    fn mk_recordset(&self) {
+    /// Scan buffer and make a request for each broker_id which has messages in queue
+    fn mk_requests(&self) -> Vec<(BrokerId, BytesMut)> {
         // TODO: implement FIFO and request size bound algorithm
 
         debug!("self.topics: {:?}", self.topics);
         // broker_id->topic->partition->recordset[]
         let mut broker_partitioned = HashMap::<
-            i32,
+            BrokerId,
             HashMap<&String, HashMap<u32, (&[QueuedMessage], &[QueuedMessage])>>,
         >::new();
         self.topics.iter().for_each(|(topic, partitions)| {
@@ -357,15 +362,39 @@ impl Buffer {
         });
 
         /*
-        let request = protocol::ProducerRequest0 {
-            acks: 0,        // TODO: config
-            timeout: 3000,  // TODO: config
-            topic_data: &broker_partitioned
-        };
+        broker_partitioned.into_iter().map(|(broker_id, topics)| {
+            let request = protocol::ProducerRequest0 {
+                acks: 0,        // TODO: config
+                timeout: 3000,  // TODO: config
+                topic_data: &topics
+            };
+            let broker = get_broker(broker_id);
+            let mut buf = BytesMut::new();
+            broker.write_header(&mut buf, protocol::ApiKey::Produce);
+            request.serialize(&mut buf);
+            (broker_id, buf)
+        }).collect()
         */
-
-        debug!("Recordset: {:?}", broker_partitioned);
+        unimplemented!()
     }
+}
+
+type PartitionQueue = VecDeque<QueuedMessage>;
+type BrokerId = i32;
+
+/// Serialized message with topic and partition preserved because we need them in case topic
+/// resolved or topology change.
+#[derive(Debug)]
+pub(crate) struct QueuedMessage {
+    pub key: Option<Vec<u8>>,
+    pub value: Vec<u8>,
+    pub timestamp: u64,
+}
+
+#[derive(PartialEq, Debug)]
+enum BufferingResult {
+    Ok,
+    Overflow,
 }
 
 enum TimestampType {
@@ -432,6 +461,9 @@ mod test {
                 producer.send::<P1, _>(msg, "topic1".to_string()).await.expect("Send failed");
             }
             debug!("{:?}", producer);
+
+            async_std::task::sleep(Duration::from_secs(20)).await;
+
             producer
                 .close()
                 .await
@@ -494,7 +526,7 @@ mod test {
             BufferingResult::Ok
         );
 
-        let rs = buffer.mk_recordset();
+        let rs = buffer.mk_requests();
         //debug!("Recordset: {:?}", rs);
     }
 

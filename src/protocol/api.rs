@@ -2,6 +2,16 @@ use byteorder::BigEndian;
 use bytes::{Buf, BufMut, ByteOrder};
 use std::fmt::Debug;
 
+#[repr(u16)]
+pub(crate) enum ApiKey {
+    Produce = 0,
+    Fetch = 1,
+    ListOffsets = 2,
+    Metadata = 3,
+    ListGroup = 16,
+    ApiVersions = 18,
+}
+
 pub trait ToKafka {
     fn to_kafka(&self, buff: &mut impl BufMut);
 }
@@ -10,19 +20,19 @@ pub trait FromKafka {
     fn from_kafka(buff: &mut impl Buf) -> Self;
 }
 
-pub trait ApiKey {
-    fn api_key() -> u16;
+pub(crate) trait HasApiKey {
+    fn api_key() -> ApiKey;
 }
 
-pub trait ApiVersion {
+pub trait HasApiVersion {
     fn api_version() -> u16;
 }
 
-pub trait Request: ToKafka + ApiKey + ApiVersion {
+pub(crate) trait Request: ToKafka + HasApiKey + HasApiVersion {
     type Response: FromKafka + Debug;
 }
 
-pub fn write_request<T>(
+pub(crate) fn write_request<T>(
     request: &T,
     correlation_id: u32,
     client_id: Option<&str>,
@@ -32,7 +42,7 @@ pub fn write_request<T>(
 {
     buff.clear();
     buff.put_u32_be(0); // Size: will fix after message is serialized
-    buff.put_u16_be(T::api_key());
+    buff.put_u16_be(T::api_key() as u16);
     buff.put_u16_be(T::api_version());
     buff.put_u32_be(correlation_id);
     client_id

@@ -1,3 +1,27 @@
+//! Design questions
+//! Q: What is communication and ownership between Cluster and TopicResolver?
+//! A: channels
+//!
+//! Q: How TopicResolver communicates with Connection?
+//! A: Connections is a shared resource, used by both, Topic Resolver and by Producer. Topic Resolver
+//! can send requests either to connection or through Producer. If directly then it must be aware of
+//! cluster configuration, i.e. list of servers. If through Producer then Producer should have
+//! response routing capabilities. This will force us to reimplement it in Consumer. Another design
+//! is metadata message bus.
+//!
+//! Q: should topic resolution be a separate component or part of Cluster?
+//! A: list of unresolved topics is owned by resolver spawn, thus it can not belong to Cluster.
+//!
+//! Q: should connect upon initialization or first request?
+//! A: initialization because it will improve startup time. But on the other hand,
+//! if app waits for connection before sending, we achieved nothing. Also, it is better to connect
+//! upon initialization for sake of Fail Fast principle.
+//!
+//! Q: Should `Connection::request()` take `&self` or `&mut self`?
+//! A: Problem with reading answer. If 2 requests were send immediately one after another, Kafka
+//! will preserve order. But do we have guaranteed order of execution of 2 tasks reading responses?
+//! I don't think so. So we need correlation_id based responses.
+
 use crate::broker::Broker;
 use crate::error::{Error, Result};
 use crate::protocol;
@@ -6,29 +30,6 @@ use futures::{
     stream::{FuturesUnordered, StreamExt},
 };
 use std::io;
-/// Design questions
-/// Q: What is communication and ownership between Cluster and TopicResolver?
-/// A: channels
-///
-/// Q: How TopicResolver communicates with Connection?
-/// A: Connections is a shared resource, used by both, Topic Resolver and by Producer. Topic Resolver
-/// can send requests either to connection or through Producer. If directly then it must be aware of
-/// cluster configuration, i.e. list of servers. If through Producer then Producer should have
-/// response routing capabilities. This will force us to reimplement it in Consumer. Another design
-/// is metadata message bus.
-///
-/// Q: should topic resolution be a separate component or part of Cluster?
-/// A: list of unresolved topics is owned by resolver spawn, thus it can not belong to Cluster.
-///
-/// Q: should connect upon initialization or first request?
-/// A: initialization because it will improve startup time. But on the other hand,
-/// if app waits for connection before sending, we achieved nothing. Also, it is better to connect
-/// upon initialization for sake of Fail Fast principle.
-///
-/// Q: Should `Connection::request()` take `&self` or `&mut self`?
-/// A: Problem with reading answer. If 2 requests were send immediately one after another, Kafka
-/// will preserve order. But do we have guaranteed order of execution of 2 tasks reading responses?
-/// I don't think so. So we need correlation_id based responses.
 use std::iter::FromIterator;
 
 #[derive(Debug)]

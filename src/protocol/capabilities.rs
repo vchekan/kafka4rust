@@ -1,64 +1,49 @@
 use super::api::*;
 use super::requests::*;
 
-impl ApiKey for ProduceRequest0 {
+/*impl ApiKey for ProduceRequest0 {
     fn api_key() -> u16 {
         0
     }
+}*/
+impl HasApiKey for ListOffsetsRequest0 {
+    fn api_key() -> ApiKey { ApiKey::ListOffsets }
 }
-impl ApiKey for ListOffsetsRequest0 {
-    fn api_key() -> u16 {
-        2
-    }
+impl HasApiKey for MetadataRequest0 {
+    fn api_key() -> ApiKey { ApiKey::Metadata }
 }
-impl ApiKey for MetadataRequest0 {
-    fn api_key() -> u16 {
-        3
-    }
+impl HasApiKey for ListGroupRequest0 {
+    fn api_key() -> ApiKey { ApiKey::ListGroup }
 }
-impl ApiKey for ListGroupRequest0 {
-    fn api_key() -> u16 {
-        16
-    }
+impl HasApiKey for ApiVersionsRequest0 {
+    fn api_key() -> ApiKey { ApiKey::ApiVersions }
 }
-impl ApiKey for ApiVersionsRequest0 {
-    fn api_key() -> u16 {
-        18
-    }
-}
-impl ApiKey for ApiVersionsRequest1 {
-    fn api_key() -> u16 {
-        18
-    }
+impl HasApiKey for ApiVersionsRequest1 {
+    fn api_key() -> ApiKey { ApiKey::ApiVersions }
 }
 
-impl ApiVersion for ProduceRequest0 {
+impl HasApiVersion for ListOffsetsRequest0 {
     fn api_version() -> u16 {
         0
     }
 }
-impl ApiVersion for ListOffsetsRequest0 {
+impl HasApiVersion for MetadataRequest0 {
     fn api_version() -> u16 {
         0
     }
 }
-impl ApiVersion for MetadataRequest0 {
-    fn api_version() -> u16 {
-        0
-    }
-}
-impl ApiVersion for ListGroupRequest0 {
+impl HasApiVersion for ListGroupRequest0 {
     fn api_version() -> u16 {
         0
     }
 }
 // one request struct, 2 response versions
-impl ApiVersion for ApiVersionsRequest0 {
+impl HasApiVersion for ApiVersionsRequest0 {
     fn api_version() -> u16 {
         0
     }
 }
-impl ApiVersion for ApiVersionsRequest1 {
+impl HasApiVersion for ApiVersionsRequest1 {
     fn api_version() -> u16 {
         1
     }
