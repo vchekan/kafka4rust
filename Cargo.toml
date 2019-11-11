@@ -9,8 +9,9 @@ description = "High performance, async Kafka client"
 [dependencies]
 failure = "0.1.5"
 
-futures = {version = "0.3.0-alpha.19", package = "futures-preview"}
+futures = "0.3.0"
 async-std = { version = "0.99.11", features = ["unstable"] }
+tokio-current-thread = "0.2.0-alpha.1"
 
 bytes = "0.4.12"
 byteorder = "1.3.2"
@@ -20,3 +21,4 @@ log =  "0.4.8"
 simple_logger = "1.3.0"
 clap = "2.33.0"
 
+lazy_static = "1.4.0"

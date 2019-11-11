@@ -38,8 +38,6 @@ pub(crate) struct Cluster {
     //response_tx: mpsc::UnboundedSender<EventOut>,
     //topic_meta: Arc<Mutex<Meta>>,
     connections: Vec<Broker>,
-    //response_routes: VecDeque<(u32,RespondTo)>,
-    //resolver_tx: mpsc::UnboundedSender<String>,
 }
 
 #[derive(Debug)]

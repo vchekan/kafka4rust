@@ -1,15 +1,13 @@
 use crate::cluster::Cluster;
-use crate::error::Result;
+use crate::error::{Result, Error};
 use crate::protocol;
-use async_std::sync::{Arc, Mutex};
-use async_std::task;
-use async_std::task::JoinHandle;
-use failure::_core::time::Duration;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
-use std::time::UNIX_EPOCH;
-use bytes::{BytesMut, Bytes};
+use std::time::{UNIX_EPOCH, Duration};
 use crate::protocol::write_request;
+use async_std::sync::{Sender, Receiver};
+use std::future::Future;
+use async_std::prelude::*;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -108,6 +106,7 @@ use crate::protocol::write_request;
 /// publish it to Producer, which in turn, updates Buffer.
 ///
 
+// TODO: is `Send` needed? Can we conver to QueuedMessage before crossing thread boundaries?
 pub trait ToMessage: Send {
     fn key(&self) -> Option<Vec<u8>>;
     fn value(&self) -> Vec<u8>;
@@ -120,20 +119,38 @@ where
     fn partition(message: &M) -> u32;
 }
 
+pub struct Producer<M: ToMessage> {
+    msg_sender: Sender<Cmd<M>>,
+}
+
+impl<M: ToMessage + 'static> Producer<M> {
+    pub async fn new<P: Partitioner<M>>(seed: &str) -> Result<Self> {
+        let msg_sender = ProducerImpl::new::<M,P>(seed).await?;
+        let producer = Producer {
+            msg_sender
+        };
+        Ok(producer)
+    }
+
+    pub async fn send(&mut self, msg: M, topic: String) {
+        self.msg_sender.send(Cmd::Send(msg, topic)).await
+    }
+}
+
 /// Public Producer structure
 #[derive(Debug)]
-pub struct Producer {
-    // Buffer is protected because it is being mutated by appending new message called from
-    // client to append new messages and from send process to delete sent messages.
-    // It is behind `Arc` because it is used also by sending spawn.
-    // TODO: maybe RWLock is better, because while sending, no change occur and truncate and append
-    // are short.
-    inner: Arc<Mutex<Inner>>,
+struct ProducerImpl {
+    buffer: Buffer,
+    cluster: Cluster,
     // TODO: is kafka topic case-sensitive?
     topics_meta: TopicMetaCache,
     //topics_meta : HashMap<String,protocol::MetadataResponse0>,
-    cluster: Cluster,
-    buffer_handler: JoinHandle<()>,
+    //buffer_handler: RemoteHandle<()>,
+}
+
+enum Cmd<M> {
+    Send(M, String),
+    BufferTimer,
 }
 
 type TopicMetaCache = HashMap<String, protocol::MetadataResponse0>;
@@ -141,36 +158,102 @@ type TopicMetaCache = HashMap<String, protocol::MetadataResponse0>;
 //
 // Implementations
 //
-impl Producer {
-    pub async fn new(seed: &str) -> Result<Self> {
-        let inner = Arc::new(Mutex::new(Inner{buffer: Buffer::new()}));
-        let producer = Producer {
-            inner: inner.clone(),
+impl ProducerImpl {
+    pub async fn new<M: ToMessage + 'static, P: Partitioner<M>>(seed: &str) -> Result<Sender<Cmd<M>>> {
+        let cluster = Cluster::connect(vec![seed.to_string()]).await?;
+        let buffer = Buffer::new();
+
+        let (tx, rx) = async_std::sync::channel(1);
+        let tx2 = tx.clone();
+
+        let mut producer = ProducerImpl {
+            buffer,
+            cluster,
             topics_meta: HashMap::new(),
-            cluster: Cluster::connect(vec![seed.to_string()]).await?,
-            buffer_handler: task::spawn(Self::run_loop(inner)),
+            // TODO: implement spawn_local_with_handler and
+            //buffer_handler: spawn_local(Self::run_loop(buffer))?,
         };
 
-        Ok(producer)
+        tokio_current_thread::spawn(async move {
+                producer.worker_loop::<M,P>(rx).await;
+            }
+        );
+        tokio_current_thread::spawn(async move {
+            loop {
+                async_std::task::sleep(Duration::from_secs(5)).await;
+                tx2.send(Cmd::BufferTimer).await;
+            }
+        });
+
+        Ok(tx)
     }
 
-    pub async fn send<P, M>(&mut self, msg: M, topic: String) -> Result<()>
+    async fn worker_loop<M: ToMessage, P: Partitioner<M>>(&mut self, messages: async_std::sync::Receiver<Cmd<M>>) {
+        loop {
+            match messages.recv().await {
+                None => {
+                    info!("Exiting worker_loop");
+                    return;
+                },
+                Some(Cmd::Send(msg, topic)) => {
+                    debug!("worker_loop: got message");
+                    match self.send::<P,M>(msg, topic).await {
+                        Ok(()) => {},
+                        Err(e) => {
+                            // TODO return error on response channel to the caller
+                            unimplemented!()
+                        }
+                    }
+
+
+                    /*
+                    match self.buffer.add(msg, topic, partition, partitions_count) {
+                        BufferingResult::Ok => {}
+                        BufferingResult::Overflow => {
+                            // TODO:
+                            unimplemented!()
+                        }
+                    }
+                    */
+                }
+                Some(Cmd::BufferTimer) => {
+                    debug!("Buffer timer");
+                    self.buffer.mk_requests(&self.cluster);
+                }
+            }
+        }
+    }
+
+    pub async fn send<P,M>(&mut self, msg: M, topic: String) -> Result<()>
     where
         P: Partitioner<M>,
         M: ToMessage,
     {
-        let meta = Self::get_or_request_meta(&self.cluster, &mut self.topics_meta, &topic).await?;
+        // TODO: share metadata cache between self and Buffer
+        debug!(">1");
+        let meta = Self::get_or_request_meta(&self.cluster, &mut self.topics_meta, &mut self.buffer.meta_cache, &topic).await?;
+        debug!(">2");
         assert_eq!(1, meta.topics.len());
         assert_eq!(topic, meta.topics.get(0).unwrap().topic);
         let meta = meta.topics.get(0).unwrap();
 
         let partitions_count = meta.partition_metadata.len() as u32;
         let partition = P::partition(&msg) % partitions_count;
-        // TODO: make buffer locking more granular. While topic is being resolved,
-        // no new messages can be appended and no datarecords can be sent to broker.
-        let mut inner = self.inner.lock().await;
-        inner.buffer.ensure_topic(&meta);
-        match inner.buffer.add(&msg, topic, partition, partitions_count) {
+
+        // TODO: would it be possible to keep reference to the message data instead of cloning? Would it be possible to do both?
+        let msg = QueuedMessage {
+            key: msg.key(),
+            value: msg.value(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Failed to get timestamp")
+                .as_millis() as u64,
+        };
+        debug!(">3");
+        //self.msg_sender.send(Cmd::Send(msg)).await;
+        debug!(">4");
+        //self.buffer.ensure_topic(&meta);
+        match self.buffer.add(msg, topic, partition, meta) {
             BufferingResult::Ok => {}
             BufferingResult::Overflow => {
                 // TODO:
@@ -183,7 +266,7 @@ impl Producer {
     // TODO: `close()` can take self thus avoid possibility to call `send` after `close`
     async fn close(mut self) -> Result<()> {
         // TODO: await for buffer flush
-        self.buffer_handler.await;
+        //self.buffer_handler.await;
         Ok(())
     }
 
@@ -193,9 +276,10 @@ impl Producer {
     /// TODO: what is retry policy?
     /// TODO: what to do if failed for extended period of time?
     async fn get_or_request_meta<'a>(
-        cluster: &'_ Cluster,
+        cluster: & Cluster,
         topics_meta: &'a mut TopicMetaCache,
-        topic: &'_ String,
+        buffer_meta: &mut HashMap<String, Vec<BrokerId>>,
+        topic: & String,
     ) -> Result<&'a protocol::MetadataResponse0> {
         // `if let Some(meta) = self.topics_meta.get(topic)` does not work because of lifetimes,
         // so have to do 2 lookups :(
@@ -206,24 +290,25 @@ impl Producer {
         }
 
         let meta = cluster.resolve_topic(topic).await?;
+        buffer_meta.insert(topic.clone(), meta.topics[0].partition_metadata.iter().map(|p| p.leader).collect());
         topics_meta.insert(topic.clone(), meta);
         let meta = topics_meta.get(topic).unwrap();
         return Ok(meta);
     }
 
-    async fn run_loop(inner: Arc<Mutex<Inner>>) {
+    /*
+    async fn run_loop(buffer: Rc<RefCell<Buffer>>) {
         debug!("Run loop timer started");
         loop {
             // TODO: make delay configurable
             // TODO: init send upon treshold or timeout
-            task::sleep(Duration::from_secs(5)).await;
+            async_std::task::sleep(Duration::from_secs(5)).await;
             debug!("Run loop timer woke up");
             {
-                let inner = inner.lock().await;
                 /*let request_starter = | broker_id: BrokerId | {
                     write_request()
                 };*/
-                let requests = inner.buffer.mk_requests();
+                let requests = buffer.borrow_mut().mk_requests().await;
                 
                 /*
                 for (broker_id, request) in &requests {
@@ -233,13 +318,8 @@ impl Producer {
             }
         }
     }
+    */
 
-}
-
-/// Shared inner structures, which are accessed by Producer and background thread
-#[derive(Debug)]
-struct Inner {
-    buffer: Buffer,
 }
 
 /// Q: should buffer data be shared or copied when sending to broker?
@@ -269,6 +349,7 @@ struct Buffer {
     size_limit: u32,
     /// Vector of partitions
     meta_cache: HashMap<String, Vec<BrokerId>>,
+    //cluster: &'a Cluster,
 }
 
 impl Buffer {
@@ -282,99 +363,100 @@ impl Buffer {
         }
     }
 
-    fn ensure_topic(&mut self, meta: &protocol::TopicMetadata) {
-        if self.meta_cache.contains_key(&meta.topic) {
-            return;
-        }
+    async fn get_or_fetch_topic_meta(&self, topic: &String, cluster: &Cluster) -> Result<&Vec<BrokerId>> {
+        unimplemented!()
+        /*
+            let res = self.meta_cache.get(topic);
+            if let Some(res) = res {
+                return Ok(res);
+            }
 
-        self.meta_cache.insert(
-            meta.topic.clone(),
-            meta.partition_metadata.iter().map(|p| p.leader).collect(),
-        );
+            let meta = cluster.resolve_topic(topic).await?;
+            // TODO: make sure response has no errors
+            assert_eq!(1, meta.topics.len());
+            assert_eq!(topic.as_str(), meta.topics[0].topic);
+
+            self.meta_cache.insert(
+                topic.clone(),
+                meta.topics[0].partition_metadata.iter().map(|p| p.leader).collect(),
+            );
+
+            Ok(self.meta_cache.get(topic).unwrap())
+        */
     }
 
     /// Is async because topic metadata might require resolving.
     /// At the same time, we do not want to blow memory with awaiting tasks
     /// if resolving takes time and message velocity is high.
-    fn add<M>(
+    fn add(
         &mut self,
-        msg: &M,
+        msg: QueuedMessage,
         topic: String,
         partition: u32,
-        partitions_count: u32,
+        //partitions_count: u32,
+        meta: &protocol::TopicMetadata,
     ) -> BufferingResult
-    where
-        M: ToMessage,
     {
-        if self.bytes + msg.value().len() as u32 > self.size_limit {
+        if self.bytes + msg.value.len() as u32 > self.size_limit {
             debug!("Overflow");
             return BufferingResult::Overflow;
         }
 
+        let partitions_count = meta.partition_metadata.len();
         let partitions = self.topics.entry(topic).or_insert_with(|| {
             (0..partitions_count)
                 .map(|_| PartitionQueue::new())
                 .collect()
         });
 
-        self.bytes += (msg.value().len() + msg.key().map(|k| k.len()).unwrap_or(0)) as u32;
+        self.bytes += (msg.value.len() + msg.key.as_ref().map(|k| k.len()).unwrap_or(0)) as u32;
 
-        // TODO: would it be possible to keep reference to the message data instead of cloning? Would it be possible to do both?
-        let msg = QueuedMessage {
-            key: msg.key(),
-            value: msg.value(),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("Failed to get timestamp")
-                .as_millis() as u64,
-        };
         partitions[partition as usize].push_back(msg);
         debug!("Added message");
         BufferingResult::Ok
     }
 
     /// Scan buffer and make a request for each broker_id which has messages in queue
-    fn mk_requests(&self) -> Vec<(BrokerId, BytesMut)> {
+    fn mk_requests(&self, cluster: &Cluster) {
         // TODO: implement FIFO and request size bound algorithm
+
+        //debug!("Resolving metadata");
+        //self.resolve_metadata(cluster).await;
 
         debug!("self.topics: {:?}", self.topics);
         // broker_id->topic->partition->recordset[]
-        let mut broker_partitioned = HashMap::<
+        /*let mut broker_partitioned = HashMap::<
             BrokerId,
             HashMap<&String, HashMap<u32, (&[QueuedMessage], &[QueuedMessage])>>,
         >::new();
-        self.topics.iter().for_each(|(topic, partitions)| {
-            // N-th partition in queue match to partition number itself, so use `enumerate()`
-            // instead of storing partition number in the queue
-            partitions.iter().enumerate().
-                // Only non-empty queues
-                filter(|(_,q)| q.len() > 0).
-                for_each(|(partition, queue)| {
-                    let partition = partition as u32;
-                    let broker_id = self.meta_cache.get(topic).expect("Topic metadata is expected").
-                        get(partition as usize).expect("Corrupt topic metadata partition info");
-
-                    // TODO use raw entries
-                    let topics = broker_partitioned.entry(*broker_id).or_insert_with(|| HashMap::new());
-                    let partitions = topics.entry(topic).or_insert_with(|| HashMap::new());
-                    assert!(partitions.insert(partition, queue.as_slices()).is_none());
-                });
-        });
-
-        /*
-        broker_partitioned.into_iter().map(|(broker_id, topics)| {
-            let request = protocol::ProducerRequest0 {
-                acks: 0,        // TODO: config
-                timeout: 3000,  // TODO: config
-                topic_data: &topics
-            };
-            let broker = get_broker(broker_id);
-            let mut buf = BytesMut::new();
-            broker.write_header(&mut buf, protocol::ApiKey::Produce);
-            request.serialize(&mut buf);
-            (broker_id, buf)
-        }).collect()
         */
+
+        let save_actions: Vec<_> = self.topics.iter().
+            flat_map(|(topic, partitions)| {
+                // N-th partition in queue match to partition number itself, so use `enumerate()`
+                // instead of storing partition number in the queue
+                partitions.iter().enumerate().
+                    // Only non-empty queues
+                    filter(|(_, q)| q.len() > 0).
+                    map( move |(partition, queue)| {
+                        let partition = partition as u32;
+                        //let topic_meta = self.get_or_fetch_topic_meta(topic, cluster).await?;
+                        let broker_id = self.meta_cache.
+                            get(topic).expect("Topic metadata is expected").
+                            get(partition as usize).expect("Corrupt topic metadata partition info");
+
+                        // TODO use raw entries
+                        //let topics = broker_partitioned.entry(*broker_id).or_insert_with(|| HashMap::new());
+                        //let partitions = topics.entry(topic).or_insert_with(|| HashMap::new());
+                        //assert!(partitions.insert(partition, queue.as_slices()).is_none());
+                        (broker_id, partition, queue.as_slices())
+                    })
+            }).collect();
+    }
+
+    /// Make sure all topics in the buffer have corresponding metadata and if not, request
+    async fn resolve_metadata(&self, cluster: &Cluster) {
+        
         unimplemented!()
     }
 }
@@ -434,7 +516,8 @@ impl ToMessage for StringMessage {
 #[cfg(test)]
 mod test {
     use super::*;
-    use async_std::task;
+    use std::time::Duration;
+    //use async_std::task;
 
     struct P1 {}
     impl Partitioner<StringMessage> for P1 {
@@ -445,12 +528,13 @@ mod test {
 
     #[test]
     fn it_works() -> Result<()> {
-        task::block_on(async {
+        tokio_current_thread::block_on_all(async {
+        //task::block_on(async {
             simple_logger::init_with_level(log::Level::Debug)?;
             let seed = "127.0.0.1:9092";
             let _topic = "test1";
 
-            let producer = Producer::new(&seed).await?;
+            let producer = Producer::new::<P1>(&seed).await?;
             let mut producer = producer;
             for i in 1..100 {
                 let msg = format!("i:{}", i);
@@ -458,21 +542,24 @@ mod test {
                     key: i.to_string(),
                     value: msg,
                 };
-                producer.send::<P1, _>(msg, "topic1".to_string()).await.expect("Send failed");
+                producer.send(msg, "topic1".to_string()).await;
             }
-            debug!("{:?}", producer);
 
             async_std::task::sleep(Duration::from_secs(20)).await;
 
-            producer
+            /*producer
                 .close()
                 .await
                 .expect("Failure when closing producer");
+                */
+
+
 
             Ok(())
         })
     }
 
+    /*
     #[test]
     fn mk_batch() {
         simple_logger::init_with_level(log::Level::Debug).unwrap();
@@ -536,4 +623,5 @@ mod test {
             value: msg.to_string(),
         }
     }
+    */
 }

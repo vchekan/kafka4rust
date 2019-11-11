@@ -12,6 +12,9 @@ pub enum Error {
 
     #[fail(display = "Logger init{}", _0)]
     Logger(log::SetLoggerError),
+
+    #[fail(display = "Spawn error: {}", _0)]
+    SpawnError(futures::task::SpawnError),
 }
 
 impl From<std::io::Error> for Error {
@@ -24,4 +27,8 @@ impl From<log::SetLoggerError> for Error {
     fn from(e: log::SetLoggerError) -> Self {
         Error::Logger(e)
     }
+}
+
+impl From<futures::task::SpawnError> for Error {
+    fn from(e: futures::task::SpawnError) -> Self { Error::SpawnError(e) }
 }

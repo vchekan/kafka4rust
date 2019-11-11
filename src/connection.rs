@@ -61,7 +61,7 @@ impl BrokerConnection {
         Ok(conn)
     }
 
-    pub async fn request(&self, buf: &mut Vec<u8>) -> io::Result<(())> {
+    pub async fn request(&self, buf: &mut Vec<u8>) -> io::Result<()> {
         let mut inner = self.inner.lock().await;
         let tcp = &mut inner.tcp;
         debug!("Sending request[{}]", buf.len());
