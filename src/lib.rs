@@ -1,6 +1,8 @@
 #![feature(arbitrary_self_types)]
 #![feature(async_closure)]
+#![feature(backtrace)]
 
+mod types;
 mod broker;
 mod cluster;
 mod connection;

@@ -22,6 +22,7 @@
 * CI: do `cargo audit`
 * Failure model: fail up to connection reset instead of panic.
 * Use hashmap's raw_entry
+* Validate that BytesMut has always enough reserve bytes. Or switch to Vec?
 
 == Projects
 * CLI tools

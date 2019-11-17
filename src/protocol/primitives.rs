@@ -1,42 +1,42 @@
 use super::api::*;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BytesMut, BufMut};
 use std::fmt::Debug;
 
 //
 // Primitive types serializtion
 //
 impl ToKafka for u32 {
-    fn to_kafka(&self, buff: &mut impl BufMut) {
+    fn to_kafka(&self, buff: &mut BytesMut) {
         buff.put_u32_be(*self);
     }
 }
 
 impl ToKafka for i32 {
-    fn to_kafka(&self, buff: &mut impl BufMut) {
+    fn to_kafka(&self, buff: &mut BytesMut) {
         buff.put_i32_be(*self);
     }
 }
 
 impl ToKafka for u64 {
-    fn to_kafka(&self, buff: &mut impl BufMut) {
+    fn to_kafka(&self, buff: &mut BytesMut) {
         buff.put_u64_be(*self);
     }
 }
 
 impl ToKafka for i16 {
-    fn to_kafka(&self, buff: &mut impl BufMut) {
+    fn to_kafka(&self, buff: &mut BytesMut) {
         buff.put_i16_be(*self);
     }
 }
 
 impl ToKafka for String {
-    fn to_kafka(&self, buff: &mut impl BufMut) {
+    fn to_kafka(&self, buff: &mut BytesMut) {
         self.as_str().to_kafka(buff);
     }
 }
 
 impl ToKafka for str {
-    fn to_kafka(&self, buff: &mut impl BufMut) {
+    fn to_kafka(&self, buff: &mut BytesMut) {
         buff.put_u16_be(self.len() as u16);
         buff.put_slice(self.as_bytes());
     }
@@ -46,7 +46,7 @@ impl<T> ToKafka for Vec<T>
 where
     T: ToKafka,
 {
-    fn to_kafka(&self, buff: &mut impl BufMut) {
+    fn to_kafka(&self, buff: &mut BytesMut) {
         buff.put_u32_be(self.len() as u32);
         for s in self {
             s.to_kafka(buff);
@@ -56,7 +56,7 @@ where
 
 /// Byte array specialization
 impl ToKafka for Vec<u8> {
-    fn to_kafka(&self, buff: &mut impl BufMut) {
+    fn to_kafka(&self, buff: &mut BytesMut) {
         buff.put_slice(&self);
     }
 }

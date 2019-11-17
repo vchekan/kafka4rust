@@ -20,7 +20,7 @@
 //! Write channel: how to implement sender's pushback?
 
 use byteorder::BigEndian;
-use bytes::ByteOrder;
+use bytes::{ByteOrder, BytesMut};
 use log::debug;
 use std::io;
 use std::net::SocketAddr;
@@ -30,7 +30,9 @@ use async_std::prelude::*;
 use async_std::sync::Mutex;
 use std::sync::Arc;
 
-pub(crate) const CLIENT_ID: &str = "k4rs";
+pub(crate) const CLIENT_ID: &str = "console-producer";
+    // TODO:
+    //"k4rs";
 
 #[derive(Debug, Clone)]
 pub struct BrokerConnection {
@@ -61,7 +63,7 @@ impl BrokerConnection {
         Ok(conn)
     }
 
-    pub async fn request(&self, buf: &mut Vec<u8>) -> io::Result<()> {
+    pub async fn request(&self, buf: &mut BytesMut) -> io::Result<()> {
         let mut inner = self.inner.lock().await;
         let tcp = &mut inner.tcp;
         debug!("Sending request[{}]", buf.len());
@@ -246,7 +248,7 @@ mod tests {
                 let conn = conn.clone();
                 task::spawn(async move {
                     let request = ApiVersionsRequest0 {};
-                    let mut buff = Vec::new();
+                    let mut buff = BytesMut::with_capacity(1024); //Vec::new();
                     write_request(&request, 0, None, &mut buff);
                     conn.request(&mut buff).await.unwrap();
                     let (correlation_id, versions): (_, ApiVersionsResponse0) =

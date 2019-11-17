@@ -19,7 +19,7 @@ macro_rules! request {
         }
 
         impl ToKafka for $sname {
-            fn to_kafka(&self, _buff: &mut impl BufMut) {
+            fn to_kafka(&self, _buff: &mut BytesMut) {
                 $(self.$f.to_kafka(_buff);)*
             }
         }

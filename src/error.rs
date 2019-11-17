@@ -1,4 +1,5 @@
 use failure::Fail;
+use failure::Backtrace;
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
@@ -8,13 +9,16 @@ pub enum Error {
     Io(std::io::Error),
 
     #[fail(display = "No broker available")]
-    NoBrokerAvailable,
+    NoBrokerAvailable(Backtrace),
 
     #[fail(display = "Logger init{}", _0)]
     Logger(log::SetLoggerError),
 
     #[fail(display = "Spawn error: {}", _0)]
     SpawnError(futures::task::SpawnError),
+
+    #[fail(display = "Dns resolution failed: {}", _0)]
+    DnsFailed(String)
 }
 
 impl From<std::io::Error> for Error {

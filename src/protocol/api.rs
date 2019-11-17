@@ -1,6 +1,7 @@
 use byteorder::BigEndian;
 use bytes::{Buf, BufMut, ByteOrder};
 use std::fmt::Debug;
+use bytes::BytesMut;
 
 #[repr(u16)]
 pub(crate) enum ApiKey {
@@ -13,7 +14,7 @@ pub(crate) enum ApiKey {
 }
 
 pub trait ToKafka {
-    fn to_kafka(&self, buff: &mut impl BufMut);
+    fn to_kafka(&self, buff: &mut BytesMut);
 }
 
 pub trait FromKafka {
@@ -36,7 +37,7 @@ pub(crate) fn write_request<T>(
     request: &T,
     correlation_id: u32,
     client_id: Option<&str>,
-    buff: &mut Vec<u8>,
+    buff: &mut BytesMut,
 ) where
     T: Request,
 {

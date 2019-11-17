@@ -1,6 +1,6 @@
 use super::api::*;
 use crate::protocol::responses::*;
-use bytes::BufMut;
+use bytes::BytesMut;
 
 // 3
 request!(MetadataRequest0, MetadataResponse0 { topics: [String] });

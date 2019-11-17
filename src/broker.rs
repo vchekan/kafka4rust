@@ -7,6 +7,7 @@ use log::debug;
 use std::io::{self, Cursor};
 use std::net::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use bytes::{BytesMut, Bytes};
 
 // TODO: if move negotiated api and correlation to broker connection, this struct degenerates.
 // Is it redundant?
@@ -26,7 +27,8 @@ impl Broker {
     pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
         let conn = BrokerConnection::connect(addr).await?;
         let req = protocol::ApiVersionsRequest0 {};
-        let mut buf = Vec::with_capacity(1024);
+        //let mut buf = Vec::with_capacity(1024);
+        let mut buf = BytesMut::with_capacity(1024);
         // TODO: This is special case, we need correlationId and clientId before broker is created...
         let correlation_id = 0;
 
@@ -45,14 +47,15 @@ impl Broker {
         })
     }
 
-    pub async fn request<'a, R>(&'a self, request: &'a R) -> Result<R::Response>
+    pub async fn send_request<R>(&self, request: R) -> Result<R::Response>
     where
         R: protocol::Request,
     {
         // TODO: buffer management
-        let mut buff = Vec::with_capacity(1024);
+        // TODO: ensure capacity (BytesMut will panic if out of range)
+        let mut buff = BytesMut::with_capacity(1024); //Vec::with_capacity(1024);
         let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
-        protocol::write_request(request, correlation_id, None, &mut buff);
+        protocol::write_request(&request, correlation_id, None, &mut buff);
 
         self.conn.request(&mut buff).await?;
         let mut cursor = Cursor::new(buff);
@@ -61,6 +64,31 @@ impl Broker {
         // TODO: check for response error
         debug!("CorrId: {}, Response: {:?}", corr_id, response);
         Ok(response)
+    }
+
+    pub async fn send_request2<R: FromKafka + Debug>(&self, mut request: BytesMut) -> Result<R>
+    {
+        debug!("Sending conn.request()...");
+        self.conn.request(&mut request).await?;
+        debug!("Sent conn.request(). Result buff len: {}", request.len());
+        let mut cursor = Cursor::new(request);
+        let (corr_id, response): (_, R) = read_response(&mut cursor);
+        // TODO: check correlationId
+        // TODO: check for response error
+        debug!("CorrId: {}, Response: {:?}", corr_id, response);
+        Ok(response)
+    }
+
+    pub fn mk_request<R>(&self, request: R) -> BytesMut
+        where
+            R: protocol::Request,
+    {
+        // TODO: buffer management
+        let mut buff = BytesMut::with_capacity(1024); //Vec::with_capacity(1024);
+        let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
+        protocol::write_request(&request, correlation_id, None, &mut buff);
+
+        buff
     }
 
     fn build_api_compatibility(them: &protocol::ApiVersionsResponse0) -> Vec<(i16, i16)> {
@@ -124,7 +152,7 @@ mod tests {
             let req = MetadataRequest0 {
                 topics: vec!["test".into()],
             };
-            let meta = broker.request(&req).await.unwrap();
+            let meta = broker.send_request(req).await.unwrap();
             debug!("Meta response: {:?}", meta);
         });
     }

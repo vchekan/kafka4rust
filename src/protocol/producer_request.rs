@@ -5,7 +5,8 @@ use bytes::{BufMut, BytesMut};
 use crc32fast;
 use std::collections::HashMap;
 use std::time::UNIX_EPOCH;
-use crate::protocol::{ApiKey, HasApiKey};
+use crate::protocol::{ApiKey, HasApiKey, Request, ProduceResponse0, HasApiVersion, ToKafka};
+use crate::protocol::ApiKey::ApiVersions;
 
 const ZERO32: [u8; 4] = [0, 0, 0, 0];
 const ZERO64: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
@@ -40,10 +41,27 @@ impl HasApiKey for ProduceRequest0<'_> {
     fn api_key() -> ApiKey { ApiKey::Produce }
 }
 
+impl Request for ProduceRequest0<'_> {
+    type Response = ProduceResponse0;
+}
+
+impl HasApiVersion for ProduceRequest0<'_> {
+    fn api_version() -> u16 { 0 }
+}
+
+
+impl ToKafka for ProduceRequest0<'_> {
+    fn to_kafka(&self, buff: &mut BytesMut) {
+        self.serialize(buff);
+    }
+}
+
+
 impl ProduceRequest0<'_> {
     pub(crate) fn serialize(&self, buf: &mut BytesMut) {
-        let start_bookmark = buf.len();
+        // TODO: calc transaction Id len
         buf.reserve(2 + 4);
+
         buf.put_i16_be(self.acks);
         buf.put_i32_be(self.timeout);
 
@@ -51,7 +69,7 @@ impl ProduceRequest0<'_> {
         buf.put_u32_be(self.topic_data.len() as u32);
         for (topic, data) in self.topic_data {
             buf.reserve(4);
-            buf.put_u32_be(topic.len() as u32);
+            buf.put_u16_be(topic.len() as u16);
             buf.extend_from_slice(topic.as_bytes());
 
             buf.reserve(4);
@@ -79,6 +97,9 @@ impl ProduceRequest0<'_> {
                     + 4, // recordset size
                 );
 
+                let recordset_bookmark = buf.len();
+                buf.put_u32_be(0);
+
                 buf.put_slice(&ZERO64); // base offset
                 let batch_len_bookmark = buf.len();
                 buf.put_slice(&ZERO32);
@@ -93,10 +114,11 @@ impl ProduceRequest0<'_> {
                 buf.put_slice(&ZERO32); // last offset delta
 
                 // TODO: timestamp messages and get timestamp from the first one
-                let first_timestamp = std::time::SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
+                // TODO: if timestamp is client generated, it is possible it will be negative.
+                //  Should we find min or encode signed i64?
+                // TODO: take into account, is timestamp client or log type.
+                let first_timestamp = recordset1.first().or(recordset2.first()).
+                    expect("Empty recordset").timestamp;
                 buf.put_u64_be(first_timestamp);
                 // TODO: max timestamp
                 buf.put_u64_be(first_timestamp);
@@ -109,20 +131,22 @@ impl ProduceRequest0<'_> {
                 buf.put_u32_be(rs_len as u32);
                 assert!(rs_len > 0, "Empty recordset");
                 for (i, record) in recordset1.iter().enumerate() {
-                    mk_record(buf, i as u64, first_timestamp, &record)
+                    mk_record(buf, i as u64, record.timestamp - first_timestamp, &record)
                 }
                 for (i, record) in recordset2.iter().enumerate() {
-                    mk_record(buf, i as u64, first_timestamp, &record)
+                    mk_record(buf, i as u64, record.timestamp - first_timestamp, &record)
                 }
 
-                // write batch size & crc
-                let len = buf.len() - start_bookmark;
-                BigEndian::write_u32(&mut buf[start_bookmark..4], len as u32);
+                // write data and batch size & crc
+                let recordset_len = buf.len() - recordset_bookmark - 4;
+                BigEndian::write_u32(&mut buf[recordset_bookmark..], recordset_len as u32);
+                let batch_len = buf.len() - batch_len_bookmark - 4;
+                BigEndian::write_u32(&mut buf[batch_len_bookmark..], batch_len as u32);
 
                 let mut crc = crc32fast::Hasher::new();
                 crc.update(&buf[crc_bookmark + 4..]);
                 let crc = crc.finalize();
-                BigEndian::write_u32(&mut buf[crc_bookmark..4], crc);
+                BigEndian::write_u32(&mut buf[crc_bookmark..], crc);
             }
         }
     }
@@ -134,23 +158,25 @@ fn mk_record(buf: &mut BytesMut, offset_delta: u64, timestamp_delta: u64, msg: &
         Some(key) => key.len(),
         None => 0,
     };
-    let mut len: u64 = 1 + // attr
+    let len: u64 = 1 + // attr
         zigzag_len(timestamp_delta) as u64 +
         zigzag_len(offset_delta) as u64 +
         zigzag_len(key_len as u64) as u64 + key_len as u64+
         zigzag_len(msg.value.len() as u64) as u64 + msg.value.len() as u64+
         1; // TODO: headers
-    len += zigzag_len(len) as u64; // size of len itself
+    //len += zigzag_len(len) as u64; // size of len itself
     buf.reserve(len as usize);
 
     buf.put_slice(zigzag64(len, &mut varint_buf));
-    buf.put_u32_be(0_u32); // attributes
+    buf.put_u8(0); // attributes
     buf.put_slice(zigzag64(timestamp_delta, &mut varint_buf));
     buf.put_slice(zigzag64(offset_delta, &mut varint_buf));
     match &msg.key {
         Some(key) => {
-            buf.put_slice(zigzag64(key_len as u64, &mut varint_buf));
-            buf.put_slice(key);
+            //buf.put_slice(zigzag64(key_len as u64, &mut varint_buf));
+            //buf.put_slice(key);
+            // TODO: fix key
+            buf.put_u8(VARINT_MINUS_ONE);
         }
         None => buf.put_u8(VARINT_MINUS_ONE),
     }

@@ -21,7 +21,12 @@
 //! A: Problem with reading answer. If 2 requests were send immediately one after another, Kafka
 //! will preserve order. But do we have guaranteed order of execution of 2 tasks reading responses?
 //! I don't think so. So we need correlation_id based responses.
+//!
+//! Q: Should close seed connection after resolve 1st member of the cluster? Or use for metadata
+//! querying? Which connections should be used for metadata query, because long polling problem?
+//! A: ???
 
+use crate::types::*;
 use crate::broker::Broker;
 use crate::error::{Error, Result};
 use crate::protocol;
@@ -31,13 +36,14 @@ use futures::{
 };
 use std::io;
 use std::iter::FromIterator;
+use std::collections::HashMap;
+use std::net::{ToSocketAddrs};
 
 #[derive(Debug)]
 pub(crate) struct Cluster {
     bootstrap: Vec<String>,
-    //response_tx: mpsc::UnboundedSender<EventOut>,
-    //topic_meta: Arc<Mutex<Meta>>,
-    connections: Vec<Broker>,
+    seed_broker: Broker,
+    broker_id_map: HashMap<BrokerId, Broker>
 }
 
 #[derive(Debug)]
@@ -45,47 +51,7 @@ pub(crate) enum EventOut {
     ResolvedTopic(protocol::TopicMetadata),
 }
 
-#[derive(Debug)]
-pub(crate) struct Meta {
-    //topic_meta: HashMap<i32, protocol::TopicMetadata>
-}
-
 impl Cluster {
-    /*
-    pub async fn new(bootstrap: Vec<String>) -> Cluster //(mpsc::UnboundedSender<EventIn>, mpsc::UnboundedReceiver<EventOut>)
-    {
-        //bichannel::bichannel(|msg| )
-        Cluster {
-            bootstrap,
-        }
-        let (cluster_request, cluster_response) = BiChannel::<EventIn,EventOut>::unbounded();
-        let (response_tx, response_rx) = mpsc::unbounded();
-
-        let (resolver_tx, resolver_rx) = mpsc::unbounded();
-        let topic_resolver_response = start_topic_resolver(resolver_rx, cluster_request.tx.clone(), spawner);
-        let mut cluster = Cluster {
-            bootstrap,
-            response_tx,
-            connections: Vec::new(),
-            response_routes: VecDeque::new(),
-            resolver_tx,
-        };
-
-        //
-        // Cluster event loop
-        //
-        juliex::spawn(async move {
-            cluster_response.rx.for_each(|e|{
-                cluster.handle_event(e)
-            }).await;
-            debug!("Cluster event loop exited");
-        }).unwrap();
-
-        //response_rx
-        cluster_request
-    }
-        */
-
     /// Connect to at least one broker successfully .
     pub async fn connect(bootstrap: Vec<String>) -> io::Result<Self> {
         let connect_futures = bootstrap
@@ -117,25 +83,35 @@ impl Cluster {
 
         let cluster = Cluster {
             bootstrap,
-            connections: vec![broker],
+            seed_broker: broker,
+            broker_id_map: HashMap::new(),
         };
-
-        //cluster.start_topic_resolver().await?;
 
         Ok(cluster)
     }
 
-    pub(crate) async fn resolve_topic(&self, topic: &str) -> Result<protocol::MetadataResponse0> {
-        for broker in &self.connections {
-            let req = protocol::MetadataRequest0 {
-                topics: vec![topic.into()],
-            };
-            let res = broker.request(&req).await?;
-            return Ok(res);
+    pub(crate) async fn resolve_topic(&mut self, topic: &str) -> Result<protocol::MetadataResponse0> {
+        // TODO: if failed, try other connected brokers
+        let meta_response = resolve_topic_with_broker(&self.seed_broker, topic).await?;
+
+        // TODO: connect in parallel
+        // update known brokers
+        for broker in &meta_response.brokers {
+            // Looks like std::net do not support IpAddr resolution, resolve with 0 port and set port later
+            let addr = (broker.host.as_str(), 0).to_socket_addrs()?.collect::<Vec<_>>();
+            if addr.len() == 0 {
+                return Err(Error::DnsFailed(format!("{}:{}", broker.host, broker.port)))
+            }
+            let mut addr = addr[0];
+            addr.set_port(broker.port as u16);
+            let connected_broker = Broker::connect(addr).await?;
+            self.broker_id_map.insert(broker.node_id, connected_broker);
+
+            return Ok(meta_response);
         }
 
         // TODO: start recovery?
-        Err(Error::NoBrokerAvailable)
+        Err(Error::NoBrokerAvailable(failure::Backtrace::new()))
 
         /*
         // TODO: how to implement recovery policy?
@@ -145,6 +121,18 @@ impl Cluster {
         })
         */
     }
+
+    pub fn broker_by_id(&mut self, broker_id: BrokerId) -> Result<&Broker> {
+        self.broker_id_map.get(&broker_id).ok_or(Error::NoBrokerAvailable(failure::Backtrace::new()))
+    }
+
+}
+
+async fn resolve_topic_with_broker(broker: &Broker, topic: &str) -> Result<protocol::MetadataResponse0> {
+    let req = protocol::MetadataRequest0 {
+        topics: vec![topic.into()],
+    };
+    Ok(broker.send_request(req).await?)
 }
 
 /*

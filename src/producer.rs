@@ -1,13 +1,14 @@
+use crate::types::*;
 use crate::cluster::Cluster;
-use crate::error::{Result, Error};
+use crate::error::{Result};
 use crate::protocol;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::time::{UNIX_EPOCH, Duration};
-use crate::protocol::write_request;
-use async_std::sync::{Sender, Receiver};
-use std::future::Future;
+use async_std::sync::{Sender};
 use async_std::prelude::*;
+use futures::stream::FuturesUnordered;
+use std::iter::FromIterator;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -189,6 +190,7 @@ impl ProducerImpl {
     }
 
     async fn worker_loop<M: ToMessage, P: Partitioner<M>>(&mut self, messages: async_std::sync::Receiver<Cmd<M>>) {
+        debug!("Producer worker loop started");
         loop {
             match messages.recv().await {
                 None => {
@@ -200,6 +202,7 @@ impl ProducerImpl {
                     match self.send::<P,M>(msg, topic).await {
                         Ok(()) => {},
                         Err(e) => {
+                            debug!("Send failed: {:?}", e);
                             // TODO return error on response channel to the caller
                             unimplemented!()
                         }
@@ -218,7 +221,7 @@ impl ProducerImpl {
                 }
                 Some(Cmd::BufferTimer) => {
                     debug!("Buffer timer");
-                    self.buffer.mk_requests(&self.cluster);
+                    self.buffer.flush(&mut self.cluster).await;
                 }
             }
         }
@@ -231,7 +234,7 @@ impl ProducerImpl {
     {
         // TODO: share metadata cache between self and Buffer
         debug!(">1");
-        let meta = Self::get_or_request_meta(&self.cluster, &mut self.topics_meta, &mut self.buffer.meta_cache, &topic).await?;
+        let meta = Self::get_or_request_meta(&mut self.cluster, &mut self.topics_meta, &mut self.buffer.meta_cache, &topic).await?;
         debug!(">2");
         assert_eq!(1, meta.topics.len());
         assert_eq!(topic, meta.topics.get(0).unwrap().topic);
@@ -276,7 +279,7 @@ impl ProducerImpl {
     /// TODO: what is retry policy?
     /// TODO: what to do if failed for extended period of time?
     async fn get_or_request_meta<'a>(
-        cluster: & Cluster,
+        cluster: &mut Cluster,
         topics_meta: &'a mut TopicMetaCache,
         buffer_meta: &mut HashMap<String, Vec<BrokerId>>,
         topic: & String,
@@ -289,9 +292,11 @@ impl ProducerImpl {
             return Ok(meta);
         }
 
+        // Did not have meta. Fetch and cache.
         let meta = cluster.resolve_topic(topic).await?;
         buffer_meta.insert(topic.clone(), meta.topics[0].partition_metadata.iter().map(|p| p.leader).collect());
         topics_meta.insert(topic.clone(), meta);
+
         let meta = topics_meta.get(topic).unwrap();
         return Ok(meta);
     }
@@ -416,22 +421,68 @@ impl Buffer {
         BufferingResult::Ok
     }
 
-    /// Scan buffer and make a request for each broker_id which has messages in queue
-    fn mk_requests(&self, cluster: &Cluster) {
-        // TODO: implement FIFO and request size bound algorithm
+    async fn flush(&self, cluster: &mut Cluster) -> Result<()> {
+        let broker_partitioned = self.mk_requests(cluster);
 
-        //debug!("Resolving metadata");
-        //self.resolve_metadata(cluster).await;
+        for (broker_id, data) in broker_partitioned {
+            let request = protocol::ProduceRequest0 {
+                acks: 1,
+                timeout: 1500,
+                topic_data: &data
+            };
+            let broker = cluster.broker_by_id(broker_id).
+                expect(format!("Can not find broker_id {}", broker_id).as_str());
+            let cmd_buf = broker.mk_request(request);
+            debug!("Sending Produce");
+            let res = broker.send_request2::<protocol::ProduceResponse0>(cmd_buf).await?;
+            debug!("Got Produce response: {:?}", res);
+        }
 
-        debug!("self.topics: {:?}", self.topics);
-        // broker_id->topic->partition->recordset[]
-        /*let mut broker_partitioned = HashMap::<
-            BrokerId,
-            HashMap<&String, HashMap<u32, (&[QueuedMessage], &[QueuedMessage])>>,
-        >::new();
+        /*
+        let requests = broker_partitioned.into_iter().map(|(broker_id, data)| {
+            let request = protocol::ProduceRequest0 {
+                acks: 1,
+                timeout: 10_000,
+                topic_data: &data
+            };
+            let r = cluster.broker_by_id(broker_id).
+                expect(format!("Can not find broker_id {}", broker_id).as_str());
+            let rr = r.mk_request(request);
+            (rr, r)
+            //()
+
+            /*
+            match cluster.broker_by_id(*broker_id) {
+                Ok(broker) => {
+                    broker.request(&request)
+                },
+                Err(e) => {
+                    // Should not happen
+                    panic!("Can not find broker_id {}", broker_id);
+                },
+            }
+            */
+        }).collect::<Vec<_>>();
+
+        let x = FuturesUnordered::from_iter(requests.into_iter().map(|(buf, broker)| {
+            broker.send_request2::<protocol::ProduceResponse0>(buf)
+        }));
         */
 
-        let save_actions: Vec<_> = self.topics.iter().
+        Ok(())
+    }
+
+    /// Scan buffer and make a request for each broker_id which has messages in queue
+    fn mk_requests(&self, cluster: &Cluster) -> HashMap<BrokerId,HashMap<&String, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>>> {
+        // TODO: implement FIFO and request size bound algorithm
+
+        // broker_id->topic->partition->recordset[]
+        let mut broker_partitioned = HashMap::<
+            BrokerId,
+            HashMap<&String, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>>,
+        >::new();
+
+        let slices_per_broker: Vec<_> = self.topics.iter().
             flat_map(|(topic, partitions)| {
                 // N-th partition in queue match to partition number itself, so use `enumerate()`
                 // instead of storing partition number in the queue
@@ -441,17 +492,25 @@ impl Buffer {
                     map( move |(partition, queue)| {
                         let partition = partition as u32;
                         //let topic_meta = self.get_or_fetch_topic_meta(topic, cluster).await?;
-                        let broker_id = self.meta_cache.
+                        let broker_id = *self.meta_cache.
                             get(topic).expect("Topic metadata is expected").
                             get(partition as usize).expect("Corrupt topic metadata partition info");
 
                         // TODO use raw entries
-                        //let topics = broker_partitioned.entry(*broker_id).or_insert_with(|| HashMap::new());
+                        //let topics = broker_partitioned.entry(broker_id).or_insert_with(|| HashMap::new());
                         //let partitions = topics.entry(topic).or_insert_with(|| HashMap::new());
-                        //assert!(partitions.insert(partition, queue.as_slices()).is_none());
-                        (broker_id, partition, queue.as_slices())
+                        //partitions.insert(partition, queue.as_slices());
+                        (broker_id, topic, partition, queue.as_slices())
                     })
             }).collect();
+
+        for (broker_id, topic, partition, slices) in slices_per_broker {
+            let topics = broker_partitioned.entry(broker_id).or_insert_with(|| HashMap::new());
+            let partitions = topics.entry(topic).or_insert_with(|| HashMap::new());
+            partitions.insert(partition, slices);
+        }
+
+        broker_partitioned
     }
 
     /// Make sure all topics in the buffer have corresponding metadata and if not, request
@@ -462,7 +521,6 @@ impl Buffer {
 }
 
 type PartitionQueue = VecDeque<QueuedMessage>;
-type BrokerId = i32;
 
 /// Serialized message with topic and partition preserved because we need them in case topic
 /// resolved or topology change.
@@ -536,14 +594,20 @@ mod test {
 
             let producer = Producer::new::<P1>(&seed).await?;
             let mut producer = producer;
-            for i in 1..100 {
+            /*for i in 1..100 {
                 let msg = format!("i:{}", i);
                 let msg = StringMessage {
                     key: i.to_string(),
                     value: msg,
                 };
                 producer.send(msg, "topic1".to_string()).await;
-            }
+            }*/
+
+            let msg = StringMessage {
+                key: "".to_string(),
+                value: "aaa".to_string(),
+            };
+            producer.send(msg, "test1".to_string()).await;
 
             async_std::task::sleep(Duration::from_secs(20)).await;
 
