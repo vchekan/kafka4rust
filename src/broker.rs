@@ -3,7 +3,7 @@ use crate::error::Result;
 use crate::protocol;
 use crate::protocol::*;
 use failure::_core::fmt::Debug;
-use log::debug;
+use log::{debug, trace};
 use std::io::{self, Cursor};
 use std::net::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -38,7 +38,7 @@ impl Broker {
 
         let mut cursor = Cursor::new(buf);
         let (_corr_id, response) = read_response(&mut cursor);
-        debug!("Got ApiVersionResponse {:?}", response);
+        trace!("Got ApiVersionResponse {:?}", response);
         let negotiated_api_version = Broker::build_api_compatibility(&response);
         Ok(Broker {
             negotiated_api_version,
@@ -100,7 +100,7 @@ impl Broker {
         // Empty join: max<min. For successful join: min<=max
         //
         let my_versions = protocol::supported_versions();
-        debug!(
+        trace!(
             "build_api_compatibility my_versions: {:?} them: {:?}",
             my_versions, them
         );

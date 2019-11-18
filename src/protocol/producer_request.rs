@@ -2,7 +2,7 @@ use crate::producer::QueuedMessage;
 use crate::zigzag::{zigzag64, zigzag_len};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
-use crc32fast;
+use crc32c::crc32c;
 use std::collections::HashMap;
 use std::time::UNIX_EPOCH;
 use crate::protocol::{ApiKey, HasApiKey, Request, ProduceResponse0, HasApiVersion, ToKafka};
@@ -137,15 +137,14 @@ impl ProduceRequest0<'_> {
                     mk_record(buf, i as u64, record.timestamp - first_timestamp, &record)
                 }
 
-                // write data and batch size & crc
+                // write data and batch size
                 let recordset_len = buf.len() - recordset_bookmark - 4;
                 BigEndian::write_u32(&mut buf[recordset_bookmark..], recordset_len as u32);
                 let batch_len = buf.len() - batch_len_bookmark - 4;
                 BigEndian::write_u32(&mut buf[batch_len_bookmark..], batch_len as u32);
 
-                let mut crc = crc32fast::Hasher::new();
-                crc.update(&buf[crc_bookmark + 4..]);
-                let crc = crc.finalize();
+                // Calculate Crc after all length are set
+                let  crc = crc32c(&buf[crc_bookmark + 4..]);
                 BigEndian::write_u32(&mut buf[crc_bookmark..], crc);
             }
         }
@@ -164,7 +163,6 @@ fn mk_record(buf: &mut BytesMut, offset_delta: u64, timestamp_delta: u64, msg: &
         zigzag_len(key_len as u64) as u64 + key_len as u64+
         zigzag_len(msg.value.len() as u64) as u64 + msg.value.len() as u64+
         1; // TODO: headers
-    //len += zigzag_len(len) as u64; // size of len itself
     buf.reserve(len as usize);
 
     buf.put_slice(zigzag64(len, &mut varint_buf));

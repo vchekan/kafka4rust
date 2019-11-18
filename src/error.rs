@@ -6,7 +6,7 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Fail)]
 pub enum Error {
     #[fail(display = "{}", _0)]
-    Io(std::io::Error),
+    Io(std::io::Error, Backtrace),
 
     #[fail(display = "No broker available")]
     NoBrokerAvailable(Backtrace),
@@ -23,7 +23,7 @@ pub enum Error {
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
-        Error::Io(e)
+        Error::Io(e, Backtrace::new())
     }
 }
 
