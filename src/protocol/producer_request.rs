@@ -4,7 +4,6 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use crc32c::crc32c;
 use std::collections::HashMap;
-use std::time::UNIX_EPOCH;
 use crate::protocol::{ApiKey, HasApiKey, Request, ProduceResponse0, HasApiVersion, ToKafka};
 use crate::protocol::ApiKey::ApiVersions;
 

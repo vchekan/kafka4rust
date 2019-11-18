@@ -30,9 +30,7 @@ use async_std::prelude::*;
 use async_std::sync::Mutex;
 use std::sync::Arc;
 
-pub(crate) const CLIENT_ID: &str = "console-producer";
-    // TODO:
-    //"k4rs";
+pub(crate) const CLIENT_ID: &str = "k4rs";
 
 #[derive(Debug, Clone)]
 pub struct BrokerConnection {

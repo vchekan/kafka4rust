@@ -2,12 +2,12 @@
 * Instrumentation
 * Tracing
 
-(+) Tokio
-(+) Serde
+x Tokio
+x Serde
 * Client API
-  ** Producer
-  ** Consumer
-  ** Admin
+  x Producer
+  * Consumer
+  * Admin
 * Wrappers
     ** C#
     ** Java
@@ -26,7 +26,7 @@
 
 == Projects
 * CLI tools
-* Wireshark decoder
+x Wireshark decoder
 * Compaction and record batch analyzer
 * Enterprise UI
 * FS adapter

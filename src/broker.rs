@@ -7,7 +7,7 @@ use log::{debug, trace};
 use std::io::{self, Cursor};
 use std::net::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use bytes::{BytesMut, Bytes};
+use bytes::BytesMut;
 
 // TODO: if move negotiated api and correlation to broker connection, this struct degenerates.
 // Is it redundant?
@@ -146,7 +146,7 @@ mod tests {
             .expect(format!("Host '{}' not found", bootstrap).as_str());
 
         task::block_on(async {
-            let mut broker = super::Broker::connect(addr).await.unwrap();
+            let broker = super::Broker::connect(addr).await.unwrap();
             info!("Connected: {:?}", broker);
 
             let req = MetadataRequest0 {

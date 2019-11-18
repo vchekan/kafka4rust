@@ -6,9 +6,6 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::time::{UNIX_EPOCH, Duration};
 use async_std::sync::{Sender};
-use async_std::prelude::*;
-use futures::stream::FuturesUnordered;
-use std::iter::FromIterator;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -279,7 +276,7 @@ impl ProducerImpl {
         topics_meta.insert(topic.clone(), meta);
 
         let meta = topics_meta.get(topic).unwrap();
-        return Ok(meta);
+        Ok(meta)
     }
 }
 
@@ -354,7 +351,7 @@ impl Buffer {
     }
 
     async fn flush(&self, cluster: &mut Cluster) -> Result<()> {
-        let broker_partitioned = self.mk_requests(cluster);
+        let broker_partitioned = self.mk_requests();
 
         for (broker_id, data) in broker_partitioned {
             let request = protocol::ProduceRequest0 {
@@ -374,7 +371,7 @@ impl Buffer {
     }
 
     /// Scan buffer and make a request for each broker_id which has messages in queue
-    fn mk_requests(&self, cluster: &Cluster) -> HashMap<BrokerId,HashMap<&String, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>>> {
+    fn mk_requests(&self) -> HashMap<BrokerId,HashMap<&String, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>>> {
         // TODO: implement FIFO and request size bound algorithm
 
         // broker_id->topic->partition->recordset[]
