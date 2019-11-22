@@ -1,6 +1,8 @@
 //! While params are unsigned, encode it as signed to be compatible with kafka. The only case when
 //! we need negative value is -1, which can be a constant.
 
+use bytes::Buf;
+
 pub fn zigzag_len(mut d: u64) -> u8 {
     if d == 0 {
         return 1;
@@ -17,7 +19,7 @@ pub fn zigzag_len(mut d: u64) -> u8 {
 }
 
 /// Return compressed number and length in bytes. Max len is 9 bytes
-pub fn zigzag64(mut n: u64, buf: &mut [u8]) -> &[u8] {
+pub fn put_zigzag64(mut n: u64, buf: &mut [u8]) -> &[u8] {
     if n == 0 {
         buf[0] = 0;
         return &buf[..1];
@@ -33,6 +35,23 @@ pub fn zigzag64(mut n: u64, buf: &mut [u8]) -> &[u8] {
     }
     buf[i - 1] &= 0b0111_1111;
     return &buf[..i];
+}
+
+pub fn get_zigzag64(buf: &mut impl Buf) -> i64 {
+    let mut res = 0_u64;
+    let mut shift = 0;
+
+    for offset in 0..9 {
+        let i = buf.get_u8();
+        res |= ((i & 0x7f) as u64) << shift;
+        if i & 0x80 == 0 {
+            let res = (res >> 1) ^ (-(res as i64 & 1)) as u64;
+            return res as i64;
+        }
+        shift += 7;
+    }
+    // TODO: return Result<i64>?
+    panic!()
 }
 
 #[cfg(test)]
@@ -53,9 +72,9 @@ mod test {
     #[test]
     fn test_encoding() {
         let mut buf = vec![0, 0, 0, 0, 0, 0, 0, 0];
-        assert_eq!(zigzag64(0b0000_0000, &mut buf), vec![0].as_slice());
-        assert_eq!(zigzag64(0b0000_0001, &mut buf), vec![2].as_slice());
-        assert_eq!(zigzag64(0b0000_0011, &mut buf), vec![6].as_slice());
+        assert_eq!(put_zigzag64(0b0000_0000, &mut buf), vec![0].as_slice());
+        assert_eq!(put_zigzag64(0b0000_0001, &mut buf), vec![2].as_slice());
+        assert_eq!(put_zigzag64(0b0000_0011, &mut buf), vec![6].as_slice());
         /*assert_eq!(zigzag64(0b0111_1111, &mut buf), vec![127].as_slice());
         assert_eq!(zigzag64(0b1111_1111, &mut buf), vec![0b1111_1111, 0b0000_0001].as_slice());
         assert_eq!(zigzag64(300, &mut buf), vec![0b1010_1100, 0b0000_0010].as_slice());

@@ -23,9 +23,27 @@ impl ToKafka for u64 {
     }
 }
 
+impl ToKafka for i64 {
+    fn to_kafka(&self, buff: &mut BytesMut) {
+        buff.put_i64_be(*self);
+    }
+}
+
+impl ToKafka for u16 {
+    fn to_kafka(&self, buff: &mut BytesMut) {
+        buff.put_u16_be(*self);
+    }
+}
+
 impl ToKafka for i16 {
     fn to_kafka(&self, buff: &mut BytesMut) {
         buff.put_i16_be(*self);
+    }
+}
+
+impl ToKafka for u8 {
+    fn to_kafka(&self, buff: &mut BytesMut) {
+        buff.put_u8(*self);
     }
 }
 
@@ -54,12 +72,14 @@ where
     }
 }
 
+/*
 /// Byte array specialization
 impl ToKafka for Vec<u8> {
     fn to_kafka(&self, buff: &mut BytesMut) {
         buff.put_slice(&self);
     }
 }
+*/
 
 //
 // Primitive types deserialization
@@ -100,6 +120,12 @@ impl FromKafka for i64 {
     }
 }
 
+impl FromKafka for u16 {
+    fn from_kafka(buff: &mut impl Buf) -> Self {
+        buff.get_u16_be()
+    }
+}
+
 impl FromKafka for i16 {
     fn from_kafka(buff: &mut impl Buf) -> Self {
         buff.get_i16_be()
@@ -112,7 +138,10 @@ where
 {
     fn from_kafka(buff: &mut impl Buf) -> Self {
         assert!(buff.remaining() >= 4);
-        let len = buff.get_u32_be();
+        let len = buff.get_i32_be();
+        if len == -1 {
+            return vec![];
+        }
         let mut res = Vec::with_capacity(len as usize);
         for _ in 0..len {
             let t = T::from_kafka(buff);

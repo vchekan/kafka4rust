@@ -1,5 +1,5 @@
 use crate::producer::QueuedMessage;
-use crate::zigzag::{zigzag64, zigzag_len};
+use crate::zigzag::{put_zigzag64, zigzag_len};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use crc32c::crc32c;
@@ -164,10 +164,10 @@ fn mk_record(buf: &mut BytesMut, offset_delta: u64, timestamp_delta: u64, msg: &
         1; // TODO: headers
     buf.reserve(len as usize);
 
-    buf.put_slice(zigzag64(len, &mut varint_buf));
+    buf.put_slice(put_zigzag64(len, &mut varint_buf));
     buf.put_u8(0); // attributes
-    buf.put_slice(zigzag64(timestamp_delta, &mut varint_buf));
-    buf.put_slice(zigzag64(offset_delta, &mut varint_buf));
+    buf.put_slice(put_zigzag64(timestamp_delta, &mut varint_buf));
+    buf.put_slice(put_zigzag64(offset_delta, &mut varint_buf));
     match &msg.key {
         Some(key) => {
             //buf.put_slice(zigzag64(key_len as u64, &mut varint_buf));
@@ -177,7 +177,7 @@ fn mk_record(buf: &mut BytesMut, offset_delta: u64, timestamp_delta: u64, msg: &
         }
         None => buf.put_u8(VARINT_MINUS_ONE),
     }
-    buf.put_slice(zigzag64(msg.value.len() as u64, &mut varint_buf));
+    buf.put_slice(put_zigzag64(msg.value.len() as u64, &mut varint_buf));
     buf.put_slice(&msg.value);
     buf.put_u8(0); // TODO: headers
 }

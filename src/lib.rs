@@ -3,18 +3,14 @@
 #![feature(backtrace)]
 
 mod types;
+mod error;
+mod protocol;
+mod zigzag;
 mod broker;
 mod cluster;
 mod connection;
-mod error;
 mod producer;
-mod protocol;
-//mod consumer;
-mod zigzag;
+mod consumer;
 
-extern crate failure;
-
-extern crate byteorder;
-extern crate bytes;
 #[macro_use]
 extern crate log;

@@ -1,4 +1,5 @@
 macro_rules! get_type {
+    ( { fn $fn:ident() -> $tp:ty } ) => ( $tp );
     ([$t:ident $body:tt] ) => (Vec<get_type!($t)>);
     ($t:ident $body:tt) => ($t);
     ($t:ident) => ($t);
@@ -33,8 +34,10 @@ macro_rules! request {
 }
 
 macro_rules! response {
+    ( { fn $fn:ident() -> $tp:ty} ) => {};
     ($id:ident) => {};
     ( [$id:ident] ) => {};
+
 
     // Array of complex type
     ( [ $sname:ident $tp:tt ] ) => (response!($sname $tp););

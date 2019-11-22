@@ -17,6 +17,7 @@ pub trait ToKafka {
     fn to_kafka(&self, buff: &mut BytesMut);
 }
 
+// TODO: do I really need Buf trait or can use concrete MutBuf type?
 pub trait FromKafka {
     fn from_kafka(buff: &mut impl Buf) -> Self;
 }
@@ -64,3 +65,4 @@ where
     let response = T::from_kafka(buff);
     (corr_id, response)
 }
+
