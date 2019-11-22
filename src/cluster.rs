@@ -38,6 +38,7 @@ use std::io;
 use std::iter::FromIterator;
 use std::collections::HashMap;
 use std::net::{ToSocketAddrs};
+use failure::ResultExt;
 
 #[derive(Debug)]
 pub(crate) struct Cluster {
@@ -53,7 +54,7 @@ pub(crate) enum EventOut {
 
 impl Cluster {
     /// Connect to at least one broker successfully .
-    pub async fn connect(bootstrap: Vec<String>) -> io::Result<Self> {
+    pub async fn connect(bootstrap: Vec<String>) -> Result<Self> {
         let connect_futures = bootstrap
             .iter()
             // TODO: log bad addresses which did not parse
@@ -75,7 +76,8 @@ impl Cluster {
         let broker = match resolved.next().await {
             Some(broker) => broker,
             // TODO: failure
-            None => return Err(io::Error::from(io::ErrorKind::NotFound)),
+            None => Err(io::Error::from(io::ErrorKind::NotFound)).
+                context(format!("Cluster: connect: can not resolve any bootstrap server: {:?}", bootstrap))?,
         };
 
         // TODO: move it to BrokerConnection
@@ -98,13 +100,13 @@ impl Cluster {
         // update known brokers
         for broker in &meta_response.brokers {
             // Looks like std::net do not support IpAddr resolution, resolve with 0 port and set port later
-            let addr = (broker.host.as_str(), 0).to_socket_addrs()?.collect::<Vec<_>>();
+            let addr = (broker.host.as_str(), 0).to_socket_addrs().context(format!("Cluster: parse host: '{}'", broker.host))?.collect::<Vec<_>>();
             if addr.len() == 0 {
                 return Err(Error::DnsFailed(format!("{}:{}", broker.host, broker.port)))
             }
             let mut addr = addr[0];
             addr.set_port(broker.port as u16);
-            let connected_broker = Broker::connect(addr).await?;
+            let connected_broker = Broker::connect(addr).await.context("Cluster: resolve topic")?;
             self.broker_id_map.insert(broker.node_id, connected_broker);
 
             return Ok(meta_response);

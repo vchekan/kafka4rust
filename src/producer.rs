@@ -6,6 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::time::{UNIX_EPOCH, Duration};
 use async_std::sync::{Sender};
+use failure::ResultExt;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -156,7 +157,7 @@ type TopicMetaCache = HashMap<String, protocol::MetadataResponse0>;
 //
 impl ProducerImpl {
     pub async fn new<M: ToMessage + 'static, P: Partitioner<M>>(seed: &str) -> Result<Sender<Cmd<M>>> {
-        let cluster = Cluster::connect(vec![seed.to_string()]).await?;
+        let cluster = Cluster::connect(vec![seed.to_string()]).await.context("Producer: new")?;
         let buffer = Buffer::new();
 
         let (tx, rx) = async_std::sync::channel(1);

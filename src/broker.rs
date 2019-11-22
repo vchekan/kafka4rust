@@ -1,5 +1,5 @@
 use crate::connection::BrokerConnection;
-use crate::error::Result;
+use crate::error::{Result, Error};
 use crate::protocol;
 use crate::protocol::*;
 use failure::_core::fmt::Debug;
@@ -8,6 +8,7 @@ use std::io::{self, Cursor};
 use std::net::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use bytes::BytesMut;
+use failure::ResultExt;
 
 // TODO: if move negotiated api and correlation to broker connection, this struct degenerates.
 // Is it redundant?
@@ -24,8 +25,8 @@ pub(crate) struct Broker {
 impl Broker {
     /// Connect to address and issue ApiVersion request, build compatible Api Versions for all Api
     /// Keys
-    pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
-        let conn = BrokerConnection::connect(addr).await?;
+    pub async fn connect(addr: SocketAddr) -> Result<Self> {
+        let conn = BrokerConnection::connect(addr).await.context("Broker:connect")?;
         let req = protocol::ApiVersionsRequest0 {};
         //let mut buf = Vec::with_capacity(1024);
         let mut buf = BytesMut::with_capacity(1024);
@@ -34,7 +35,7 @@ impl Broker {
 
         write_request(&req, correlation_id, None, &mut buf);
         debug!("Requesting Api versions");
-        conn.request(&mut buf).await?;
+        conn.request(&mut buf).await.context("Broker:connect:request")?;
 
         let mut cursor = Cursor::new(buf);
         let (_corr_id, response) = read_response(&mut cursor);
@@ -57,7 +58,7 @@ impl Broker {
         let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
         protocol::write_request(&request, correlation_id, None, &mut buff);
 
-        self.conn.request(&mut buff).await?;
+        self.conn.request(&mut buff).await.context("Broker: sending request")?;
         let mut cursor = Cursor::new(buff);
         let (corr_id, response): (_, R::Response) = read_response(&mut cursor);
         // TODO: check correlationId
@@ -69,7 +70,7 @@ impl Broker {
     pub async fn send_request2<R: FromKafka + Debug>(&self, mut request: BytesMut) -> Result<R>
     {
         debug!("Sending conn.request()...");
-        self.conn.request(&mut request).await?;
+        self.conn.request(&mut request).await.context("Broker: sending request")?;
         debug!("Sent conn.request(). Result buff len: {}", request.len());
         let mut cursor = Cursor::new(request);
         let (corr_id, response): (_, R) = read_response(&mut cursor);

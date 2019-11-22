@@ -1,12 +1,14 @@
 use failure::Fail;
 use failure::Backtrace;
+use failure;
+use std::string::FromUtf8Error;
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Fail)]
 pub enum Error {
     #[fail(display = "{}", _0)]
-    Io(std::io::Error, Backtrace),
+    Io(std::io::Error),
 
     #[fail(display = "No broker available")]
     NoBrokerAvailable(Backtrace),
@@ -18,12 +20,24 @@ pub enum Error {
     SpawnError(futures::task::SpawnError),
 
     #[fail(display = "Dns resolution failed: {}", _0)]
-    DnsFailed(String)
+    DnsFailed(String),
+
+    #[fail(display = "Error: {}", _0)]
+    ContextStr(failure::Context<&'static str>),
+
+    #[fail(display = "Error: {}", _0)]
+    ContextString(failure::Context<String>),
+
+    #[fail(display = "Unexpected recordset magic. Can handle only '2' but got '{}'", _0)]
+    UnexpectedRecordsetMagic(u8),
+
+    #[fail(display = "Corrupt message")]
+    CorruptMessage,
 }
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
-        Error::Io(e, Backtrace::new())
+        Error::Io(e)
     }
 }
 
@@ -35,4 +49,16 @@ impl From<log::SetLoggerError> for Error {
 
 impl From<futures::task::SpawnError> for Error {
     fn from(e: futures::task::SpawnError) -> Self { Error::SpawnError(e) }
+}
+
+impl From<failure::Context<&str>> for Error {
+    fn from(e: failure::Context<&str>) -> Self {
+        Error::ContextStr(e)
+    }
+}
+
+impl From<failure::Context<String>> for Error {
+    fn from(e: failure::Context<String>) -> Self {
+        Error::ContextString(e)
+    }
 }

@@ -19,6 +19,7 @@
 //!
 //! Write channel: how to implement sender's pushback?
 
+use crate::error::Result;
 use byteorder::BigEndian;
 use bytes::{ByteOrder, BytesMut};
 use log::debug;
@@ -29,6 +30,7 @@ use async_std::net::TcpStream;
 use async_std::prelude::*;
 use async_std::sync::Mutex;
 use std::sync::Arc;
+use failure::ResultExt;
 
 pub(crate) const CLIENT_ID: &str = "k4rs";
 
@@ -47,8 +49,8 @@ struct Inner {
 
 impl BrokerConnection {
     /// Connect to address but do not perform any check beyond successful tcp connection.
-    pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
-        let tcp = TcpStream::connect(&addr).await?;
+    pub async fn connect(addr: SocketAddr) -> Result<Self> {
+        let tcp = TcpStream::connect(&addr).await.context(format!("BrokerConnection failed to connect to {:?}", addr))?;
 
         let conn = BrokerConnection {
             addr,
