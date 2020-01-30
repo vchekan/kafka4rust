@@ -37,12 +37,12 @@ use futures::{
 use std::io;
 use std::iter::FromIterator;
 use std::collections::HashMap;
-use std::net::{ToSocketAddrs};
+use std::net::{SocketAddr, ToSocketAddrs};
 use failure::ResultExt;
 
 #[derive(Debug)]
 pub(crate) struct Cluster {
-    bootstrap: Vec<String>,
+    bootstrap: Vec<SocketAddr>,
     seed_broker: Broker,
     broker_id_map: HashMap<BrokerId, Broker>
 }
@@ -54,12 +54,12 @@ pub(crate) enum EventOut {
 
 impl Cluster {
     /// Connect to at least one broker successfully .
-    pub async fn connect(bootstrap: Vec<String>) -> Result<Self> {
+    pub async fn connect(bootstrap: Vec<SocketAddr>) -> Result<Self> {
         let connect_futures = bootstrap
             .iter()
             // TODO: log bad addresses which did not parse
-            .filter_map(|addr| addr.parse().ok())
-            .map(Broker::connect);
+            //.filter_map(|addr| addr.parse().ok())
+            .map(|a| Broker::connect(a.clone()));
 
         // TODO: use `fold` to preserve and report last error if no result
         /*let resolved = futures::stream::futures_unordered(connectFutures).
@@ -236,8 +236,9 @@ mod tests {
         task::block_on(async {
             //let addr = vec!["127.0.0.1:9092".to_string()];
             let bootstrap = vec![
-                "no.such.host.com:9092".to_string(),
-                env::var("kafka-bootstrap").unwrap_or("127.0.0.1:9092".to_string()),
+                //"no.such.host.com:9092".parse(),
+                //env::var("kafka-bootstrap").parse().unwrap_or("127.0.0.1:9092".parse()),
+                "broker1:9092".parse().unwrap()
             ];
 
             //let (tx, rx) = mpsc::unbounded();

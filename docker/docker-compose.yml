@@ -14,13 +14,10 @@ services:
     image: kafka4rust-broker
     build:
       context: .
-      args:
-        tag: rust4kafka
     depends_on:
       - zookeeper
     environment:
-      KAFKA_BROKER_ID: 1
-      ADVERTISED_LISTENERS: broker1:9092
-      ZOOKEEPER_CONNECT: zookeeper:2181
-
-
+      BROKER_OPTS: >-
+        --override advertised.listeners=PLAINTEXT://broker1:9092
+        --override broker.id=1
+        --override zookeeper.connect=zookeeper:2181

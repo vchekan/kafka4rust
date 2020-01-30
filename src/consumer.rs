@@ -1,14 +1,18 @@
 use crate::cluster::Cluster;
 use crate::protocol;
-use derive_builder::Builder;
 use crate::error::{Result, Error};
-use failure::ResultExt;
-use futures::Stream;
+use crate::types::{BrokerId, Partition};
+use crate::utils;
+use derive_builder::Builder;
+use failure::{ResultExt, format_err};
 use async_std::sync::Receiver;
 use std::collections::HashMap;
-use crate::types::{BrokerId, Partition};
 
 // TODO: offset start: -2, end: -1
+pub enum StartOffset {
+    Earliest,
+    Latest
+}
 
 #[derive(Default, Builder)]
 #[builder(setter(into), default)]
@@ -34,7 +38,12 @@ pub struct Consumer {
 
 impl Consumer {
     pub async fn new(config: ConsumerConfig) -> Result<Receiver<Message>> {
-        let mut cluster = Cluster::connect(vec![config.bootstrap.clone()]).await.context("Consumer: new")?;
+        let seed_list = utils::to_bootstrap_addr(&config.bootstrap);
+        if seed_list.len() == 0 {
+            return Err(From::from(format_err!("Failed to resolve any server from: '{}'", config.bootstrap).context("Producer resolve seds")));
+        }
+
+        let mut cluster = Cluster::connect(seed_list).await.context("Consumer: new")?;
         let topic_meta = cluster.resolve_topic(&config.topic).await.context("Consumer:new:resolve topic")?;
         debug!("Resolved topic: {:?}", topic_meta);
         assert_eq!(1, topic_meta.topics.len());
@@ -70,7 +79,7 @@ impl Consumer {
                                 partitions: partitions.iter().map(|&partition| {
                                     protocol::FetchPartition {
                                         partition,
-                                        fetch_offset: 0, //-1_i64,
+                                        fetch_offset: -2_i64,
                                         log_start_offset: -1,
                                         partition_max_bytes: 1000_000,
                                     }
@@ -79,7 +88,14 @@ impl Consumer {
                         ]
                     };
                     debug!("Fetch request: {:?}", request);
-                    let response = broker.send_request(request).await;
+                    match broker.send_request(request).await {
+                        Ok(response) => {
+
+                        },
+                        Err(e) => {
+
+                        }
+                    }
                 }
             }
         });

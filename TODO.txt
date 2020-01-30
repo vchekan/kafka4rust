@@ -6,11 +6,12 @@ x Tokio
 x Serde
 * Client API
   x Producer
-  * Consumer
+  x Consumer
   * Admin
+  * Trasnsactions
 * Wrappers
-    ** C#
-    ** Java
+    * C#
+    * Java
 * Integration testing
 * Tcp: nodelay, experiment with tx,rx buffer size
 * Dear IMGUI UI

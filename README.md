@@ -1,4 +1,4 @@
-== Goals
+## Goals
 * High quality, high performance and reliability kafka client
 * Implement modern async paradigm for best performance and low resource usage
 * Real life oriented implementation: instrumentation and troubleshooting friendly, good failure handling by design

@@ -5,7 +5,6 @@ use bytes::{BufMut, BytesMut};
 use crc32c::crc32c;
 use std::collections::HashMap;
 use crate::protocol::{ApiKey, HasApiKey, Request, ProduceResponse0, HasApiVersion, ToKafka};
-use crate::protocol::ApiKey::ApiVersions;
 
 const ZERO32: [u8; 4] = [0, 0, 0, 0];
 const ZERO64: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
@@ -169,7 +168,7 @@ fn mk_record(buf: &mut BytesMut, offset_delta: u64, timestamp_delta: u64, msg: &
     buf.put_slice(put_zigzag64(timestamp_delta, &mut varint_buf));
     buf.put_slice(put_zigzag64(offset_delta, &mut varint_buf));
     match &msg.key {
-        Some(key) => {
+        Some(_key) => {
             //buf.put_slice(zigzag64(key_len as u64, &mut varint_buf));
             //buf.put_slice(key);
             // TODO: fix key

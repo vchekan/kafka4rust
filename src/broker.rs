@@ -1,10 +1,10 @@
 use crate::connection::BrokerConnection;
-use crate::error::{Result, Error};
+use crate::error::Result;
 use crate::protocol;
 use crate::protocol::*;
 use failure::_core::fmt::Debug;
 use log::{debug, trace};
-use std::io::{self, Cursor};
+use std::io::Cursor;
 use std::net::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use bytes::BytesMut;

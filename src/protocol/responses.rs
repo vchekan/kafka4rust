@@ -5,12 +5,6 @@ use crate::zigzag::get_zigzag64;
 use failure::Fail;
 use failure::ResultExt;
 
-#[derive(Debug)]
-pub enum Responses {
-    MetadataResponse0(MetadataResponse0),
-    ApiVersionsResponse0(ApiVersionsResponse0),
-}
-
 // 0
 response!(ProduceResponse0 {
     responses: [ProduceResponse]

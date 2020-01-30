@@ -2,11 +2,12 @@ use crate::types::*;
 use crate::cluster::Cluster;
 use crate::error::{Result};
 use crate::protocol;
+use crate::utils;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::time::{UNIX_EPOCH, Duration};
 use async_std::sync::{Sender};
-use failure::ResultExt;
+use failure::{ResultExt, format_err};
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -123,7 +124,7 @@ pub struct Producer<M: ToMessage> {
 }
 
 impl<M: ToMessage + 'static> Producer<M> {
-    pub async fn new<P: Partitioner<M>>(seed: &str) -> Result<Self> {
+    pub async fn connect<P: Partitioner<M>>(seed: &str) -> Result<Self> {
         let msg_sender = ProducerImpl::new::<M,P>(seed).await?;
         let producer = Producer {
             msg_sender
@@ -157,7 +158,11 @@ type TopicMetaCache = HashMap<String, protocol::MetadataResponse0>;
 //
 impl ProducerImpl {
     pub async fn new<M: ToMessage + 'static, P: Partitioner<M>>(seed: &str) -> Result<Sender<Cmd<M>>> {
-        let cluster = Cluster::connect(vec![seed.to_string()]).await.context("Producer: new")?;
+        let seed_list = utils::to_bootstrap_addr(seed);
+        if seed_list.len() == 0 {
+            return Err(From::from(format_err!("Failed to resolve any server from: '{}'", seed).context("Producer resolve seds")));
+        }
+        let cluster = Cluster::connect(seed_list).await.context("Producer: new")?;
         let buffer = Buffer::new();
 
         let (tx, rx) = async_std::sync::channel(1);
@@ -468,7 +473,7 @@ mod test {
 
     struct P1 {}
     impl Partitioner<StringMessage> for P1 {
-        fn partition(message: &StringMessage) -> u32 {
+        fn partition(_message: &StringMessage) -> u32 {
             5
         }
     }
@@ -481,7 +486,7 @@ mod test {
             let seed = "127.0.0.1:9092";
             let _topic = "test1";
 
-            let producer = Producer::new::<P1>(&seed).await?;
+            let producer = Producer::connect::<P1>(&seed).await?;
             let mut producer = producer;
             /*for i in 1..100 {
                 let msg = format!("i:{}", i);
@@ -578,3 +583,7 @@ mod test {
     }
     */
 }
+
+
+
+

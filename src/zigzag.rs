@@ -41,7 +41,7 @@ pub fn get_zigzag64(buf: &mut impl Buf) -> i64 {
     let mut res = 0_u64;
     let mut shift = 0;
 
-    for offset in 0..9 {
+    for _offset in 0..9 {
         let i = buf.get_u8();
         res |= ((i & 0x7f) as u64) << shift;
         if i & 0x80 == 0 {
