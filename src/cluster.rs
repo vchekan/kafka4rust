@@ -62,22 +62,15 @@ impl Cluster {
             .map(|a| Broker::connect(a.clone()));
 
         // TODO: use `fold` to preserve and report last error if no result
-        /*let resolved = futures::stream::futures_unordered(connectFutures).
-                filter_map(|f| future::ready(f.ok())).
-                next();
-        let broker = match resolved.await {
-            Some(broker) => broker,
-            // TODO: failure
-            None => return Err(io::Error::from(io::ErrorKind::NotFound)),
-        };*/
 
         let mut resolved =
             FuturesUnordered::from_iter(connect_futures).filter_map(|f| ready(f.ok()));
         let broker = match resolved.next().await {
             Some(broker) => broker,
             // TODO: failure
-            None => Err(io::Error::from(io::ErrorKind::NotFound)).
-                context(format!("Cluster: connect: can not resolve any bootstrap server: {:?}", bootstrap))?,
+            None => {
+                return Err(Error::DnsFailed(format!("Cluster: connect: can not connect to bootstrap server: {:?}", bootstrap)));
+            },
         };
 
         // TODO: move it to BrokerConnection
@@ -124,7 +117,7 @@ impl Cluster {
         */
     }
 
-    pub fn broker_by_id(&mut self, broker_id: BrokerId) -> Result<&Broker> {
+    pub fn broker_by_id(&self, broker_id: BrokerId) -> Result<&Broker> {
         self.broker_id_map.get(&broker_id).ok_or(Error::NoBrokerAvailable(failure::Backtrace::new()))
     }
 

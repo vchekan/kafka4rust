@@ -8,11 +8,13 @@ x Serde
   x Producer
   x Consumer
   * Admin
-  * Trasnsactions
+  * Transactions
+* Integration testing
+    * Test with different executors (std-async, tokio)
 * Wrappers
     * C#
     * Java
-* Integration testing
+* Decide on error strategy. Use dynamic error?
 * Tcp: nodelay, experiment with tx,rx buffer size
 * Dear IMGUI UI
 * Adaptive buffer size

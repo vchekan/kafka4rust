@@ -24,7 +24,7 @@ use byteorder::BigEndian;
 use bytes::{ByteOrder, BytesMut};
 use log::debug;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{SocketAddr};
 
 use async_std::net::TcpStream;
 use async_std::prelude::*;

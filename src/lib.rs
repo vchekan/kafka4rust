@@ -6,17 +6,18 @@ mod types;
 mod error;
 mod protocol;
 mod zigzag;
-mod broker;
-mod cluster;
+mod utils;
 mod connection;
 mod producer;
+mod cluster;
+mod broker;
 mod consumer;
 mod api;
-mod utils;
 
 #[macro_use]
 extern crate log;
 
 pub use self::consumer::{Consumer, ConsumerConfig};
 pub use self::producer::{Producer};
+pub use self::error::Error;
 

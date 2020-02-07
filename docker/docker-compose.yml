@@ -12,6 +12,8 @@ services:
       - ZK_SERVER=zookeeper:2181
   broker1:
     image: kafka4rust-broker
+    ports:
+      - "9092:9092"
     build:
       context: .
     depends_on:

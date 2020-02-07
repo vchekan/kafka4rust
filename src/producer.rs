@@ -8,6 +8,11 @@ use std::fmt::Debug;
 use std::time::{UNIX_EPOCH, Duration};
 use async_std::sync::{Sender};
 use failure::{ResultExt, format_err};
+use std::marker::PhantomData;
+use std::sync::Arc;
+use async_std::sync::Mutex;
+use futures::AsyncWriteExt;
+use tokio::sync::RwLock;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -105,38 +110,140 @@ use failure::{ResultExt, format_err};
 /// topic metadata discovery process. When Metadata discovery process receive topic metadata, it
 /// publish it to Producer, which in turn, updates Buffer.
 ///
+/// Q: how to wait for Producer to complete? Explicit `Producer::flush()`? Should individual message
+/// await be implemented?
+/// A:
+///
+/// 
 
-// TODO: is `Send` needed? Can we conver to QueuedMessage before crossing thread boundaries?
+// TODO: is `Send` needed? Can we convert to QueuedMessage before crossing thread boundaries?
 pub trait ToMessage: Send {
     fn key(&self) -> Option<Vec<u8>>;
     fn value(&self) -> Vec<u8>;
 }
 
 pub trait Partitioner<M>
-where
-    M: ToMessage,
+//where
+//    M: ToMessage,
 {
     fn partition(message: &M) -> u32;
 }
 
-pub struct Producer<M: ToMessage> {
-    msg_sender: Sender<Cmd<M>>,
+pub struct Murmur2Partitioner {}
+impl<M> Partitioner<M> for Murmur2Partitioner {
+    fn partition(message: &M) -> u32 {
+        unimplemented!()
+    }
 }
 
-impl<M: ToMessage + 'static> Producer<M> {
-    pub async fn connect<P: Partitioner<M>>(seed: &str) -> Result<Self> {
-        let msg_sender = ProducerImpl::new::<M,P>(seed).await?;
-        let producer = Producer {
-            msg_sender
+pub struct Producer<M: ToMessage, P=Murmur2Partitioner> {
+    //msg_sender: Sender<Cmd<M>>,
+    // TODO: move partitioner to `send()`
+    phantom: PhantomData<P>,
+    phantom_m: PhantomData<M>,
+    // TODO: move `M` to `send()` too?
+    buffer: Arc<Mutex<Buffer>>,
+    cluster: Arc<tokio::sync::RwLock<Cluster>>,
+    // TODO: is kafka topic case-sensitive?
+    topics_meta: TopicMetaCache,
+}
+
+impl<M: ToMessage + 'static, P: Partitioner<M>> Producer<M,P> {
+    pub async fn connect(seed: &str) -> Result<Self> {
+        //let msg_sender = ProducerImpl::new::<M,P>(seed).await?;
+        let seed_list = utils::to_bootstrap_addr(seed);
+        if seed_list.len() == 0 {
+            return Err(From::from(format_err!("Failed to resolve any server from: '{}'", seed).context("Producer resolve seds")));
+        }
+        let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::connect(seed_list).await.context("Producer: new")?));
+        let producer = Producer::<M,P> {
+            //msg_sender,
+            phantom: PhantomData{},
+            phantom_m: PhantomData{},
+            buffer: Arc::new(Mutex::new(Buffer::new(cluster.clone()))),
+            cluster: cluster.clone(),
+            topics_meta: HashMap::new(),
         };
+
+        let buffer = producer.buffer.clone();
+        
+        tokio::spawn(async move {
+            loop {
+                async_std::task::sleep(Duration::from_secs(5)).await;
+                debug!("Buffer timer");
+                buffer.lock().await.flush().await;
+
+            }
+        });
+
         Ok(producer)
     }
 
-    pub async fn send(&mut self, msg: M, topic: String) {
-        self.msg_sender.send(Cmd::Send(msg, topic)).await
+    pub async fn send(&mut self, msg: M, topic: &str) -> Result<()> {
+        //self.msg_sender.send(Cmd::Send(msg, topic.to_string())).await
+        let mut buffer = self.buffer.lock().await;
+        // TODO: share metadata cache between self and Buffer
+        let meta = Self::get_or_request_meta(&mut self.cluster, &mut self.topics_meta, &mut buffer.meta_cache, topic).await?;
+        assert_eq!(1, meta.topics.len());
+        assert_eq!(topic, meta.topics.get(0).unwrap().topic);
+        let meta = meta.topics.get(0).unwrap();
+
+        let partitions_count = meta.partition_metadata.len() as u32;
+        let partition = P::partition(&msg) % partitions_count;
+
+        // TODO: would it be possible to keep reference to the message data instead of cloning? Would it be possible to do both?
+        let msg = QueuedMessage {
+            key: msg.key(),
+            value: msg.value(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Failed to get timestamp")
+                .as_millis() as u64,
+        };
+        match buffer.add(msg, topic.to_string(), partition, meta) {
+            BufferingResult::Ok => Ok(()),
+            BufferingResult::Overflow => {
+                // TODO:
+                unimplemented!()
+            }
+        }
+    }
+
+    pub async fn flush(&mut self) {
+        let buffer = self.buffer.lock().await;
+        buffer.flush().await;
+    }
+
+    /// Get topic's meta from cache or request from broker.
+    /// Result will be cached.
+    /// `self` is not passed as a prarameter because it causes lifetime conflict in `send`.
+    /// TODO: what is retry policy?
+    /// TODO: what to do if failed for extended period of time?
+    async fn get_or_request_meta<'a>(
+        cluster: &tokio::sync::RwLock<Cluster>,
+        topics_meta: &'a mut TopicMetaCache,
+        buffer_meta: &mut HashMap<String, Vec<BrokerId>>,
+        topic: &str,
+    ) -> Result<&'a protocol::MetadataResponse0> {
+        // `if let Some(meta) = self.topics_meta.get(topic)` does not work because of lifetimes,
+        // so have to do 2 lookups :(
+        if topics_meta.contains_key(topic) {
+            let mut topic_meta = topics_meta;
+            let meta = topic_meta.get(topic).unwrap();
+            return Ok(meta);
+        }
+
+        // Did not have meta. Fetch and cache.
+        let meta = cluster.write().await.resolve_topic(topic).await?;
+        buffer_meta.insert(topic.to_string(), meta.topics[0].partition_metadata.iter().map(|p| p.leader).collect());
+        topics_meta.insert(topic.to_string(), meta);
+
+        let meta = topics_meta.get(topic).unwrap();
+        Ok(meta)
     }
 }
 
+/*
 /// Public Producer structure
 #[derive(Debug)]
 struct ProducerImpl {
@@ -150,9 +257,10 @@ enum Cmd<M> {
     Send(M, String),
     BufferTimer,
 }
-
+*/
 type TopicMetaCache = HashMap<String, protocol::MetadataResponse0>;
 
+/*
 //
 // Implementations
 //
@@ -176,11 +284,11 @@ impl ProducerImpl {
             //buffer_handler: spawn_local(Self::run_loop(buffer))?,
         };
 
-        tokio_current_thread::spawn(async move {
+        tokio::spawn(async move {
                 producer.worker_loop::<M,P>(rx).await;
             }
         );
-        tokio_current_thread::spawn(async move {
+        tokio::spawn(async move {
             loop {
                 async_std::task::sleep(Duration::from_secs(5)).await;
                 tx2.send(Cmd::BufferTimer).await;
@@ -285,6 +393,7 @@ impl ProducerImpl {
         Ok(meta)
     }
 }
+*/
 
 /// Q: should buffer data be shared or copied when sending to broker?
 /// A:
@@ -313,16 +422,18 @@ struct Buffer {
     size_limit: u32,
     /// Vector of partitions
     meta_cache: HashMap<String, Vec<BrokerId>>,
+    cluster: Arc<RwLock<Cluster>>,
 }
 
 impl Buffer {
-    fn new() -> Self {
+    fn new(cluster: Arc<RwLock<Cluster>>) -> Self {
         Buffer {
             topics: HashMap::new(),
             bytes: 0,
             // TODO: make configurable
             size_limit: 100 * 1024 * 1024,
             meta_cache: HashMap::new(),
+            cluster,
         }
     }
 
@@ -356,7 +467,7 @@ impl Buffer {
         BufferingResult::Ok
     }
 
-    async fn flush(&self, cluster: &mut Cluster) -> Result<()> {
+    async fn flush(&self) -> Result<()> {
         let broker_partitioned = self.mk_requests();
 
         for (broker_id, data) in broker_partitioned {
@@ -365,6 +476,7 @@ impl Buffer {
                 timeout: 1500,
                 topic_data: &data
             };
+            let cluster = self.cluster.read().await;
             let broker = cluster.broker_by_id(broker_id).
                 expect(format!("Can not find broker_id {}", broker_id).as_str());
             let cmd_buf = broker.mk_request(request);
@@ -463,6 +575,27 @@ impl ToMessage for StringMessage {
     }
     fn value(&self) -> Vec<u8> {
         self.value.as_bytes().to_vec()
+    }
+}
+
+impl ToMessage for &str {
+    fn key(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn value(&self) -> Vec<u8> {
+        Vec::from(self.as_bytes())
+    }
+}
+
+// TODO: see if Send can be eliminated
+impl<K,V> ToMessage for (K,V) where K: Send, V: Send {
+    fn key(&self) -> Option<Vec<u8>> {
+        unimplemented!()
+    }
+
+    fn value(&self) -> Vec<u8> {
+        unimplemented!()
     }
 }
 

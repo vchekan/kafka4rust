@@ -56,7 +56,7 @@ impl Consumer {
         let mut consumer = Consumer {config, cluster, topic_meta, partition_routing};
         let (tx, rx) = async_std::sync::channel(1);
 
-        tokio_current_thread::spawn(async move {
+        tokio::spawn(async move {
             for partition in &consumer.topic_meta.topics[0].partition_metadata {
                 let broker_id = partition.leader;
                 let broker = consumer.cluster.broker_by_id(broker_id).
