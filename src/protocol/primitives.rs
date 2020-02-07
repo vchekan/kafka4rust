@@ -1,6 +1,7 @@
 use super::api::*;
 use bytes::{Buf, BytesMut, BufMut};
 use std::fmt::Debug;
+use crate::protocol::ErrorCode;
 
 //
 // Primitive types serializtion
@@ -148,5 +149,17 @@ where
             res.push(t);
         }
         res
+    }
+}
+
+impl FromKafka for ErrorCode {
+    fn from_kafka(buff: &mut impl Buf) -> Self {
+        let code = buff.get_i16_be();
+        if code >= -1 && code <= 87 {
+            unsafe { std::mem::transmute(code) }
+        } else {
+            // TODO: change `FromKafka` api to return serialization error
+            panic!()
+        }
     }
 }
