@@ -39,6 +39,8 @@ use std::iter::FromIterator;
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use failure::ResultExt;
+use crate::protocol::ErrorCode;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub(crate) struct Cluster {
@@ -93,7 +95,7 @@ impl Cluster {
         // update known brokers
         for broker in &meta_response.brokers {
             // Looks like std::net do not support IpAddr resolution, resolve with 0 port and set port later
-            let addr = (broker.host.as_str(), 0).to_socket_addrs().context(format!("Cluster: parse host: '{}'", broker.host))?.collect::<Vec<_>>();
+            let addr = (broker.host.as_str(), 0).to_socket_addrs().context(format!("Cluster: resolve host: '{}'", broker.host))?.collect::<Vec<_>>();
             if addr.len() == 0 {
                 return Err(Error::DnsFailed(format!("{}:{}", broker.host, broker.port)))
             }
@@ -124,10 +126,26 @@ impl Cluster {
 }
 
 async fn resolve_topic_with_broker(broker: &Broker, topic: &str) -> Result<protocol::MetadataResponse0> {
-    let req = protocol::MetadataRequest0 {
-        topics: vec![topic.into()],
-    };
-    Ok(broker.send_request(req).await?)
+    loop {
+        let req = protocol::MetadataRequest0 {
+            topics: vec![topic.into()],
+        };
+        let meta = broker.send_request(req).await?;
+        let errors = meta.topics.iter().enumerate().
+            map(|(p,t)| (p,t.error_code)).
+            filter(|(partition, e)| *e != ErrorCode::None).collect::<Vec<_>>();
+        // TODO: make retry more elegant
+        if !errors.is_empty() {
+            if errors.iter().all(|(_,e)|e.is_retriable()) {
+                async_std::task::sleep(Duration::from_millis(500)).await;
+                continue;
+            } else {
+                return Err(Error::KafkaError(errors));
+            }
+        } else {
+            return Ok(meta);
+        }
+    }
 }
 
 /*

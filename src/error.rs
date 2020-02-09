@@ -1,6 +1,7 @@
 use failure::Fail;
 use failure::Backtrace;
 use failure;
+use crate::protocol::ErrorCode;
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
@@ -32,6 +33,9 @@ pub enum Error {
 
     #[fail(display = "Corrupt message")]
     CorruptMessage,
+
+    #[fail(display = "Kafka error {:?}", _0)]
+    KafkaError(Vec<(usize,ErrorCode)>)
 }
 
 impl From<std::io::Error> for Error {

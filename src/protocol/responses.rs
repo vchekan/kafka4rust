@@ -171,11 +171,12 @@ impl FromKafka for Result<Recordset> {
     }
 }
 
+
 #[repr(i16)]
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub enum ErrorCode {
     UnknownServerError = -1,
-    NONE = 0,
+    None = 0,
     OffsetOutOfRange = 1,
     CorruptMessage = 2,
     UnknownTopicOrPartition = 3,
@@ -263,4 +264,17 @@ pub enum ErrorCode {
     NoReassignmentInProgress = 85,
     GroupSubscribedToTopic = 86,
     InvalidRecord = 87,
+}
+
+use ErrorCode::*;
+const ERROR_RETRIABLE: [ErrorCode; 22] = [CorruptMessage,UnknownTopicOrPartition,LeaderNotAvailable,NotLeaderForPartition,
+    RequestTimedOut,NetworkException,CoordinatorLoadInProgress,CoordinatorNotAvailable,NotCoordinator,
+    NotEnoughReplicas,NotEnoughReplicasAfterAppend,NotController,KafkaStorageError,
+    FetchSessionIdNotFound,InvalidFetchSessionEpoch,ListenerNotFound,FencedLeaderEpoch,
+    UnknownLeaderEpoch,OffsetNotAvailable,PreferredLeaderNotAvailable,EligibleLeadersNotAvailable,
+    ElectionNotNeeded];
+impl ErrorCode {
+    pub fn is_retriable(&self) -> bool {
+        ERROR_RETRIABLE.contains(self)
+    }
 }

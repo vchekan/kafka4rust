@@ -20,7 +20,10 @@ pub (crate) fn to_bootstrap_addr(addr: &str) -> Vec<SocketAddr> {
                 return vec![addr];
             }
             if let Ok(mut addr) = addr.to_socket_addrs() {
+                debug!("to_socket_addrs() resolved {:?}", addr);
                 return addr.collect();
+            } else {
+                debug!("to_socket_addrs() failed {}", addr);
             }
             if let Ok(mut addr) = (addr, 0).to_socket_addrs() {
                 let mut addresses: Vec<SocketAddr> = addr.collect();

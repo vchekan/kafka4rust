@@ -20,6 +20,9 @@ services:
       - zookeeper
     environment:
       BROKER_OPTS: >-
-        --override advertised.listeners=PLAINTEXT://broker1:9092
+        --override advertised.listeners=INSIDE://:9094,OUTSIDE://localhost:9092
+        --override listeners=INSIDE://:9094,OUTSIDE://:9092
+        --override listener.security.protocol.map=INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+        --override inter.broker.listener.name=INSIDE
         --override broker.id=1
         --override zookeeper.connect=zookeeper:2181

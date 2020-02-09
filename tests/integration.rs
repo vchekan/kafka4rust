@@ -4,6 +4,7 @@ use rand;
 use rand::Rng;
 use rand::distributions::Alphanumeric;
 use failure::Error;
+use log::debug;
 
 fn random_topic() -> String{
     let mut topic = String::new();
@@ -18,13 +19,16 @@ fn topic_is_autocreated_by_producer() -> Result<(),Error> {
         core_threads(2).
         thread_name("test_k4rs").build()?;
     simple_logger::init_with_level(log::Level::Debug)?;
-    //tokio_current_thread::block_on_all(async {
+
     runtime.block_on(async {
         let bootstrap = "localhost";
         let topic = random_topic();
-        let mut producer: Producer<&str> = Producer::connect(bootstrap).await.unwrap();
-        producer.send("msg1", &topic).await;
+        let mut producer: Producer<&str> = Producer::connect(bootstrap).await?;
+        producer.send("msg1", &topic).await?;
+        debug!("flushing");
         producer.flush().await;
-    });
+        Ok::<(),Error>(())
+    })?;
+
     Ok(())
 }
