@@ -140,7 +140,7 @@ where
     fn from_kafka(buff: &mut impl Buf) -> Self {
         assert!(buff.remaining() >= 4);
         let len = buff.get_i32_be();
-        if len == -1 {
+        if len == -1 || len == 0 {
             return vec![];
         }
         let mut res = Vec::with_capacity(len as usize);

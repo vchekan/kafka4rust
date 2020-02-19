@@ -66,23 +66,23 @@ impl BrokerConnection {
     pub async fn request(&self, buf: &mut BytesMut) -> io::Result<()> {
         let mut inner = self.inner.lock().await;
         let tcp = &mut inner.tcp;
-        debug!("Sending request[{}]", buf.len());
+        //debug!("Sending request[{}]", buf.len());
         tcp.write_all(&buf).await?;
-        debug!("Sent request");
+        //debug!("Sent request");
 
         // TODO: buffer reuse
         //let mut buf = vec![];
         buf.clear();
-        debug!("Reading length...");
+        //debug!("Reading length...");
         // Read length into buffer
         buf.resize(4, 0_u8);
         // TODO: ensure length is sane
         tcp.read_exact(buf).await?;
         let len = BigEndian::read_u32(&buf);
-        debug!("Response len: {}, reading body...", len);
+        //debug!("Response len: {}, reading body...", len);
         buf.resize(len as usize, 0_u8);
         tcp.read_exact(buf).await?;
-        debug!("Read body [{}]", buf.len());
+        //debug!("Read body [{}]", buf.len());
 
         // TODO: validate correlation_id
         let correlation_id = byteorder::LittleEndian::read_u32(&buf);

@@ -109,7 +109,7 @@ response!(ApiVersionsResponse1 {
 #[derive(Debug)]
 // TODO: make it crate pub
 pub struct Recordset {
-    messages: Vec<String>,
+    pub messages: Vec<Vec<u8>>,
 }
 
 impl FromKafka for Result<Recordset> {
@@ -126,7 +126,6 @@ impl FromKafka for Result<Recordset> {
             return Err(Error::UnexpectedRecordsetMagic(magic));
         }
 
-        let segment_size = dbg!(buff.get_u32_be());
         let base_offset = dbg!(buff.get_i64_be());
         // TODO: should I apply additional len-restricted view?
         let batch_len = buff.get_u32_be();
@@ -167,8 +166,7 @@ impl FromKafka for Result<Recordset> {
             } else {
                 &buff.bytes()[0..val_len as usize]
             };
-            recordset.messages.push(String::from_utf8(val.to_vec()).
-                context("Recordset deserialize message value")?);
+            recordset.messages.push(val.to_vec());
         }
 
         debug!("{:?}", recordset);

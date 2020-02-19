@@ -475,23 +475,18 @@ impl<K,V> ToMessage for (K,V) where K: Send, V: Send {
 mod test {
     use super::*;
     use std::time::Duration;
-
-    struct P1 {}
-    impl Partitioner<StringMessage> for P1 {
-        fn partition(_message: &StringMessage) -> u32 {
-            5
-        }
-    }
+    use tokio;
+    use crate::utils;
 
     #[test]
-    fn it_works() -> Result<()> {
-        tokio_current_thread::block_on_all(async {
+    fn it_works() -> std::result::Result<(),failure::Error> {
+        utils::init_test()?.block_on(async {
         //task::block_on(async {
-            simple_logger::init_with_level(log::Level::Debug)?;
+            //simple_logger::init_with_level(log::Level::Debug)?;
             let seed = "127.0.0.1:9092";
             let _topic = "test1";
 
-            let producer = Producer::connect::<P1>(&seed).await?;
+            let producer: Producer<StringMessage> = Producer::connect(&seed).await?;
             let mut producer = producer;
             /*for i in 1..100 {
                 let msg = format!("i:{}", i);
@@ -506,7 +501,7 @@ mod test {
                 key: "".to_string(),
                 value: "aaa".to_string(),
             };
-            producer.send(msg, "test1".to_string()).await;
+            producer.send(msg, "test1").await?;
 
             async_std::task::sleep(Duration::from_secs(20)).await;
 

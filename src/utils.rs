@@ -1,4 +1,6 @@
 use std::net::{SocketAddr, IpAddr, ToSocketAddrs};
+use failure::Error;
+use tokio::runtime::Runtime;
 
 /// Resolve adresses and produce only those which were successfully resolved.
 /// Unresolved entries will be logged with `error` level.
@@ -19,13 +21,13 @@ pub (crate) fn to_bootstrap_addr(addr: &str) -> Vec<SocketAddr> {
             if let Ok(addr) = addr.parse::<SocketAddr>() {
                 return vec![addr];
             }
-            if let Ok(mut addr) = addr.to_socket_addrs() {
+            if let Ok(addr) = addr.to_socket_addrs() {
                 debug!("to_socket_addrs() resolved {:?}", addr);
                 return addr.collect();
             } else {
                 debug!("to_socket_addrs() failed {}", addr);
             }
-            if let Ok(mut addr) = (addr, 0).to_socket_addrs() {
+            if let Ok(addr) = (addr, 0).to_socket_addrs() {
                 let mut addresses: Vec<SocketAddr> = addr.collect();
                 for a in &mut addresses {
                     a.set_port(9092);
@@ -36,4 +38,14 @@ pub (crate) fn to_bootstrap_addr(addr: &str) -> Vec<SocketAddr> {
             error!("Can't parse: '{}'", addr);
             vec![]
         }).collect()
+}
+
+#[cfg(test)]
+pub(crate) fn init_test() -> Result<Runtime,Error> {
+    simple_logger::init_with_level(log::Level::Debug)?;
+    let runtime = tokio::runtime::Builder::new().
+        basic_scheduler().
+        core_threads(2).
+        thread_name("test_k4rs").build()?;
+    Ok(runtime)
 }

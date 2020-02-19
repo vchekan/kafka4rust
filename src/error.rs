@@ -35,7 +35,10 @@ pub enum Error {
     CorruptMessage,
 
     #[fail(display = "Kafka error {:?}", _0)]
-    KafkaError(Vec<(usize,ErrorCode)>)
+    KafkaError(Vec<(usize,ErrorCode)>),
+
+    #[fail(display = "Config error. {}", _0)]
+    Config(String),
 }
 
 impl From<std::io::Error> for Error {

@@ -20,4 +20,3 @@ extern crate log;
 pub use self::consumer::{Consumer, ConsumerConfig};
 pub use self::producer::{Producer};
 pub use self::error::Error;
-
