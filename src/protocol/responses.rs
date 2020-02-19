@@ -116,6 +116,11 @@ impl FromKafka for Result<Recordset> {
     fn from_kafka(buff: &mut impl Buf) -> Self {
         // TODO: skip control batches
 
+        let segment_size = dbg!(buff.get_u32_be());
+        if segment_size == 0 {
+            return Err(Error::CorruptMessage);
+        }
+
         let magic = buff.bytes()[8+8+4];
         if magic != 2 {
             return Err(Error::UnexpectedRecordsetMagic(magic));
