@@ -126,7 +126,7 @@ impl Consumer {
                                 partitions: partitions.iter().map(|&partition| {
                                     protocol::FetchPartition {
                                         partition,
-                                        fetch_offset: -2_i64,
+                                        fetch_offset: 0_i64,
                                         log_start_offset: -1,
                                         partition_max_bytes: 1000_000,
                                     }

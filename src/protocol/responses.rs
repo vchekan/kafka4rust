@@ -116,16 +116,18 @@ impl FromKafka for Result<Recordset> {
     fn from_kafka(buff: &mut impl Buf) -> Self {
         // TODO: skip control batches
 
-        let segment_size = dbg!(buff.get_u32_be());
+        let magic = buff.bytes().get(8+8+4);
+        let magic = match magic { 
+            Option::None => { return Err(Error::CorruptMessage); },
+            Some(2) => {},
+            Some(magic) => { return Err(Error::UnexpectedRecordsetMagic(*magic)); }
+        };
+
+
+        let segment_size = buff.get_u32_be();
         if segment_size == 0 {
             return Err(Error::CorruptMessage);
         }
-
-        let magic = buff.bytes()[8+8+4];
-        if magic != 2 {
-            return Err(Error::UnexpectedRecordsetMagic(magic));
-        }
-
         let base_offset = dbg!(buff.get_i64_be());
         // TODO: should I apply additional len-restricted view?
         let batch_len = buff.get_u32_be();
