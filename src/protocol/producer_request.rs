@@ -4,7 +4,7 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use crc32c::crc32c;
 use std::collections::HashMap;
-use crate::protocol::{ApiKey, HasApiKey, Request, ProduceResponse0, HasApiVersion, ToKafka};
+use crate::protocol::{ApiKey, HasApiKey, Request, ProduceResponse3, HasApiVersion, ToKafka};
 
 const ZERO32: [u8; 4] = [0, 0, 0, 0];
 const ZERO64: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
@@ -28,38 +28,40 @@ enum TimestampType {
     LogAppend = 1 << 3,
 }
 
-pub(crate) struct ProduceRequest0<'a> {
+pub(crate) struct ProduceRequest3<'a> {
+    pub transactional_id: Option<&'a str>,
     pub acks: i16, // 0 for no acknowledgments, 1 for only the leader and -1 for the full ISR.
     pub timeout: i32, // The time to await a response in ms
     pub topic_data:
         &'a HashMap<&'a String, HashMap<u32, (&'a [QueuedMessage], &'a [QueuedMessage])>>,
 }
 
-impl HasApiKey for ProduceRequest0<'_> {
+impl HasApiKey for ProduceRequest3<'_> {
     fn api_key() -> ApiKey { ApiKey::Produce }
 }
 
-impl Request for ProduceRequest0<'_> {
-    type Response = ProduceResponse0;
+impl Request for ProduceRequest3<'_> {
+    type Response = ProduceResponse3;
 }
 
-impl HasApiVersion for ProduceRequest0<'_> {
-    fn api_version() -> u16 { 0 }
+impl HasApiVersion for ProduceRequest3<'_> {
+    fn api_version() -> u16 { 3 }
 }
 
 
-impl ToKafka for ProduceRequest0<'_> {
+impl ToKafka for ProduceRequest3<'_> {
     fn to_kafka(&self, buff: &mut BytesMut) {
         self.serialize(buff);
     }
 }
 
 
-impl ProduceRequest0<'_> {
+impl ProduceRequest3<'_> {
     pub(crate) fn serialize(&self, buf: &mut BytesMut) {
-        // TODO: calc transaction Id len
-        buf.reserve(2 + 4);
 
+        serialize_string_opt(&self.transactional_id, buf);
+
+        buf.reserve(2 + 4);
         buf.put_i16_be(self.acks);
         buf.put_i32_be(self.timeout);
 
@@ -104,7 +106,7 @@ impl ProduceRequest0<'_> {
                 buf.put_slice(&MINUS_ONE32); // partition leader epoch
                 buf.put_u8(2); // magic
                 let crc_bookmark = buf.len();
-                buf.put_slice(&ZERO32); // crc
+                buf.put_slice(&ZERO32); // crc, will calculate at the end
                 buf.put_u16_be(
                     CompressionType::None as u16    // TODO
                     | TimestampType::Create as u16,
@@ -179,4 +181,18 @@ fn mk_record(buf: &mut BytesMut, offset_delta: u64, timestamp_delta: u64, msg: &
     buf.put_slice(put_zigzag64(msg.value.len() as u64, &mut varint_buf));
     buf.put_slice(&msg.value);
     buf.put_u8(0); // TODO: headers
+}
+
+fn serialize_string_opt(s: &Option<&str>, buf: &mut BytesMut) {
+    match s {
+        Some(tx) => {
+            buf.reserve(2 + tx.len());
+            buf.put_u16_be(tx.len() as u16);
+            buf.put_slice(tx.as_bytes());
+        }
+        None => {
+            buf.reserve(2);
+            buf.put_slice(&MINUS_ONE16);
+        }
+    }
 }

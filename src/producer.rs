@@ -116,6 +116,8 @@ use rand::random;
 /// await be implemented?
 /// A:
 ///
+/// Q: How to report produce errors?
+/// A: ???
 /// 
 
 // TODO: is `Send` needed? Can we convert to QueuedMessage before crossing thread boundaries?
@@ -138,19 +140,16 @@ impl Partitioner for Murmur2Partitioner {
     }
 }
 
-pub struct Producer<M: ToMessage, P=Murmur2Partitioner> {
-    //msg_sender: Sender<Cmd<M>>,
-    // TODO: move partitioner to `send()`
+pub struct Producer<P: Partitioner = Murmur2Partitioner> {
+    // `P` could be declared in `send()` but function can not have default type parmeters, use phantom in the struct instead
     phantom: PhantomData<P>,
-    phantom_m: PhantomData<M>,
-    // TODO: move `M` to `send()` too?
     buffer: Arc<Mutex<Buffer>>,
     cluster: Arc<tokio::sync::RwLock<Cluster>>,
     // TODO: is kafka topic case-sensitive?
     topics_meta: HashMap<String, ProducerTopicMetadata>,
 }
 
-impl<M: ToMessage + 'static, P: Partitioner> Producer<M,P> {
+impl<P: Partitioner> Producer<P> {
     pub async fn connect(seed: &str) -> Result<Self> {
         //let msg_sender = ProducerImpl::new::<M,P>(seed).await?;
         let seed_list = utils::to_bootstrap_addr(seed);
@@ -158,10 +157,8 @@ impl<M: ToMessage + 'static, P: Partitioner> Producer<M,P> {
             return Err(From::from(format_err!("Failed to resolve any server from: '{}'", seed).context("Producer resolve seds")));
         }
         let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::connect(seed_list).await.context("Producer: new")?));
-        let producer = Producer::<M,P> {
-            //msg_sender,
+        let producer = Producer {
             phantom: PhantomData{},
-            phantom_m: PhantomData{},
             buffer: Arc::new(Mutex::new(Buffer::new(cluster.clone()))),
             cluster: cluster.clone(),
             topics_meta: HashMap::new(),
@@ -181,14 +178,10 @@ impl<M: ToMessage + 'static, P: Partitioner> Producer<M,P> {
         Ok(producer)
     }
 
-    pub async fn send(&mut self, msg: M, topic: &str) -> Result<()> {
-        debug!("send1()");
+    pub async fn send<M: ToMessage + 'static>(&mut self, msg: M, topic: &str) -> Result<()> {
         let mut buffer = self.buffer.lock().await;
-        debug!("send22()");
         // TODO: share metadata cache between self and Buffer
         let meta = Self::get_or_request_meta(&mut self.cluster, &mut self.topics_meta, &mut buffer.meta_cache, topic).await?;
-        debug!("send33()");
-        debug!("send2()");
         assert_eq!(1, meta.protocol_metadata.topics.len());
         assert_eq!(topic, meta.protocol_metadata.topics.get(0).unwrap().topic);
         let protocol_meta = meta.protocol_metadata.topics.get(0).unwrap();
@@ -212,7 +205,6 @@ impl<M: ToMessage + 'static, P: Partitioner> Producer<M,P> {
                 .expect("Failed to get timestamp")
                 .as_millis() as u64,
         };
-        debug!("send3()");
         match buffer.add(msg, topic.to_string(), partition, protocol_meta) {
             BufferingResult::Ok => Ok(()),
             BufferingResult::Overflow => {
@@ -223,11 +215,8 @@ impl<M: ToMessage + 'static, P: Partitioner> Producer<M,P> {
     }
 
     pub async fn flush(&mut self) {
-        debug!("flush1()");
         let buffer = self.buffer.lock().await;
-        debug!("flush2()");
         buffer.flush().await;
-        debug!("flush3()");
     }
 
     /// Get topic's meta from cache or request from broker.
@@ -343,7 +332,8 @@ impl Buffer {
         let broker_partitioned = self.mk_requests();
         debug!("flush1() {:?}", broker_partitioned);
         for (broker_id, data) in broker_partitioned {
-            let request = protocol::ProduceRequest0 {
+            let request = protocol::ProduceRequest3 {
+                transactional_id: None,
                 acks: 1,
                 timeout: 1500,
                 topic_data: &data
@@ -353,7 +343,8 @@ impl Buffer {
                 expect(format!("Can not find broker_id {}", broker_id).as_str());
             let cmd_buf = broker.mk_request(request);
             debug!("Sending Produce");
-            let res = broker.send_request2::<protocol::ProduceResponse0>(cmd_buf).await?;
+            let res = broker.send_request2::<protocol::ProduceResponse3>(cmd_buf).await?;
+            // TODO: throttle_time
             debug!("Got Produce response: {:?}", res);
         }
 
@@ -458,6 +449,11 @@ impl ToMessage for &str {
     fn value(&self) -> Vec<u8> {
         Vec::from(self.as_bytes())
     }
+}
+
+impl ToMessage for String {
+    fn key(&self) -> Option<Vec<u8>> { None }
+    fn value(&self) -> Vec<u8> { Vec::from(self.as_bytes()) }
 }
 
 // TODO: see if Send can be eliminated

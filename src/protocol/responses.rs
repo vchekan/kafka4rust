@@ -3,11 +3,11 @@ use bytes::Buf;
 use crate::error::{Result, Error};
 use crate::zigzag::get_zigzag64;
 use failure::Fail;
-use failure::ResultExt;
 
 // 0
-response!(ProduceResponse0 {
-    responses: [ProduceResponse]
+response!(ProduceResponse3 {
+    responses: [ProduceResponse],
+    throttle_time_ms: i32
 });
 response!(ProduceResponse {
     topic: String,
@@ -16,7 +16,8 @@ response!(ProduceResponse {
 response!(PartitionResponse {
     partition: i32,
     error_code: ErrorCode,
-    base_offset: i64
+    base_offset: i64,
+    log_append_time: i64
 });
 
 // 1
@@ -116,8 +117,18 @@ impl FromKafka for Result<Recordset> {
     fn from_kafka(buff: &mut impl Buf) -> Self {
         // TODO: skip control batches
 
+        if buff.remaining() == 4 {
+            // Empty recordset
+            let segment_size = buff.get_u32_be();
+            return match segment_size {
+                0 => Ok(Recordset{messages: vec![]}),
+                // Slice is empty, but size non-zero
+                _ => Err(Error::CorruptMessage),
+            };
+        }
+
         let magic = buff.bytes().get(8+8+4);
-        let magic = match magic { 
+        match magic { 
             Option::None => { return Err(Error::CorruptMessage); },
             Some(2) => {},
             Some(magic) => { return Err(Error::UnexpectedRecordsetMagic(*magic)); }
@@ -128,7 +139,7 @@ impl FromKafka for Result<Recordset> {
         if segment_size == 0 {
             return Err(Error::CorruptMessage);
         }
-        let base_offset = dbg!(buff.get_i64_be());
+        let base_offset = buff.get_i64_be();
         // TODO: should I apply additional len-restricted view?
         let batch_len = buff.get_u32_be();
         let partition_leader_epoch = buff.get_u32_be();
@@ -144,7 +155,6 @@ impl FromKafka for Result<Recordset> {
         let base_sequence = buff.get_u32_be();
 
         let records_len = buff.get_u32_be();
-        debug!("records_len: {}", records_len);
         let mut recordset = Recordset{messages: vec![]};
         for _ in 0..records_len {
             let len = get_zigzag64(buff);
@@ -157,21 +167,28 @@ impl FromKafka for Result<Recordset> {
 
             let key_len = get_zigzag64(buff);
             let key = if key_len <= 0 {
-                &buff.bytes()[0..0]
+                vec![]
             } else {
-                &buff.bytes()[0..key_len as usize]
+                buff.bytes()[0..key_len as usize].to_owned()
             };
+            if key_len > 0 {
+                buff.advance(key_len as usize);
+            }
 
             let val_len = get_zigzag64(buff);
             let val = if val_len <= 0 {
-                &buff.bytes()[0..0]
+                vec![]
             } else {
-                &buff.bytes()[0..val_len as usize]
+                buff.bytes()[0..val_len as usize].to_owned()
             };
+            // Check just in case
+            if val_len > 0 {
+                buff.advance(val_len as usize);
+            }
+
             recordset.messages.push(val.to_vec());
         }
 
-        debug!("{:?}", recordset);
         Ok(recordset)
     }
 }

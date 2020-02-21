@@ -22,16 +22,22 @@ fn topic_is_autocreated_by_producer() -> Result<(),Error> {
     runtime.block_on(async {
         let bootstrap = "localhost";
         let topic = random_topic();
-        let mut producer: Producer<&str> = Producer::connect(bootstrap).await?;
-        producer.send("msg1", &topic).await?;
-        debug!("flushing");
+        let count = 2;
+        let mut producer: Producer = Producer::connect(bootstrap).await?;
+        
+        for i in 1..=count {
+            let msg = format!("m{}", i);
+            producer.send(msg, &topic).await?;
+        }
         producer.flush().await;
 
         let mut consumer = Consumer::builder().
             topic(topic).
             bootstrap("localhost").build().await?;
-        let msg = consumer.recv().await.unwrap();
-        assert_eq!("msg1", String::from_utf8(msg.value).unwrap());
+        for i in 1..=count {
+            let msg = consumer.recv().await.unwrap();
+            assert_eq!(format!("m{}", i), String::from_utf8(msg.value).unwrap());
+        }
 
         Ok::<(),Error>(())
     })?;

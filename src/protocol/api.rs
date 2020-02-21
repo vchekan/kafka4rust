@@ -2,7 +2,6 @@ use byteorder::BigEndian;
 use bytes::{Buf, BufMut, ByteOrder};
 use std::fmt::Debug;
 use bytes::BytesMut;
-use crate::protocol::ErrorCode;
 
 #[repr(u16)]
 pub(crate) enum ApiKey {
