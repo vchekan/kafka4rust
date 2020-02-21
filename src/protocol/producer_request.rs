@@ -109,7 +109,7 @@ impl ProduceRequest0<'_> {
                     CompressionType::None as u16    // TODO
                     | TimestampType::Create as u16,
                 );
-                buf.put_slice(&ZERO32); // last offset delta
+                buf.put_u32_be((recordset1.len() + recordset2.len()) as u32 -1); // last offset delta
 
                 // TODO: timestamp messages and get timestamp from the first one
                 // TODO: if timestamp is client generated, it is possible it will be negative.
