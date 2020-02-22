@@ -1,6 +1,5 @@
 use std::net::{SocketAddr, IpAddr, ToSocketAddrs};
 use failure::Error;
-use tokio::runtime::Runtime;
 
 /// Resolve adresses and produce only those which were successfully resolved.
 /// Unresolved entries will be logged with `error` level.

@@ -34,16 +34,16 @@ use futures::{
     future::ready,
     stream::{FuturesUnordered, StreamExt},
 };
-use std::io;
 use std::iter::FromIterator;
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use failure::ResultExt;
 use crate::protocol::ErrorCode;
 use std::time::Duration;
+use crate::utils::to_bootstrap_addr;
 
 #[derive(Debug)]
-pub(crate) struct Cluster {
+pub struct Cluster {
     bootstrap: Vec<SocketAddr>,
     seed_broker: Broker,
     broker_id_map: HashMap<BrokerId, Broker>
@@ -55,6 +55,11 @@ pub(crate) enum EventOut {
 }
 
 impl Cluster {
+    pub async fn connect_with_bootstrap(bootstrap: &str) -> Result<Self> {
+        let bootstrap = to_bootstrap_addr(bootstrap);
+        Self::connect(bootstrap).await
+    }
+
     /// Connect to at least one broker successfully .
     pub async fn connect(bootstrap: Vec<SocketAddr>) -> Result<Self> {
         let connect_futures = bootstrap
@@ -89,7 +94,7 @@ impl Cluster {
 
     pub(crate) async fn resolve_topic(&mut self, topic: &str) -> Result<protocol::MetadataResponse0> {
         // TODO: if failed, try other connected brokers
-        let meta_response = resolve_topic_with_broker(&self.seed_broker, topic).await?;
+        let meta_response = resolve_topic_with_broker(&self.seed_broker, &vec![topic]).await?;
 
         // TODO: connect in parallel
         // update known brokers
@@ -119,16 +124,19 @@ impl Cluster {
         */
     }
 
-    pub fn broker_by_id(&self, broker_id: BrokerId) -> Result<&Broker> {
+    pub(crate) fn broker_by_id(&self, broker_id: BrokerId) -> Result<&Broker> {
         self.broker_id_map.get(&broker_id).ok_or(Error::NoBrokerAvailable(failure::Backtrace::new()))
     }
 
+    pub async fn fetch_topics(&self, topics: &[&str]) -> Result<protocol::MetadataResponse0> {
+        resolve_topic_with_broker(&self.seed_broker, topics).await
+    }    
 }
 
-async fn resolve_topic_with_broker(broker: &Broker, topic: &str) -> Result<protocol::MetadataResponse0> {
+async fn resolve_topic_with_broker(broker: &Broker, topics: &[&str]) -> Result<protocol::MetadataResponse0> {
     loop {
         let req = protocol::MetadataRequest0 {
-            topics: vec![topic.into()],
+            topics: topics.iter().map(|t| t.to_string()).collect(),
         };
         let meta = broker.send_request(req).await?;
         let errors = meta.topics.iter().enumerate().

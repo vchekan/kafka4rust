@@ -2,6 +2,9 @@ use super::api::*;
 use bytes::{Buf, BytesMut, BufMut};
 use std::fmt::Debug;
 use crate::protocol::ErrorCode;
+use crate::error::{Result, Error};
+use crate::zigzag::*;
+use failure::Fail;
 
 //
 // Primitive types serializtion
@@ -159,7 +162,93 @@ impl FromKafka for ErrorCode {
             unsafe { std::mem::transmute(code) }
         } else {
             // TODO: change `FromKafka` api to return serialization error
-            panic!()
+            panic!("Invalid ErrorCode {}", code)
         }
+    }
+}
+
+#[derive(Debug)]
+// TODO: make it crate pub
+pub struct Recordset {
+    pub messages: Vec<Vec<u8>>,
+}
+
+impl FromKafka for Result<Recordset> {
+    fn from_kafka(buff: &mut impl Buf) -> Self {
+        // TODO: skip control batches
+
+        if buff.remaining() == 4 {
+            // Empty recordset
+            let segment_size = buff.get_u32_be();
+            return match segment_size {
+                0 => Ok(Recordset{messages: vec![]}),
+                // Slice is empty, but size non-zero
+                _ => Err(Error::CorruptMessage),
+            };
+        }
+
+        let magic = buff.bytes().get(8+8+4);
+        match magic { 
+            Option::None => { return Err(Error::CorruptMessage); },
+            Some(2) => {},
+            Some(magic) => { return Err(Error::UnexpectedRecordsetMagic(*magic)); }
+        };
+
+
+        let segment_size = buff.get_u32_be();
+        if segment_size == 0 {
+            return Err(Error::CorruptMessage);
+        }
+        let base_offset = buff.get_i64_be();
+        // TODO: should I apply additional len-restricted view?
+        let batch_len = buff.get_u32_be();
+        let partition_leader_epoch = buff.get_u32_be();
+        buff.get_u8();  // skip magic, we've checked it already
+        // TODO: check crc
+        let crc = buff.get_u32_be();
+        let attributes = buff.get_u16_be();
+        let last_offset_delta = buff.get_u32_be();
+        let first_timestamp = buff.get_u64_be();
+        let max_timestamp = buff.get_u64_be();
+        let producer_id = buff.get_u64_be();
+        let producer_epoch = buff.get_u16_be();
+        let base_sequence = buff.get_u32_be();
+
+        let records_len = buff.get_u32_be();
+        let mut recordset = Recordset{messages: vec![]};
+        for _ in 0..records_len {
+            let len = get_zigzag64(buff);
+            if buff.remaining() < len as usize {
+                return Err(Error::from(Error::CorruptMessage.context("Recordset deserialization")));
+            }
+            let _attributes = buff.get_u8();
+            let timestamp_delta = get_zigzag64(buff);
+            let offset_delta = get_zigzag64(buff);
+
+            let key_len = get_zigzag64(buff);
+            let key = if key_len <= 0 {
+                vec![]
+            } else {
+                buff.bytes()[0..key_len as usize].to_owned()
+            };
+            if key_len > 0 {
+                buff.advance(key_len as usize);
+            }
+
+            let val_len = get_zigzag64(buff);
+            let val = if val_len <= 0 {
+                vec![]
+            } else {
+                buff.bytes()[0..val_len as usize].to_owned()
+            };
+            // Check just in case
+            if val_len > 0 {
+                buff.advance(val_len as usize);
+            }
+
+            recordset.messages.push(val.to_vec());
+        }
+
+        Ok(recordset)
     }
 }

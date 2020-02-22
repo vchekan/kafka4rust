@@ -63,7 +63,6 @@ impl Broker {
         let (corr_id, response): (_, R::Response) = read_response(&mut cursor);
         // TODO: check correlationId
         // TODO: check for response error
-        debug!("CorrId: {}, Response: {:?}", corr_id, response);
         Ok(response)
     }
 
@@ -76,7 +75,6 @@ impl Broker {
         let (corr_id, response): (_, R) = read_response(&mut cursor);
         // TODO: check correlationId
         // TODO: check for response error
-        debug!("CorrId: {}, Response: {:?}", corr_id, response);
         Ok(response)
     }
 
