@@ -40,7 +40,7 @@ pub (crate) fn to_bootstrap_addr(addr: &str) -> Vec<SocketAddr> {
 }
 
 #[cfg(test)]
-pub(crate) fn init_test() -> Result<Runtime,Error> {
+pub(crate) fn init_test() -> Result<tokio::runtime::Runtime,Error> {
     simple_logger::init_with_level(log::Level::Debug)?;
     let runtime = tokio::runtime::Builder::new().
         basic_scheduler().

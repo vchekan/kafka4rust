@@ -1,8 +1,6 @@
 use super::api::*;
 use bytes::Buf;
-use crate::error::{Result, Error};
-use crate::zigzag::get_zigzag64;
-use failure::Fail;
+use crate::error::Result;
 use crate::protocol::primitives::Recordset;
 
 // 0

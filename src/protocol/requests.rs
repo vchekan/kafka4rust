@@ -29,12 +29,12 @@ request!(MetadataRequest0, MetadataResponse0 { topics: [String] });
 request!(
     ListOffsetsRequest0,
     ListOffsetsResponse0 {
-        replica_id: u32,
+        replica_id: i32,
         topics: [Topics {
             topic: String,
             partitions: [Partition {
                 partition: u32,
-                timestamp: u64,
+                timestamp: i64,
                 max_num_offsets: u32
             }]
         }]

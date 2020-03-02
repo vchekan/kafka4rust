@@ -48,7 +48,7 @@ impl Broker {
         })
     }
 
-    pub async fn send_request<R>(&self, request: R) -> Result<R::Response>
+    pub async fn send_request<R>(&self, request: &R) -> Result<R::Response>
     where
         R: protocol::Request,
     {
@@ -56,7 +56,7 @@ impl Broker {
         // TODO: ensure capacity (BytesMut will panic if out of range)
         let mut buff = BytesMut::with_capacity(1024); //Vec::with_capacity(1024);
         let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
-        protocol::write_request(&request, correlation_id, None, &mut buff);
+        protocol::write_request(request, correlation_id, None, &mut buff);
 
         self.conn.request(&mut buff).await.context("Broker: sending request")?;
         let mut cursor = Cursor::new(buff);
@@ -78,6 +78,7 @@ impl Broker {
         Ok(response)
     }
 
+    /// Generate correlation_id and serialize request to buffer
     pub fn mk_request<R>(&self, request: R) -> BytesMut
         where
             R: protocol::Request,
@@ -151,7 +152,7 @@ mod tests {
             let req = MetadataRequest0 {
                 topics: vec!["test".into()],
             };
-            let meta = broker.send_request(req).await.unwrap();
+            let meta = broker.send_request(&req).await.unwrap();
             debug!("Meta response: {:?}", meta);
         });
     }

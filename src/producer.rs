@@ -6,15 +6,13 @@ use crate::utils;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::time::{UNIX_EPOCH, Duration};
-use async_std::sync::{Sender};
 use failure::{ResultExt, format_err};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use async_std::sync::Mutex;
-use futures::AsyncWriteExt;
 use tokio::sync::RwLock;
-use fasthash::murmur2;
 use rand::random;
+use crate::murmur2a;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -127,8 +125,7 @@ pub trait ToMessage: Send {
 }
 
 /// Partitioner needs to implement only case when
-pub trait Partitioner
-{
+pub trait Partitioner {
     fn partition(key: &[u8]) -> u32;
 }
 
@@ -136,12 +133,12 @@ pub trait Partitioner
 pub struct Murmur2Partitioner {}
 impl Partitioner for Murmur2Partitioner {
     fn partition(key: &[u8]) -> u32 {
-        murmur2::hash32(&key)
+        murmur2a::hash32(key)
     }
 }
 
-pub struct Producer<P: Partitioner = Murmur2Partitioner> {
-    // `P` could be declared in `send()` but function can not have default type parmeters, use phantom in the struct instead
+pub struct Producer<P: Partitioner> {
+    // `P` could be declared in `send()` but function can not have default type parameters
     phantom: PhantomData<P>,
     buffer: Arc<Mutex<Buffer>>,
     cluster: Arc<tokio::sync::RwLock<Cluster>>,
@@ -149,8 +146,14 @@ pub struct Producer<P: Partitioner = Murmur2Partitioner> {
     topics_meta: HashMap<String, ProducerTopicMetadata>,
 }
 
-impl<P: Partitioner> Producer<P> {
+impl Producer<Murmur2Partitioner> {
     pub async fn connect(seed: &str) -> Result<Self> {
+        Producer::with_hasher(seed).await
+    }
+}
+
+impl<P: Partitioner> Producer<P> {
+    pub async fn with_hasher(seed: &str) -> Result<Self> {
         //let msg_sender = ProducerImpl::new::<M,P>(seed).await?;
         let seed_list = utils::to_bootstrap_addr(seed);
         if seed_list.len() == 0 {
@@ -158,14 +161,13 @@ impl<P: Partitioner> Producer<P> {
         }
         let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::connect(seed_list).await.context("Producer: new")?));
         let producer = Producer {
-            phantom: PhantomData{},
+            phantom: PhantomData,
             buffer: Arc::new(Mutex::new(Buffer::new(cluster.clone()))),
             cluster: cluster.clone(),
             topics_meta: HashMap::new(),
         };
-
         let buffer = producer.buffer.clone();
-        
+
         tokio::spawn(async move {
             loop {
                 async_std::task::sleep(Duration::from_secs(5)).await;
@@ -233,7 +235,7 @@ impl<P: Partitioner> Producer<P> {
         // `if let Some(meta) = self.topics_meta.get(topic)` does not work because of lifetimes,
         // so have to do 2 lookups :(
         if topics_meta.contains_key(topic) {
-            let mut topic_meta = topics_meta;
+            let topic_meta = topics_meta;
             let meta = topic_meta.get_mut(topic).unwrap();
             return Ok(meta);
         }
@@ -482,7 +484,7 @@ mod test {
             let seed = "127.0.0.1:9092";
             let _topic = "test1";
 
-            let producer: Producer<StringMessage> = Producer::connect(&seed).await?;
+            let producer = Producer::connect(&seed).await?;
             let mut producer = producer;
             /*for i in 1..100 {
                 let msg = format!("i:{}", i);

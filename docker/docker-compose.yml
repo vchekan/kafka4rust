@@ -26,3 +26,4 @@ services:
         --override inter.broker.listener.name=INSIDE
         --override broker.id=1
         --override zookeeper.connect=zookeeper:2181
+        --override num.partitions=10

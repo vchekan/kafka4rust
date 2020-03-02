@@ -11,10 +11,8 @@ use crate::types::{BrokerId, Partition};
 use crate::utils;
 use failure::{ResultExt, format_err};
 use std::collections::HashMap;
-use tokio::stream::{Stream, StreamExt};
-use std::task::Poll;
-use std::{time::Duration, pin::Pin};
-use tokio::sync::mpsc::{channel, Sender, Receiver};
+use std::time::Duration;
+use tokio::sync::mpsc::{channel, Receiver};
 use protocol::ErrorCode;
 
 // TODO: offset start: -2, end: -1
@@ -136,7 +134,7 @@ impl Consumer {
                     };
                     debug!("Fetch request: {:?}", request);
                     
-                    match broker.send_request(request).await {
+                    match broker.send_request(&request).await {
                         Ok(response) => {
                             debug!("Fetched");
                             if response.throttle_time != 0 {
@@ -176,6 +174,7 @@ impl Consumer {
                             }
                         },
                         Err(e) => {
+                            // TODO:
                             debug!("Fetch failed");
                         }
                     }
@@ -183,11 +182,7 @@ impl Consumer {
             }
             Ok(())
         });
-
         Ok(rx)
-
-
-        //Ok(Consumer {config, cluster, topic_meta, partition_routing})
     }
 }
 
@@ -210,44 +205,5 @@ mod test {
         }).expect("Executed with error"))
 
         //Ok(())
-    }
-}
-
-mod scratch {
-    use async_std::sync::{channel, Receiver};
-    use async_std::stream::StreamExt;
-    use failure::_core::time::Duration;
-
-    struct Consumer {
-
-    }
-
-    impl Consumer {
-        fn connect(&mut self) -> Receiver<String> {
-            let (tx,rx) = channel(1);
-            tokio::spawn(async move {
-                tx.send("msg 1".to_string()).await;
-                async_std::task::sleep(Duration::from_secs(1)).await;
-                tx.send("msg 2".to_string()).await;
-                async_std::task::sleep(Duration::from_secs(1)).await;
-                tx.send("msg 3".to_string()).await;
-                async_std::task::sleep(Duration::from_secs(1)).await;
-                tx.send("msg 4".to_string()).await;
-                async_std::task::sleep(Duration::from_secs(1)).await;
-                tx.send("msg 5".to_string()).await;
-            });
-            rx
-        }
-
-        fn close(&mut self) {
-            unimplemented!()
-        }
-    }
-
-    async fn test() {
-        let mut consumer = Consumer {};
-        let ch = consumer.connect();
-        let all: Vec<_> = ch.collect().await;
-        consumer.close();
     }
 }

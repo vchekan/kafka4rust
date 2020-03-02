@@ -4,7 +4,7 @@
 
 mod types;
 mod error;
-mod protocol;
+pub mod protocol;
 mod zigzag;
 mod utils;
 mod connection;
@@ -13,6 +13,7 @@ mod cluster;
 mod broker;
 mod consumer;
 mod api;
+mod murmur2a;
 
 #[macro_use]
 extern crate log;

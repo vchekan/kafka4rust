@@ -226,7 +226,7 @@ impl FromKafka for Result<Recordset> {
             let offset_delta = get_zigzag64(buff);
 
             let key_len = get_zigzag64(buff);
-            let key = if key_len <= 0 {
+            let _key = if key_len <= 0 {
                 vec![]
             } else {
                 buff.bytes()[0..key_len as usize].to_owned()

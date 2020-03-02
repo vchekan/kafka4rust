@@ -4,7 +4,7 @@ use std::fmt::Debug;
 use bytes::BytesMut;
 
 #[repr(u16)]
-pub(crate) enum ApiKey {
+pub enum ApiKey {
     Produce = 0,
     Fetch = 1,
     ListOffsets = 2,
@@ -22,7 +22,7 @@ pub trait FromKafka {
     fn from_kafka(buff: &mut impl Buf) -> Self;
 }
 
-pub(crate) trait HasApiKey {
+pub trait HasApiKey {
     fn api_key() -> ApiKey;
 }
 
@@ -30,7 +30,7 @@ pub trait HasApiVersion {
     fn api_version() -> u16;
 }
 
-pub(crate) trait Request: ToKafka + HasApiKey + HasApiVersion {
+pub trait Request: ToKafka + HasApiKey + HasApiVersion {
     type Response: FromKafka + Debug;
 }
 

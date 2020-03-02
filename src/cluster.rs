@@ -113,7 +113,7 @@ impl Cluster {
         }
 
         // TODO: start recovery?
-        Err(Error::NoBrokerAvailable(failure::Backtrace::new()))
+        Err(Error::NoBrokerAvailable)
 
         /*
         // TODO: how to implement recovery policy?
@@ -125,12 +125,33 @@ impl Cluster {
     }
 
     pub(crate) fn broker_by_id(&self, broker_id: BrokerId) -> Result<&Broker> {
-        self.broker_id_map.get(&broker_id).ok_or(Error::NoBrokerAvailable(failure::Backtrace::new()))
+        self.broker_id_map.get(&broker_id).ok_or(Error::NoBrokerAvailable)
     }
 
     pub async fn fetch_topics(&self, topics: &[&str]) -> Result<protocol::MetadataResponse0> {
         resolve_topic_with_broker(&self.seed_broker, topics).await
-    }    
+    }
+
+    /// Execute request on every broker until success
+    /// TODO: what is the list of all known brokers?
+    /// TODO: retry policy
+    pub async fn request<R: protocol::Request>(&self, request: R) -> Result<R::Response> {
+        let mut err = Option::<Error>::None;
+        /*
+        for broker in self.broker_id_map.values() {
+            match broker.send_request(&request).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => err = Some(e),
+            }
+        }
+        */
+        match self.seed_broker.send_request(&request).await {
+            Ok(resp) => return Ok(resp),
+            Err(e) => err = Some(e),
+        }
+
+        Err(err.unwrap_or(Error::NoBrokerAvailable))
+    }
 }
 
 async fn resolve_topic_with_broker(broker: &Broker, topics: &[&str]) -> Result<protocol::MetadataResponse0> {
@@ -138,7 +159,7 @@ async fn resolve_topic_with_broker(broker: &Broker, topics: &[&str]) -> Result<p
         let req = protocol::MetadataRequest0 {
             topics: topics.iter().map(|t| t.to_string()).collect(),
         };
-        let meta = broker.send_request(req).await?;
+        let meta = broker.send_request(&req).await?;
         let errors = meta.topics.iter().enumerate().
             map(|(p,t)| (p,t.error_code)).
             filter(|(partition, e)| *e != ErrorCode::None).collect::<Vec<_>>();

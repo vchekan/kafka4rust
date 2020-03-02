@@ -1,5 +1,4 @@
 use failure::Fail;
-use failure::Backtrace;
 use failure;
 use crate::protocol::ErrorCode;
 
@@ -11,7 +10,7 @@ pub enum Error {
     Io(std::io::Error),
 
     #[fail(display = "No broker available")]
-    NoBrokerAvailable(Backtrace),
+    NoBrokerAvailable,
 
     #[fail(display = "Logger init{}", _0)]
     Logger(log::SetLoggerError),

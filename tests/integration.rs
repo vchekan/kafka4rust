@@ -4,7 +4,6 @@ use rand;
 use rand::Rng;
 use rand::distributions::Alphanumeric;
 use failure::Error;
-use log::debug;
 
 fn random_topic() -> String{
     let topic: String = rand::thread_rng().sample_iter(Alphanumeric).take(7).collect();
@@ -23,7 +22,7 @@ fn topic_is_autocreated_by_producer() -> Result<(),Error> {
         let bootstrap = "localhost";
         let topic = random_topic();
         let count = 2;
-        let mut producer: Producer = Producer::connect(bootstrap).await?;
+        let mut producer= Producer::connect(bootstrap).await?;
         
         for i in 1..=count {
             let msg = format!("m{}", i);

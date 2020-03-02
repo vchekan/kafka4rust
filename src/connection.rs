@@ -22,7 +22,6 @@
 use crate::error::Result;
 use byteorder::BigEndian;
 use bytes::{ByteOrder, BytesMut};
-use log::debug;
 use std::io;
 use std::net::{SocketAddr};
 
@@ -85,7 +84,7 @@ impl BrokerConnection {
         //debug!("Read body [{}]", buf.len());
 
         // TODO: validate correlation_id
-        let correlation_id = byteorder::LittleEndian::read_u32(&buf);
+        let _correlation_id = byteorder::LittleEndian::read_u32(&buf);
         Ok(())
     }
 }
