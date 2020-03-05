@@ -7,7 +7,7 @@ use super::requests::*;
     }
 }*/
 
-impl HasApiKey for FetchRequest0 {
+impl HasApiKey for FetchRequest5 {
     fn api_key() -> ApiKey { ApiKey::Fetch }
 }
 
@@ -27,7 +27,7 @@ impl HasApiKey for ApiVersionsRequest1 {
     fn api_key() -> ApiKey { ApiKey::ApiVersions }
 }
 
-impl HasApiVersion for FetchRequest0 {
+impl HasApiVersion for FetchRequest5 {
     fn api_version() -> u16 { 5 }
 }
 impl HasApiVersion for ListOffsetsRequest0 {

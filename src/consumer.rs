@@ -109,7 +109,7 @@ impl Consumer {
 
                 for (broker_id, partitions) in &partition_routing {
                     let topic = config.topic.as_ref().expect("Topic is missing").clone();
-                    let request = protocol::FetchRequest0 {
+                    let request = protocol::FetchRequest5 {
                         replica_id: -1,
                         max_wait_time: 1000,    // TODO: config
                         min_bytes: 0,           // TODO: config

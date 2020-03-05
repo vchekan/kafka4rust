@@ -5,7 +5,7 @@ use bytes::BytesMut;
 //
 // 1 Fetch
 //
-request!(FetchRequest0, FetchResponse0 {
+request!(FetchRequest5, FetchResponse5 {
     replica_id: i32,
     max_wait_time: u32,
     min_bytes: u32,

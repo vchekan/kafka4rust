@@ -68,7 +68,7 @@ impl ProduceRequest3<'_> {
         buf.reserve(4);
         buf.put_u32_be(self.topic_data.len() as u32);
         for (topic, data) in self.topic_data {
-            buf.reserve(4);
+            buf.reserve(2);
             buf.put_u16_be(topic.len() as u16);
             buf.extend_from_slice(topic.as_bytes());
 
@@ -93,8 +93,8 @@ impl ProduceRequest3<'_> {
                     + 8 // max timestamp
                     + 8 // producer id
                     + 2 // producer epoch
-                    + 4 //base sequence
-                    + 4, // recordset size
+                    + 4 // base sequence
+                    + 4,// recordset size
                 );
 
                 let recordset_bookmark = buf.len();
@@ -131,10 +131,10 @@ impl ProduceRequest3<'_> {
                 buf.put_u32_be(rs_len as u32);
                 assert!(rs_len > 0, "Empty recordset");
                 for (i, record) in recordset1.iter().enumerate() {
-                    mk_record(buf, i as u64, record.timestamp - first_timestamp, &record)
+                    write_record(buf, i as u64, record.timestamp - first_timestamp, &record)
                 }
                 for (i, record) in recordset2.iter().enumerate() {
-                    mk_record(buf, i as u64, record.timestamp - first_timestamp, &record)
+                    write_record(buf, i as u64, record.timestamp - first_timestamp, &record)
                 }
 
                 // write data and batch size
@@ -151,7 +151,7 @@ impl ProduceRequest3<'_> {
     }
 }
 
-fn mk_record(buf: &mut BytesMut, offset_delta: u64, timestamp_delta: u64, msg: &QueuedMessage) {
+fn write_record(buf: &mut BytesMut, offset_delta: u64, timestamp_delta: u64, msg: &QueuedMessage) {
     let mut varint_buf = [0_u8; 9];
     let key_len = match &msg.key {
         Some(key) => key.len(),

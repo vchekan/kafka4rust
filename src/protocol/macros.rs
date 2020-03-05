@@ -34,6 +34,7 @@ macro_rules! request {
 }
 
 macro_rules! response {
+    // TODO: `fn` is redundant, avoid it
     ( { fn $fn:ident() -> $tp:ty} ) => {};
     ($id:ident) => {};
     ( [$id:ident] ) => {};

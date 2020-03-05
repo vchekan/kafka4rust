@@ -188,7 +188,7 @@ impl FromKafka for Result<Recordset> {
         }
 
         let magic = buff.bytes().get(8+8+4);
-        match magic { 
+        match magic {
             Option::None => { return Err(Error::CorruptMessage); },
             Some(2) => {},
             Some(magic) => { return Err(Error::UnexpectedRecordsetMagic(*magic)); }
@@ -241,9 +241,15 @@ impl FromKafka for Result<Recordset> {
             } else {
                 buff.bytes()[0..val_len as usize].to_owned()
             };
-            // Check just in case
+
             if val_len > 0 {
                 buff.advance(val_len as usize);
+            }
+
+            // headers
+            let h_len = get_zigzag64(buff);
+            if h_len != 0 {
+                unimplemented!()
             }
 
             recordset.messages.push(val.to_vec());

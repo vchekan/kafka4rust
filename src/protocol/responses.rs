@@ -20,7 +20,7 @@ response!(PartitionResponse {
 });
 
 // 1
-response!(FetchResponse0 {
+response!(FetchResponse5 {
     throttle_time: i32,     // /1 : {hf_kafka_throttle_time_ms: i32},
     responses: [FetchResponse]
 });

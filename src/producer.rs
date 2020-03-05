@@ -138,7 +138,6 @@ impl Partitioner for Murmur2Partitioner {
 }
 
 pub struct Producer<P: Partitioner> {
-    // `P` could be declared in `send()` but function can not have default type parameters
     phantom: PhantomData<P>,
     buffer: Arc<Mutex<Buffer>>,
     cluster: Arc<tokio::sync::RwLock<Cluster>>,
