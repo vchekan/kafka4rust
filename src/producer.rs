@@ -13,6 +13,8 @@ use async_std::sync::Mutex;
 use tokio::sync::RwLock;
 use rand::random;
 use crate::murmur2a;
+use tracing_attributes::instrument;
+
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -146,6 +148,7 @@ pub struct Producer<P: Partitioner> {
 }
 
 impl Producer<Murmur2Partitioner> {
+    #[instrument(level = "debug")]
     pub async fn connect(seed: &str) -> Result<Self> {
         Producer::with_hasher(seed).await
     }
@@ -158,7 +161,7 @@ impl<P: Partitioner> Producer<P> {
         if seed_list.len() == 0 {
             return Err(From::from(format_err!("Failed to resolve any server from: '{}'", seed).context("Producer resolve seds")));
         }
-        let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::connect(seed_list).await.context("Producer: new")?));
+        let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::new(seed_list).context("Producer: new")?));
         let producer = Producer {
             phantom: PhantomData,
             buffer: Arc::new(Mutex::new(Buffer::new(cluster.clone()))),
@@ -179,6 +182,7 @@ impl<P: Partitioner> Producer<P> {
         Ok(producer)
     }
 
+    #[instrument(level = "debug", skip(msg, self))]
     pub async fn send<M: ToMessage + 'static>(&mut self, msg: M, topic: &str) -> Result<()> {
         let mut buffer = self.buffer.lock().await;
         // TODO: share metadata cache between self and Buffer
@@ -215,6 +219,7 @@ impl<P: Partitioner> Producer<P> {
         }
     }
 
+    #[instrument(level = "debug", skip(self))]
     pub async fn flush(&mut self) {
         let buffer = self.buffer.lock().await;
         buffer.flush().await;
@@ -225,6 +230,7 @@ impl<P: Partitioner> Producer<P> {
     /// `self` is not passed as a prarameter because it causes lifetime conflict in `send`.
     /// TODO: what is retry policy?
     /// TODO: what to do if failed for extended period of time?
+    #[instrument(level = "debug", skip(cluster, topics_meta, buffer_meta))]
     async fn get_or_request_meta<'a>(
         cluster: &tokio::sync::RwLock<Cluster>,
         topics_meta: &'a mut HashMap<String, ProducerTopicMetadata>,
@@ -240,7 +246,7 @@ impl<P: Partitioner> Producer<P> {
         }
 
         // Did not have meta. Fetch and cache.
-        let meta = cluster.write().await.resolve_topic(topic).await?;
+        let meta = cluster.write().await.fetch_topic_meta(&vec![topic]).await?;
         let meta = ProducerTopicMetadata {protocol_metadata: meta, null_key_partition_counter: random()};
         buffer_meta.insert(topic.to_string(), meta.protocol_metadata.topics[0].partition_metadata.iter().map(|p| p.leader).collect());
         topics_meta.insert(topic.to_string(), meta);
@@ -308,7 +314,6 @@ impl Buffer {
         meta: &protocol::TopicMetadata,
     ) -> BufferingResult
     {
-        println!("buffer add() {:?}", msg);
         if self.bytes + msg.value.len() as u32 > self.size_limit {
             debug!("Overflow");
             return BufferingResult::Overflow;
@@ -324,14 +329,12 @@ impl Buffer {
         self.bytes += (msg.value.len() + msg.key.as_ref().map(|k| k.len()).unwrap_or(0)) as u32;
 
         partitions[partition as usize].push_back(msg);
-        debug!("Added message");
         BufferingResult::Ok
     }
 
+    #[instrument(level = "debug")]
     async fn flush(&self) -> Result<()> {
-        debug!("flush1()");
         let broker_partitioned = self.mk_requests();
-        debug!("flush1() {:?}", broker_partitioned);
         for (broker_id, data) in broker_partitioned {
             let request = protocol::ProduceRequest3 {
                 transactional_id: None,
@@ -339,9 +342,9 @@ impl Buffer {
                 timeout: 1500,
                 topic_data: &data
             };
-            let cluster = self.cluster.read().await;
-            let broker = cluster.broker_by_id(broker_id).
-                expect(format!("Can not find broker_id {}", broker_id).as_str());
+            let mut cluster = self.cluster.write().await;
+            let broker = Cluster::broker_get_or_connect(&mut cluster, broker_id).await
+                .expect(format!("Can not find broker_id {}", broker_id).as_str());
             let cmd_buf = broker.mk_request(request);
             debug!("Sending Produce");
             let res = broker.send_request2::<protocol::ProduceResponse3>(cmd_buf).await?;
@@ -475,6 +478,7 @@ mod test {
     use tokio;
     use crate::utils;
 
+    /*
     #[test]
     fn it_works() -> std::result::Result<(),failure::Error> {
         utils::init_test()?.block_on(async {
@@ -513,6 +517,7 @@ mod test {
             Ok(())
         })
     }
+    */
 
     /*
     #[test]

@@ -1,5 +1,4 @@
 use std::net::{SocketAddr, IpAddr, ToSocketAddrs};
-use failure::Error;
 
 /// Resolve adresses and produce only those which were successfully resolved.
 /// Unresolved entries will be logged with `error` level.
@@ -40,11 +39,15 @@ pub (crate) fn to_bootstrap_addr(addr: &str) -> Vec<SocketAddr> {
 }
 
 #[cfg(test)]
-pub(crate) fn init_test() -> Result<tokio::runtime::Runtime,Error> {
-    simple_logger::init_with_level(log::Level::Debug)?;
-    let runtime = tokio::runtime::Builder::new().
-        basic_scheduler().
-        core_threads(2).
-        thread_name("test_k4rs").build()?;
-    Ok(runtime)
+mod tests {
+    use failure::Error;
+
+    pub(crate) fn init_test() -> Result<tokio::runtime::Runtime, Error> {
+        simple_logger::init_with_level(log::Level::Debug)?;
+        let runtime = tokio::runtime::Builder::new().
+            basic_scheduler().
+            core_threads(2).
+            thread_name("test_k4rs").build()?;
+        Ok(runtime)
+    }
 }

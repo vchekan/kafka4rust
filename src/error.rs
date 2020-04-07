@@ -30,8 +30,8 @@ pub enum Error {
     #[fail(display = "Unexpected recordset magic. Can handle only '2' but got '{}'", _0)]
     UnexpectedRecordsetMagic(u8),
 
-    #[fail(display = "Corrupt message")]
-    CorruptMessage,
+    #[fail(display = "Corrupt message. {}", _0)]
+    CorruptMessage(&'static str),
 
     #[fail(display = "Kafka error {:?}", _0)]
     KafkaError(Vec<(usize,ErrorCode)>),

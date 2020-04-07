@@ -3,9 +3,9 @@ use failure::Error;
 use kafka4rust::{protocol, Cluster};
 use tui::{
     self,
-    widgets::{Widget, Block, Borders, List, SelectableList, Text, Paragraph, Row, Table},
+    widgets::{Widget, Block, Borders, SelectableList, Text, Paragraph, Row, Table},
     layout::{Layout, Constraint, Direction},
-    style::{Style, Color, Modifier},
+    style::{Style, Color},
     backend::{CrosstermBackend},
 };
 use crossterm::{self, execute, 
@@ -16,6 +16,8 @@ use std::panic;
 use tokio;
 use std::collections::HashMap;
 use std::iter::FromIterator;
+use tracing;
+use tracing_futures::Instrument;
 
 enum Page {
     Brokers,
@@ -77,16 +79,18 @@ pub async fn main_ui(bootstrap: &str) -> Result<(), Error> {
     let bootstrap = bootstrap.to_string();
     let (mut tx, rx) = tokio::sync::mpsc::channel(2);
     tokio::spawn(async move {
-        let cluster = Cluster::connect_with_bootstrap(&bootstrap).await?;
-        let topics_meta = cluster.fetch_topics(&vec![]).await?;
+        tracing::event!(tracing::Level::DEBUG, "Connecting to {}", bootstrap);
+        let mut cluster = Cluster::with_bootstrap(&bootstrap)?;
+        let topics_meta = cluster.fetch_topic_meta(&vec![]).await?;
         let topics: Vec<_> = topics_meta.topics.iter().map(|t| (t.topic.as_str(), t.partition_metadata.len() as u32)).collect();
-        let offsets = crate::get_offsets(&cluster, &topics).await?;
+        let offsets = crate::get_offsets(&cluster, &topics).await.unwrap();
         tx.send(Cmd::TopicMeta(topics_meta)).await?;
         tx.send(Cmd::Offsets(offsets)).await?;
+
         Ok::<_,Error>(())
     }.inspect_err(|e| {
         panic!("Error in kafka loop: {}", e);
-    }));
+    })).instrument(tracing::debug_span!("UI eval loop"));
 
     let state = State {
         page: Page::Topics,

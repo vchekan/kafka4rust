@@ -2,30 +2,36 @@ mod ui;
 
 use clap::{Arg, App, SubCommand, ArgMatches};
 use kafka4rust;
-use tokio::main;
 use failure::Error;
-use simple_logger;
 use std::process::exit;
 use kafka4rust::{
     Cluster,
     protocol,
 };
+use tracing::{span, debug_span, info_span, event, dispatcher};
+use opentelemetry::{sdk, global};
+use tracing_opentelemetry::{OpenTelemetryLayer};
+use tracing_subscriber::Registry;
+use opentelemetry::api::trace::provider::Provider;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing;
 
 type Result<T> = std::result::Result<T,Error>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // TODO: global panic handler
-    //simple_logger::init_with_level(log::Level::Debug)?;
-    
+    init_tracer()?;
+    let span = tracing::info_span!("test");
+    let _guard = span.enter();
+
     let cli = parse_cli();
     let bootstrap = cli.value_of("bootstrap").expect("Bootstrap is required");
 
     match cli.subcommand() {
         ("list", Some(list)) => {
-            let cluster = Cluster::connect_with_bootstrap(bootstrap).await?;
+            let mut cluster = Cluster::with_bootstrap(bootstrap)?;
             // TODO: check for errors
-            let meta = cluster.fetch_topics(&vec![]).await?;
+            let meta = cluster.fetch_topic_meta(&vec![]).await?;
             match list.subcommand() {
                 ("topics", Some(_matches)) => {
                     let topics = meta.topics.iter().map(|t| t.topic.to_string());
@@ -103,4 +109,30 @@ async fn get_offsets(cluster: &Cluster, topics_partition_count: &[(&str, u32)]) 
         }).collect()
     };
     Ok(cluster.request(req).await?)
+}
+
+pub fn init_tracer() -> Result<()> {
+    let exporter = opentelemetry_jaeger::Exporter::builder()
+        .with_process(opentelemetry_jaeger::Process {
+            service_name: "karst-tui".to_string(),
+            tags: vec![],
+        })
+        .init()?;
+    let provider = sdk::Provider::builder()
+        .with_simple_exporter(exporter)
+        .with_config(sdk::Config {
+            default_sampler: Box::new(sdk::Sampler::Always),
+            max_events_per_span: 500,
+            ..Default::default()
+        })
+        .build();
+    global::set_provider(provider);
+
+    let tracer = global::trace_provider().get_tracer("component1");
+    let otl = OpenTelemetryLayer::with_tracer(tracer);
+    let subscriber = Registry::default().with(otl);
+    let dispatch = dispatcher::Dispatch::new(subscriber);
+    dispatcher::set_global_default(dispatch)?;
+
+    Ok(())
 }

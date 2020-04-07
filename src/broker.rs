@@ -54,13 +54,13 @@ impl Broker {
     {
         // TODO: buffer management
         // TODO: ensure capacity (BytesMut will panic if out of range)
-        let mut buff = BytesMut::with_capacity(1024); //Vec::with_capacity(1024);
+        let mut buff = BytesMut::with_capacity(20*1024); //Vec::with_capacity(1024);
         let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
         protocol::write_request(request, correlation_id, None, &mut buff);
 
         self.conn.request(&mut buff).await.context("Broker: sending request")?;
         let mut cursor = Cursor::new(buff);
-        let (corr_id, response): (_, R::Response) = read_response(&mut cursor);
+        let (_corr_id, response): (_, R::Response) = read_response(&mut cursor);
         // TODO: check correlationId
         // TODO: check for response error
         Ok(response)
@@ -72,7 +72,7 @@ impl Broker {
         self.conn.request(&mut request).await.context("Broker: sending request")?;
         debug!("Sent conn.request(). Result buff len: {}", request.len());
         let mut cursor = Cursor::new(request);
-        let (corr_id, response): (_, R) = read_response(&mut cursor);
+        let (_corr_id, response): (_, R) = read_response(&mut cursor);
         // TODO: check correlationId
         // TODO: check for response error
         Ok(response)
@@ -84,7 +84,8 @@ impl Broker {
             R: protocol::Request,
     {
         // TODO: buffer management
-        let mut buff = BytesMut::with_capacity(1024); //Vec::with_capacity(1024);
+        // TODO: dynamic buffer allocation
+        let mut buff = BytesMut::with_capacity(10*1024); //Vec::with_capacity(1024);
         let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
         protocol::write_request(&request, correlation_id, None, &mut buff);
 

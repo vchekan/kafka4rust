@@ -30,40 +30,32 @@ use crate::types::*;
 use crate::broker::Broker;
 use crate::error::{Error, Result};
 use crate::protocol;
-use futures::{
-    future::ready,
-    stream::{FuturesUnordered, StreamExt},
-};
-use std::iter::FromIterator;
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
-use failure::ResultExt;
 use crate::protocol::ErrorCode;
 use std::time::Duration;
 use crate::utils::to_bootstrap_addr;
+use std::collections::hash_map::Entry::{Occupied, Vacant};
+use tracing;
+use tracing_attributes::instrument;
 
 #[derive(Debug)]
 pub struct Cluster {
     bootstrap: Vec<SocketAddr>,
-    seed_broker: Broker,
-    broker_id_map: HashMap<BrokerId, Broker>
-}
-
-#[derive(Debug)]
-pub(crate) enum EventOut {
-    ResolvedTopic(protocol::TopicMetadata),
+    broker_id_map: HashMap<BrokerId, Broker>,
+    broker_addr_map: HashMap<BrokerId, SocketAddr>,
 }
 
 impl Cluster {
-    pub async fn connect_with_bootstrap(bootstrap: &str) -> Result<Self> {
+    #[instrument]
+    pub fn with_bootstrap(bootstrap: &str) -> Result<Self> {
         let bootstrap = to_bootstrap_addr(bootstrap);
-        Self::connect(bootstrap).await
+        Self::new(bootstrap)
     }
 
     /// Connect to at least one broker successfully .
-    pub async fn connect(bootstrap: Vec<SocketAddr>) -> Result<Self> {
-        let connect_futures = bootstrap
-            .iter()
+    pub fn new(bootstrap: Vec<SocketAddr>) -> Result<Self> {
+        /*let connect_futures = bootstrap.iter()
             // TODO: log bad addresses which did not parse
             //.filter_map(|addr| addr.parse().ok())
             .map(|a| Broker::connect(a.clone()));
@@ -82,19 +74,55 @@ impl Cluster {
 
         // TODO: move it to BrokerConnection
         debug!("Connected to {:?}", broker);
+        */
 
         let cluster = Cluster {
             bootstrap,
-            seed_broker: broker,
+            //seed_broker: broker,
             broker_id_map: HashMap::new(),
+            broker_addr_map: HashMap::new(),
         };
 
         Ok(cluster)
     }
 
-    pub(crate) async fn resolve_topic(&mut self, topic: &str) -> Result<protocol::MetadataResponse0> {
+    /// Connect to known or seed broker and get topic metadata.
+    /// If `topics` is empty, then fetch metadata for all topics.
+    #[instrument(skip(self))]
+    pub async fn fetch_topic_meta(&mut self, topics: &[&str]) -> Result<protocol::MetadataResponse0> {
+        // TODO: wait with timeout
+        for broker in self.broker_id_map.values() {
+            match fetch_topic_with_broker_and_retry(broker, topics).await {
+                Ok(meta) => {
+                    self.update_brokers_map(&meta);
+                    return Ok(meta)
+                },
+                Err(e) => {
+                    tracing::event!(tracing::Level::ERROR, "Error fetching topic meta: {}", e);
+                    info!("Error fetching topic meta: {}", e)
+                },
+            }
+        }
+
+        for addr in &self.bootstrap {
+            match Broker::connect(addr.clone()).await {
+                Ok(broker) => match fetch_topic_with_broker_and_retry(&broker, topics).await {
+                    Ok(meta) => {
+                        self.update_brokers_map(&meta);
+                        return Ok(meta)
+                    },
+                    Err(e) => info!("Error fetching topic meta: {}", e),
+                }
+                Err(e) => info!("Error fetching topic meta: {}", e),
+            }
+        }
+
+        Err(Error::NoBrokerAvailable)
+
+        /*
+
         // TODO: if failed, try other connected brokers
-        let meta_response = resolve_topic_with_broker(&self.seed_broker, &vec![topic]).await?;
+        let meta_response = fetch_topic_with_broker_and_retry(&self.seed_broker, &vec![topic]).await?;
 
         // TODO: connect in parallel
         // update known brokers
@@ -114,6 +142,7 @@ impl Cluster {
 
         // TODO: start recovery?
         Err(Error::NoBrokerAvailable)
+        */
 
         /*
         // TODO: how to implement recovery policy?
@@ -124,37 +153,70 @@ impl Cluster {
         */
     }
 
-    pub(crate) fn broker_by_id(&self, broker_id: BrokerId) -> Result<&Broker> {
-        self.broker_id_map.get(&broker_id).ok_or(Error::NoBrokerAvailable)
+    pub(crate) async fn broker_get_or_connect(&mut self, broker_id: BrokerId) -> Result<&Broker> {
+        match self.broker_id_map.entry(broker_id) {
+            Occupied(entry) => {
+                Ok(entry.into_mut())
+            }
+            Vacant(entry) => {
+                if let Some(addr) = self.broker_addr_map.get(&broker_id) {
+                    let broker = Broker::connect(addr.clone()).await?;
+                    debug!("broker_get_or_connect: broker_id={}, connected to {}", broker_id, addr);
+                    Ok(entry.insert(broker))
+                } else {
+                    Err(Error::NoBrokerAvailable)
+                }
+            }
+        }
     }
 
-    pub async fn fetch_topics(&self, topics: &[&str]) -> Result<protocol::MetadataResponse0> {
-        resolve_topic_with_broker(&self.seed_broker, topics).await
+    fn update_brokers_map(&mut self, meta: &protocol::MetadataResponse0) {
+        for broker in &meta.brokers {
+            match (broker.host.as_str(), broker.port as u16).to_socket_addrs() {
+                Ok(addr) => {
+                    let addr: Vec<SocketAddr> = addr.collect();
+                    if addr.len() != 0 {
+                        self.broker_addr_map.insert(broker.node_id, addr[0]);
+                    }
+                }
+                Err(e) => error!("Resolve broker error: {}", e),
+            }
+        }
     }
+
 
     /// Execute request on every broker until success
     /// TODO: what is the list of all known brokers?
     /// TODO: retry policy
     pub async fn request<R: protocol::Request>(&self, request: R) -> Result<R::Response> {
-        let mut err = Option::<Error>::None;
-        /*
         for broker in self.broker_id_map.values() {
             match broker.send_request(&request).await {
                 Ok(resp) => return Ok(resp),
-                Err(e) => err = Some(e),
+                Err(e) => {info!("Error {}", e)},
             }
         }
-        */
-        match self.seed_broker.send_request(&request).await {
-            Ok(resp) => return Ok(resp),
-            Err(e) => err = Some(e),
+
+        // TODO: after connect we have list of broker addresses but can not know their ID yet.
+        // Because of that, I have to check 2 lists, brokers with known ID and without (bootstrap ones)
+        for addr in &self.bootstrap {
+            match Broker::connect(addr.clone()).await {
+                Ok(broker) => {
+                    match broker.send_request(&request).await {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => {info!("Error {}", e)},
+                    }
+                }
+                Err(e) => info!("Error fetching topic meta: {}", e),
+            }
         }
 
-        Err(err.unwrap_or(Error::NoBrokerAvailable))
+
+        Err(Error::NoBrokerAvailable)
     }
 }
 
-async fn resolve_topic_with_broker(broker: &Broker, topics: &[&str]) -> Result<protocol::MetadataResponse0> {
+/// Fetch metadata from broker. If retryable error happen, sleep and try again.
+async fn fetch_topic_with_broker_and_retry(broker: &Broker, topics: &[&str]) -> Result<protocol::MetadataResponse0> {
     loop {
         let req = protocol::MetadataRequest0 {
             topics: topics.iter().map(|t| t.to_string()).collect(),
@@ -162,12 +224,12 @@ async fn resolve_topic_with_broker(broker: &Broker, topics: &[&str]) -> Result<p
         let meta = broker.send_request(&req).await?;
         let errors = meta.topics.iter().enumerate().
             map(|(p,t)| (p,t.error_code)).
-            filter(|(partition, e)| *e != ErrorCode::None).collect::<Vec<_>>();
+            filter(|(_partition, e)| *e != ErrorCode::None).collect::<Vec<_>>();
         // TODO: make retry more elegant
         if !errors.is_empty() {
             if errors.iter().all(|(_,e)|e.is_retriable()) {
                 async_std::task::sleep(Duration::from_millis(500)).await;
-                continue;
+                continue
             } else {
                 return Err(Error::KafkaError(errors));
             }
@@ -178,91 +240,6 @@ async fn resolve_topic_with_broker(broker: &Broker, topics: &[&str]) -> Result<p
 }
 
 /*
-fn handle_event(&mut self, e: EventIn) -> impl Future<Output=()> {
-    match e {
-        EventIn::ResolveTopic(topic) => {
-            self.resolver_tx.unbounded_send(topic).unwrap();
-            FuturesUnion2::F1(future::ready(()))
-        },
-        EventIn::TopicResolved(meta) => {
-            self.response_tx.unbounded_send(EventOut::ResolvedTopic(meta)).expect("Send failed");
-            FuturesUnion2::F1(future::ready(()))
-        },
-        EventIn::FetchTopicMetadata(topic, respond_to) => {
-            FuturesUnion2::F2(self.get_any_or_connect().
-                map(|conn| {
-                    ()
-                }))
-        }
-    }
-}
-
-fn get_any_or_connect(&mut self) -> impl Future<Output=&BrokerConnection> {
-    // TODO: simple strategy for now, get first connection
-    if self.connections.len() == 0 {
-        // TODO: check result
-        self.connect();
-    }
-
-    // After connect, we have at least one connection
-    let conn = self.connections.get(0);
-    future::ready(&conn)
-}
-*/
-
-/*
-fn start_topic_resolver(event_in: mpsc::UnboundedReceiver<String>, cluster_tx: mpsc::UnboundedSender<EventIn>, spawner: &mut LocalSpawner) -> mpsc::UnboundedReceiver<protocol::TopicMetadata> {
-    let (response_tx, response_rx) = mpsc::unbounded();
-
-    let timer = crate::timer::new(Duration::new(10, 0)).
-        map(Either::Right);
-    let event_in = event_in.map(Either::Left);
-    let event_in = event_in.select(timer);
-
-    let exec_loop = async move {
-        let mut topic_list = HashSet::<String>::new();
-        let mut topic_in_progress = HashSet::<String>::new();
-        event_in.for_each(|topic_or_timer| {
-            debug!("topic_resolver: {:?}", topic_or_timer);
-            match topic_or_timer {
-                Either::Left(topic) => {
-                    debug!("Adding topic '{}' to resolver list. List len: {}", topic, topic_list.len());
-                    if !topic_list.insert(topic) {
-                        debug!("Topic is already in waiting list");
-                    }
-                },
-                Either::Right(_) => {
-                    debug!("Got timer tick");
-                    let topics = topic_list.drain().collect::<Vec<_>>();
-                    let topics2 = topics.clone();
-                    topics.into_iter().for_each(|t| {topic_in_progress.insert(t);});
-                    cluster_tx.unbounded_send(EventIn::FetchTopicMetadata(topics2, RespondTo::TopicResolver)).expect("Failed to send topic to be resolved");
-
-                    // Q: should we detected timeout? Input buffers will be accumulated until
-                    // we get a response, which means no topics are going to be resolved until
-                    // response to the previous one is resolved?
-                    // A: no, if resolved by the same server, we will have to wait for response
-                    // anyway because kafka handle messages one at the time. We might achieve parallel
-                    // resolve if round-robin resolution server, but we would still wait for
-                    // fetch timeouts. If needed, we might want to keep connection just for metadata
-                    // requests but that's overkill.
-                    //let meta = await!(event);
-                    //let conn = await!(get_connection());
-                    //let meta = await!(get_meta(topic_list));
-                    //debug!("Topic resolver: got meta: {:?}", meta);
-                }
-            }
-            future::ready(())
-        }).await;
-        debug!("topic_resolver loop exited");
-    };
-
-    spawner.spawn(exec_loop).unwrap();
-
-    response_rx
-}
-*/
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,7 +259,7 @@ mod tests {
             ];
 
             //let (tx, rx) = mpsc::unbounded();
-            let mut cluster = Cluster::connect(bootstrap).await.unwrap();
+            let mut cluster = Cluster::connect_with_bootstrap(bootstrap).unwrap();
             let topic_meta = cluster.resolve_topic("test1").await.unwrap();
             debug!("Resolved topic: {:?}", topic_meta);
 
@@ -293,3 +270,4 @@ mod tests {
         });
     }
 }
+*/

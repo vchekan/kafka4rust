@@ -10,6 +10,20 @@ services:
       - "9090:9090"
     environment:
       - ZK_SERVER=zookeeper:2181
+  jaeger:
+    # UI http://localhost:16686
+    image: jaegertracing/all-in-one:1.17
+    environment:
+      - COLLECTOR_ZIPKIN_HTTP_PORT=9411
+    ports:
+      - "5775:5775/udp"
+      - "6831:6831/udp"
+      - "6832:6832/udp"
+      - "5778:5778"
+      - "16686:16686"
+      - "14268:14268"
+      - "14250:14250"
+      - "9411:9411"
   broker1:
     image: kafka4rust-broker
     ports:
@@ -20,10 +34,27 @@ services:
       - zookeeper
     environment:
       BROKER_OPTS: >-
+        --override broker.id=1
         --override advertised.listeners=INSIDE://:9094,OUTSIDE://localhost:9092
         --override listeners=INSIDE://:9094,OUTSIDE://:9092
         --override listener.security.protocol.map=INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
         --override inter.broker.listener.name=INSIDE
-        --override broker.id=1
+        --override zookeeper.connect=zookeeper:2181
+        --override num.partitions=10
+  broker2:
+    image: kafka4rust-broker
+    ports:
+      - "9093:9093"
+    build:
+      context: .
+    depends_on:
+      - zookeeper
+    environment:
+      BROKER_OPTS: >-
+        --override broker.id=2
+        --override advertised.listeners=INSIDE://:9094,OUTSIDE://localhost:9093
+        --override listeners=INSIDE://:9094,OUTSIDE://:9093
+        --override listener.security.protocol.map=INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+        --override inter.broker.listener.name=INSIDE
         --override zookeeper.connect=zookeeper:2181
         --override num.partitions=10

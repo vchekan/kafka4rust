@@ -10,5 +10,6 @@ mod responses;
 pub use self::api::*;
 pub(crate) use self::capabilities::supported_versions;
 pub(crate) use self::producer_request::ProduceRequest3;
+pub(crate) use self::primitives::Recordset;
 pub use self::requests::*;
 pub use self::responses::*;

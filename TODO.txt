@@ -1,6 +1,7 @@
+* Try parallel-streams
+
 * IPv6 support
 * Instrumentation
-* Tracing
 
 x Tokio
 x Serde
@@ -16,7 +17,6 @@ x Serde
     * Java
 * Decide on error strategy. Use dynamic error?
 * Tcp: nodelay, experiment with tx,rx buffer size
-* Dear IMGUI UI
 * Adaptive buffer size
 * Open Tracing
 * Trained dictionary for lz4
@@ -29,6 +29,7 @@ x Serde
 
 == Projects
 * CLI tools
+* Kafka mock: replay from file
 x Wireshark decoder
 * Compaction and record batch analyzer
 * Enterprise UI

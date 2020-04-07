@@ -4,7 +4,6 @@ use std::fmt::Debug;
 use crate::protocol::ErrorCode;
 use crate::error::{Result, Error};
 use crate::zigzag::*;
-use failure::Fail;
 
 //
 // Primitive types serializtion
@@ -170,36 +169,42 @@ impl FromKafka for ErrorCode {
 #[derive(Debug)]
 // TODO: make it crate pub
 pub struct Recordset {
+    pub base_offset: u64,
+    pub last_offset_delta: u32,
     pub messages: Vec<Vec<u8>>,
+}
+
+impl Recordset {
+    pub fn last_offset(&self) -> u64 { self.base_offset + self.last_offset_delta as u64 }
 }
 
 impl FromKafka for Result<Recordset> {
     fn from_kafka(buff: &mut impl Buf) -> Self {
         // TODO: skip control batches
 
-        if buff.remaining() == 4 {
-            // Empty recordset
-            let segment_size = buff.get_u32_be();
-            return match segment_size {
-                0 => Ok(Recordset{messages: vec![]}),
-                // Slice is empty, but size non-zero
-                _ => Err(Error::CorruptMessage),
-            };
+        if buff.remaining() < 4 {
+            return Err(Error::CorruptMessage("EOF while reading segment size"));
         }
-
-        let magic = buff.bytes().get(8+8+4);
-        match magic {
-            Option::None => { return Err(Error::CorruptMessage); },
-            Some(2) => {},
-            Some(magic) => { return Err(Error::UnexpectedRecordsetMagic(*magic)); }
-        };
-
 
         let segment_size = buff.get_u32_be();
         if segment_size == 0 {
-            return Err(Error::CorruptMessage);
+            // empty recordset
+            return Ok(Recordset {
+                base_offset: 0,
+                last_offset_delta: 0,
+                messages: vec![]
+            });
         }
-        let base_offset = buff.get_i64_be();
+
+        // TODO: assert buff size
+        let magic = buff.bytes().get(8+4+4);
+        match magic {
+            Option::None => { return Err(Error::CorruptMessage("EOF reading magic")); },
+            Some(2) => {},
+            Some(magic) => { return Err(Error::UnexpectedRecordsetMagic(*magic)); }
+        };
+        
+        let base_offset = buff.get_i64_be() as u64;
         // TODO: should I apply additional len-restricted view?
         let batch_len = buff.get_u32_be();
         let partition_leader_epoch = buff.get_u32_be();
@@ -215,11 +220,15 @@ impl FromKafka for Result<Recordset> {
         let base_sequence = buff.get_u32_be();
 
         let records_len = buff.get_u32_be();
-        let mut recordset = Recordset{messages: vec![]};
+        let mut recordset = Recordset{
+            base_offset,
+            last_offset_delta,
+            messages: vec![]
+        };
         for _ in 0..records_len {
             let len = get_zigzag64(buff);
             if buff.remaining() < len as usize {
-                return Err(Error::from(Error::CorruptMessage.context("Recordset deserialization")));
+                return Err(Error::CorruptMessage("Recordset deserialization"));
             }
             let _attributes = buff.get_u8();
             let timestamp_delta = get_zigzag64(buff);
