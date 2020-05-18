@@ -1,20 +1,25 @@
 use crate::types::*;
 use crate::cluster::Cluster;
-use crate::error::{Result};
 use crate::protocol;
 use crate::utils;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::time::{UNIX_EPOCH, Duration};
-use failure::{ResultExt, format_err};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use async_std::sync::Mutex;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender};
 use rand::random;
 use crate::murmur2a;
+use tracing::{self, event};
 use tracing_attributes::instrument;
-
+use tracing_futures::Instrument;
+use crate::protocol::ErrorCode;
+use crate::error::KafkaError;
+use anyhow::{Result, Context};
+use futures::AsyncWriteExt;
+use std::convert::TryInto;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -145,41 +150,49 @@ pub struct Producer<P: Partitioner> {
     cluster: Arc<tokio::sync::RwLock<Cluster>>,
     // TODO: is kafka topic case-sensitive?
     topics_meta: HashMap<String, ProducerTopicMetadata>,
+    acks: Sender<Response>,
 }
 
 impl Producer<Murmur2Partitioner> {
     #[instrument(level = "debug")]
-    pub async fn connect(seed: &str) -> Result<Self> {
+    pub async fn connect(seed: &str) -> Result<(Self, Receiver<Response>)> {
         Producer::with_hasher(seed).await
     }
 }
 
 impl<P: Partitioner> Producer<P> {
-    pub async fn with_hasher(seed: &str) -> Result<Self> {
+    #[instrument(level = "debug")]
+    pub async fn with_hasher(seed: &str) -> Result<(Self,Receiver<Response>)> {
         //let msg_sender = ProducerImpl::new::<M,P>(seed).await?;
         let seed_list = utils::to_bootstrap_addr(seed);
         if seed_list.len() == 0 {
-            return Err(From::from(format_err!("Failed to resolve any server from: '{}'", seed).context("Producer resolve seds")));
+            return Err(KafkaError::NoBrokerAvailable).context("Producer resolve seds");
         }
         let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::new(seed_list).context("Producer: new")?));
+        let (mut ack_tx, ack_rx) = tokio::sync::mpsc::channel(1000);
         let producer = Producer {
             phantom: PhantomData,
             buffer: Arc::new(Mutex::new(Buffer::new(cluster.clone()))),
             cluster: cluster.clone(),
             topics_meta: HashMap::new(),
+            acks: ack_tx.clone(),
         };
         let buffer = producer.buffer.clone();
 
         tokio::spawn(async move {
             loop {
+                // TODO: check time since last flush
+                // TODO: configure flush time
                 async_std::task::sleep(Duration::from_secs(5)).await;
                 debug!("Buffer timer");
-                buffer.lock().await.flush().await;
-
+                let mut buffer2 = buffer.lock().await;
+                //let mut cluster = buffer.cluster.write().await;
+                let mut cluster = cluster.write().await;
+                buffer2.flush(&mut ack_tx, &mut cluster).await;
             }
         });
 
-        Ok(producer)
+        Ok((producer, ack_rx))
     }
 
     #[instrument(level = "debug", skip(msg, self))]
@@ -188,10 +201,10 @@ impl<P: Partitioner> Producer<P> {
         // TODO: share metadata cache between self and Buffer
         let meta = Self::get_or_request_meta(&mut self.cluster, &mut self.topics_meta, &mut buffer.meta_cache, topic).await?;
         assert_eq!(1, meta.protocol_metadata.topics.len());
-        assert_eq!(topic, meta.protocol_metadata.topics.get(0).unwrap().topic);
-        let protocol_meta = meta.protocol_metadata.topics.get(0).unwrap();
+        assert_eq!(topic, meta.protocol_metadata.topics[0].topic);
+        let topic_meta = meta.protocol_metadata.topics.get(0).expect("Expect exacly 1 topic configured");
 
-        let partitions_count = protocol_meta.partition_metadata.len() as u32;
+        let partitions_count = topic_meta.partition_metadata.len() as u32;
         let partition = match msg.key() {
             Some(key) if key.len() > 0 => P::partition(&key),
             _ => {
@@ -210,7 +223,7 @@ impl<P: Partitioner> Producer<P> {
                 .expect("Failed to get timestamp")
                 .as_millis() as u64,
         };
-        match buffer.add(msg, topic.to_string(), partition, protocol_meta) {
+        match buffer.add(msg, topic.to_string(), partition, &topic_meta) {
             BufferingResult::Ok => Ok(()),
             BufferingResult::Overflow => {
                 // TODO:
@@ -221,8 +234,9 @@ impl<P: Partitioner> Producer<P> {
 
     #[instrument(level = "debug", skip(self))]
     pub async fn flush(&mut self) {
-        let buffer = self.buffer.lock().await;
-        buffer.flush().await;
+        let mut buffer = self.buffer.lock().await;
+        let mut cluster = self.cluster.write().await;//.expect("Failed to get lock on producer's cluster object");
+        buffer.flush(&mut self.acks, &mut cluster).await;
     }
 
     /// Get topic's meta from cache or request from broker.
@@ -246,13 +260,51 @@ impl<P: Partitioner> Producer<P> {
         }
 
         // Did not have meta. Fetch and cache.
-        let meta = cluster.write().await.fetch_topic_meta(&vec![topic]).await?;
-        let meta = ProducerTopicMetadata {protocol_metadata: meta, null_key_partition_counter: random()};
-        buffer_meta.insert(topic.to_string(), meta.protocol_metadata.topics[0].partition_metadata.iter().map(|p| p.leader).collect());
-        topics_meta.insert(topic.to_string(), meta);
+        // TODO: unstead of loop use recovery policy
+        // TODO: will wait for *all* partitions to become available. Could progress on what's up for now
+        // and await only for failed ones?
+        loop {
+            debug!("Fetching topic meta from server");
+            let meta = cluster.write().await.fetch_topic_meta(&vec![topic]).await?;
+            let meta = ProducerTopicMetadata { protocol_metadata: meta, null_key_partition_counter: random() };
+            let topic_metadata = &meta.protocol_metadata.topics[0];
 
-        let meta = topics_meta.get_mut(topic).unwrap();
-        Ok(meta)
+            match meta.protocol_metadata.topics[0].error_code.as_result() {
+                Err(e) if e.is_retriable() => {
+                    info!("Retriable error {}", e);
+                    tokio::time::delay_for(Duration::from_secs(3))
+                        .instrument(tracing::info_span!("Retry sleep")).await;
+                    continue;
+                },
+                Err(e) => return Err(e.into()),
+                _ => {}
+            }
+
+            if topic_metadata.partition_metadata.iter().all(|m| m.error_code == ErrorCode::None) {
+                let mut partition_leader_map: Vec<i32> = vec![-1; topic_metadata.partition_metadata.len()];
+                for partition_meta in &topic_metadata.partition_metadata {
+                    partition_leader_map[partition_meta.partition as usize] = partition_meta.leader;
+                }
+                assert!(partition_leader_map.iter().all(|l| *l != -1));
+                buffer_meta.insert(topic.to_string(), partition_leader_map);
+                topics_meta.insert(topic.to_string(), meta);
+
+                let meta = topics_meta.get_mut(topic).unwrap();
+                return Ok(meta);
+            } else {
+                for partition_meta in topic_metadata.partition_metadata.iter().filter(|m| m.error_code != ErrorCode::None) {
+                    event!(target: "get_or_request_meta", tracing::Level::ERROR, error_code = ?partition_meta.error_code, partition = ?partition_meta.partition);
+                }
+                tokio::time::delay_for(Duration::from_secs(3))
+                    .instrument(tracing::info_span!("Retry sleep")).await;
+                // TODO: check either error is recoverable
+                continue;
+            }
+        }
+    }
+
+    pub async fn close(mut self) {
+        self.flush().await;
     }
 }
 
@@ -283,7 +335,7 @@ struct ProducerTopicMetadata {
 ///
 #[derive(Debug)]
 struct Buffer {
-    topics: HashMap<String, Vec<PartitionQueue>>,
+    topic_queues: HashMap<String, Vec<PartitionQueue>>,
     bytes: u32,
     size_limit: u32,
     /// Vector of partitions
@@ -294,7 +346,7 @@ struct Buffer {
 impl Buffer {
     fn new(cluster: Arc<RwLock<Cluster>>) -> Self {
         Buffer {
-            topics: HashMap::new(),
+            topic_queues: HashMap::new(),
             bytes: 0,
             // TODO: make configurable
             size_limit: 100 * 1024 * 1024,
@@ -320,84 +372,161 @@ impl Buffer {
         }
 
         let partitions_count = meta.partition_metadata.len();
-        let partitions = self.topics.entry(topic).or_insert_with(|| {
+        let partitions = self.topic_queues.entry(topic).or_insert_with(|| {
             (0..partitions_count)
-                .map(|_| PartitionQueue::new())
+                .map(|_| PartitionQueue::default())
                 .collect()
         });
 
         self.bytes += (msg.value.len() + msg.key.as_ref().map(|k| k.len()).unwrap_or(0)) as u32;
 
-        partitions[partition as usize].push_back(msg);
+        partitions[partition as usize].queue.push_back(msg);
         BufferingResult::Ok
     }
 
+    /// TODO: rust BC to become smarter. Parameter `cluster` is member of `self` but I have to pass it separately because borrow checker
+    /// complains about `self` being borrowed 2 times mutably.
     #[instrument(level = "debug")]
-    async fn flush(&self) -> Result<()> {
-        let broker_partitioned = self.mk_requests();
-        for (broker_id, data) in broker_partitioned {
+    async fn flush(&mut self, acks: &mut Sender<Response>, cluster: &mut Cluster) -> Result<()> {
+        //let mut cluster = self.cluster.write().await;
+        let broker_partitioned = self.group_queue_by_leader();
+        for (&leader, data) in &broker_partitioned {
             let request = protocol::ProduceRequest3 {
                 transactional_id: None,
                 acks: 1,
                 timeout: 1500,
                 topic_data: &data
             };
-            let mut cluster = self.cluster.write().await;
-            let broker = Cluster::broker_get_or_connect(&mut cluster, broker_id).await
-                .expect(format!("Can not find broker_id {}", broker_id).as_str());
+
+            let broker = Cluster::broker_get_or_connect(cluster, leader).await
+                .expect(format!("Can not find broker_id {}", leader).as_str());
             let cmd_buf = broker.mk_request(request);
             debug!("Sending Produce");
             let res = broker.send_request2::<protocol::ProduceResponse3>(cmd_buf).await?;
             // TODO: throttle_time
             debug!("Got Produce response: {:?}", res);
+            for topic_resp in &res.responses {
+                for partition_resp in &topic_resp.partition_responses {
+                    let ack = if partition_resp.error_code.is_ok() {
+                        debug!("Ok sent partition {}", partition_resp.partition);
+                        //self.topic_queues.
+                        Response::Ack {
+                            partition: partition_resp.partition as u32,
+                            offset: partition_resp.base_offset as u64,
+                            error: partition_resp.error_code,
+                        }
+                    } else {
+                        error!("Produce error. Topic {} partition {} error {:?}", topic_resp.topic, partition_resp.partition, partition_resp.error_code);
+                        tracing::event!(tracing::Level::ERROR, ?leader, ?topic_resp.topic, partition = ?partition_resp.partition, error_code = ?partition_resp.error_code, "Produce error");
+                        Response::Nack {
+                            partition: partition_resp.partition as u32,
+                            error: partition_resp.error_code,
+                        }
+                    };
+                    if let Err(_) = acks.send(ack).await {
+                        info!("Application closed channel. Exiting receiving loop");
+                        break;
+                    }
+                }
+            }
         }
 
         Ok(())
     }
 
-    /// Scan buffer and make a request for each broker_id which has messages in queue
-    fn mk_requests(&self) -> HashMap<BrokerId,HashMap<&String, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>>> {
+    /// Scan message buffer and group messages by the leader and update `sending` counter.
+    /// Two queues because that's how dequeue works.
+    /// Returns leader->topic->partition->messages
+    fn group_queue_by_leader(&mut self) -> HashMap<BrokerId,HashMap<&String, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>>> {
         // TODO: implement FIFO and request size bound algorithm
 
-        // broker_id->topic->partition->recordset[]
+        // leader->topic->partition->recordset[]
         let mut broker_partitioned = HashMap::<
             BrokerId,
             HashMap<&String, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>>,
         >::new();
 
-        let slices_per_broker: Vec<_> = self.topics.iter().
-            flat_map(|(topic, partitions)| {
+        for (topic, partitioned_queue) in &mut self.topic_queues {
+            for (partition, queue) in partitioned_queue.into_iter().enumerate()
+                // Only non-empty queues
+                .filter(|(_, q)| q.queue.len() > 0) {
+                let partition = partition as u32;
+                let leader = self.meta_cache.
+                    get(topic).expect("Topic metadata is expected").
+                    get(partition as usize).expect("Corrupt topic metadata partition info");
+                // TODO: limit message size
+                queue.sending = queue.queue.len().try_into().unwrap();
+
+                //(*leader, topic, partition, queue.queue.as_slices())
+                let topics = broker_partitioned.entry(*leader).or_insert_with(|| HashMap::new());
+                // TODO use raw entries
+                let partitions = topics.entry(topic).or_insert_with(|| HashMap::new());
+                partitions.insert(partition, queue.queue.as_slices());
+            }
+        }
+
+        /*let slices_per_broker: Vec<_> = self.topic_queues.iter_mut().
+            flat_map(|(topic, partitioned_queue)| {
                 // N-th partition in queue match to partition number itself, so use `enumerate()`
                 // instead of storing partition number in the queue
-                partitions.iter().enumerate().
+                partitioned_queue.iter_mut().enumerate().
                     // Only non-empty queues
-                    filter(|(_, q)| q.len() > 0).
-                    map( move |(partition, queue)| {
+                    filter(|(_, q)| q.queue.len() > 0).
+                    map(|(partition, queue)| {
                         let partition = partition as u32;
-                        //let topic_meta = self.get_or_fetch_topic_meta(topic, cluster).await?;
-                        let broker_id = *self.meta_cache.
+                        let leader = self.meta_cache.
                             get(topic).expect("Topic metadata is expected").
                             get(partition as usize).expect("Corrupt topic metadata partition info");
-
-                        (broker_id, topic, partition, queue.as_slices())
+                        // TODO: limit message size
+                        queue.sending = queue.queue.len().try_into().unwrap();
+                        (*leader, topic, partition, queue.queue.as_slices())
                     })
             }).collect();
+
+        // leader->topic->partition->recordset[]
+        let mut broker_partitioned = HashMap::<
+            BrokerId,
+            HashMap<&String, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>>,
+        >::new();
 
         for (broker_id, topic, partition, slices) in slices_per_broker {
             // TODO use raw entries
             let topics = broker_partitioned.entry(broker_id).or_insert_with(|| HashMap::new());
             let partitions = topics.entry(topic).or_insert_with(|| HashMap::new());
             partitions.insert(partition, slices);
-        }
+        }*/
 
         broker_partitioned
     }
 }
 
-type PartitionQueue = VecDeque<QueuedMessage>;
+#[derive(Debug, Default)]
+struct PartitionQueue {
+    queue: VecDeque<QueuedMessage>,
+    // How many message are being sent
+    sending: u32,
+}
 
-/// Serialized message with topic and partition preserved because we need them in case topic
-/// resolved or topology change.
+#[derive(Debug)]
+pub enum Response {
+    Ack {
+        partition: u32,
+        offset: u64,
+        error: ErrorCode,
+    },
+    // TODO:
+    /*TempNack {
+        partition: u32,
+        error: ErrorCode,
+    },*/
+    Nack {
+        partition: u32,
+        error: ErrorCode,
+    }
+}
+
+    /// Serialized message with topic and partition preserved because we need them in case topic
+    /// resolved or topology change.
 #[derive(Debug)]
 pub(crate) struct QueuedMessage {
     pub key: Option<Vec<u8>>,

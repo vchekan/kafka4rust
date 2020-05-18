@@ -1,7 +1,7 @@
 use super::api::*;
 use bytes::Buf;
-use crate::error::Result;
 use crate::protocol::primitives::Recordset;
+use anyhow::Result;
 
 // 0
 response!(ProduceResponse3 {
@@ -12,6 +12,7 @@ response!(ProduceResponse {
     topic: String,
     partition_responses: [PartitionResponse]
 });
+
 response!(PartitionResponse {
     partition: i32,
     error_code: ErrorCode,
@@ -21,7 +22,7 @@ response!(PartitionResponse {
 
 // 1
 response!(FetchResponse5 {
-    throttle_time: i32,     // /1 : {hf_kafka_throttle_time_ms: i32},
+    throttle_time: i32,
     responses: [FetchResponse]
 });
 
@@ -32,13 +33,12 @@ response!(FetchResponse {
 
 response!(FetchPartitionResponse {
     partition: u32,
-    // TODO: error codes
     error_code: ErrorCode,
     high_watermark: u64,
     last_stable_offset: i64,
     log_start_offset: i64,
     aborted_transactions: [FetchAbortedTransactions],
-    recordset: { fn parse_recordset() -> Result<Recordset> }
+    recordset: { fn parse_recordset() -> Recordset }
 });
 
 response!(FetchAbortedTransactions {
@@ -100,7 +100,7 @@ response!(ApiVersions {
     max_version: i16
 });
 
-response!(ApiVersionsResponse1 {
+response!(Result<ApiVersionsResponse1> {
     error_code: ErrorCode,
     api_versions: [ApiVersions],
     throttle_time_ms: u32
@@ -203,14 +203,50 @@ pub enum ErrorCode {
 }
 
 use ErrorCode::*;
+//use failure::_core::fmt::Formatter;
+
 const ERROR_RETRIABLE: [ErrorCode; 22] = [CorruptMessage,UnknownTopicOrPartition,LeaderNotAvailable,NotLeaderForPartition,
     RequestTimedOut,NetworkException,CoordinatorLoadInProgress,CoordinatorNotAvailable,NotCoordinator,
     NotEnoughReplicas,NotEnoughReplicasAfterAppend,NotController,KafkaStorageError,
     FetchSessionIdNotFound,InvalidFetchSessionEpoch,ListenerNotFound,FencedLeaderEpoch,
     UnknownLeaderEpoch,OffsetNotAvailable,PreferredLeaderNotAvailable,EligibleLeadersNotAvailable,
     ElectionNotNeeded];
+
 impl ErrorCode {
+    pub fn is_ok(&self) -> bool {
+        match self {
+            ErrorCode::None => true,
+            _ => false,
+        }
+    }
+
     pub fn is_retriable(&self) -> bool {
         ERROR_RETRIABLE.contains(self)
     }
+    pub fn as_result(&self) -> Result<(), ErrorCode> {
+        match self {
+            ErrorCode::None => std::result::Result::Ok(()),
+            e => std::result::Result::Err(*e),
+        }
+    }
 }
+
+impl std::error::Error for ErrorCode {
+
+}
+
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl From<ErrorCode> for std::result::Result<(), ErrorCode> {
+    fn from(e: ErrorCode) -> Self {
+        match e {
+            ErrorCode::None => std::result::Result::Ok(()),
+            e => std::result::Result::Err(e),
+        }
+    }
+}
+

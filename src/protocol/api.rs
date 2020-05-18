@@ -2,6 +2,8 @@ use byteorder::BigEndian;
 use bytes::{Buf, BufMut, ByteOrder};
 use std::fmt::Debug;
 use bytes::BytesMut;
+use std::marker::Sized;
+use anyhow::Result;
 
 #[repr(u16)]
 pub enum ApiKey {
@@ -18,8 +20,8 @@ pub trait ToKafka {
 }
 
 // TODO: do I really need Buf trait or can use concrete MutBuf type?
-pub trait FromKafka {
-    fn from_kafka(buff: &mut impl Buf) -> Self;
+pub trait FromKafka where Self: Sized {
+    fn from_kafka(buff: &mut impl Buf) -> Result<Self>;
 }
 
 pub trait HasApiKey {
@@ -57,7 +59,7 @@ pub(crate) fn write_request<T>(
     BigEndian::write_u32(&mut buff[0..4], size as u32);
 }
 
-pub fn read_response<T>(buff: &mut impl Buf) -> (u32, T)
+pub fn read_response<T>(buff: &mut impl Buf) -> (u32, Result<T>)
 where
     T: FromKafka,
 {

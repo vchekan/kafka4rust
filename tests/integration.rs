@@ -1,11 +1,11 @@
 extern crate kafka4rust;
 mod utils;
 
-use kafka4rust::{Producer, Consumer};
+use kafka4rust::{Producer, Consumer, Response};
 use rand;
 use rand::Rng;
 use rand::distributions::Alphanumeric;
-use failure::Error;
+use anyhow::Result;
 use std::collections::HashSet;
 use tokio;
 use crate::utils::*;
@@ -25,8 +25,8 @@ fn random_topic() -> String{
 }
 
 #[tokio::test]
-async fn topic_is_autocreated_by_producer() -> Result<(),Error> {
-    simple_logger::init_with_level(log::Level::Trace)?;
+async fn topic_is_autocreated_by_producer() -> Result<()> {
+    simple_logger::init_with_level(log::Level::Debug)?;
     init_tracer()?;
     let tracer = global::trace_provider().get_tracer("component1");
     let otl = OpenTelemetryLayer::with_tracer(tracer);
@@ -41,19 +41,33 @@ async fn topic_is_autocreated_by_producer() -> Result<(),Error> {
     let topic = random_topic();
     let count = 200;
     let mut sent = HashSet::new();
-    let mut producer = Producer::connect(bootstrap).await?;
+    let (mut producer, mut responses) = Producer::connect(bootstrap).await?;
 
-    {
-        let span = tracing::span!(tracing::Level::ERROR, "send");
-        let _guard = span.enter();
-        for i in 1..=count {
-            let msg = format!("m{}", i);
-            sent.insert(msg.clone());
-            event!(Level::INFO, %msg, "Sent");
-            producer.send(msg, &topic).await?;
-        }
-        producer.flush().await;
+    let acks = tokio::spawn(async move {
+        while let Some(ack) = responses.recv().await {
+            match ack {
+                Response::Ack {..} => debug!("Ack: {:?}", ack),
+                Response::Nack {..} => assert!(false, "Got nack, send failed: {:?}", ack),
+            }
+
+        };
+    });
+
+    let span = tracing::span!(tracing::Level::ERROR, "send");
+    let _guard = span.enter();
+    for i in 1..=count {
+        let msg = format!("m{}", i);
+        sent.insert(msg.clone());
+        event!(Level::INFO, %msg, "Sent");
+        producer.send(msg, &topic).await?;
     }
+    producer.close()
+        .instrument(tracing::trace_span!("Closing producer"))
+        .await;
+
+    acks
+        .instrument(tracing::trace_span!("Awaiting for acks"))
+        .await;
 
     {
         let span = tracing::span!(tracing::Level::ERROR, "receive");
@@ -77,7 +91,7 @@ async fn topic_is_autocreated_by_producer() -> Result<(),Error> {
 }
 
 #[tokio::test]
-async fn leader_down_producer_and_consumer_recovery() -> Result<(), Error> {
+async fn leader_down_producer_and_consumer_recovery() -> Result<()> {
     docker_down()?;
     docker_up()?;
     let _dg = DockerGuard {};

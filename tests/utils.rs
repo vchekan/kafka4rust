@@ -1,9 +1,9 @@
-use failure::Error;
+use anyhow::Result;
 use std::process;
 use opentelemetry_jaeger;
 use opentelemetry::{api::Key, global, sdk};
 
-pub fn docker_down() -> Result<(), Error> {
+pub fn docker_down() -> Result<()> {
     assert!(process::Command::new("docker-compose")
         .current_dir("docker")
         .arg("down")
@@ -11,7 +11,7 @@ pub fn docker_down() -> Result<(), Error> {
     Ok(())
 }
 
-pub fn docker_up() -> Result<(), Error> {
+pub fn docker_up() -> Result<()> {
     process::Command::new("docker-compose")
         .current_dir("docker")
         .arg("down")

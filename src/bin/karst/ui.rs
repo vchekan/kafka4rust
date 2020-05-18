@@ -1,5 +1,5 @@
 use std::io::{stdout, Write};
-use failure::Error;
+use anyhow::Result;
 use kafka4rust::{protocol, Cluster};
 use tui::{
     self,
@@ -66,7 +66,7 @@ impl Drop for TerminalRawModeGuard {
 type Terminal = tui::Terminal<CrosstermBackend<std::io::Stdout>>;
 
 /// UI entry point
-pub async fn main_ui(bootstrap: &str) -> Result<(), Error> {
+pub async fn main_ui(bootstrap: &str) -> Result<()> {
     enable_raw_mode()?;
     let _terminal_guard = TerminalRawModeGuard {};
 
@@ -87,7 +87,7 @@ pub async fn main_ui(bootstrap: &str) -> Result<(), Error> {
         tx.send(Cmd::TopicMeta(topics_meta)).await?;
         tx.send(Cmd::Offsets(offsets)).await?;
 
-        Ok::<_,Error>(())
+        Ok::<_,anyhow::Error>(())
     }.inspect_err(|e| {
         panic!("Error in kafka loop: {}", e);
     })).instrument(tracing::debug_span!("UI eval loop"));
@@ -109,14 +109,14 @@ pub async fn main_ui(bootstrap: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn draw(terminal: &mut Terminal, state: &State) -> Result<(), Error> {
+fn draw(terminal: &mut Terminal, state: &State) -> Result<()> {
     match state.page {
         Page::Topics => draw_topics(terminal, state),
         Page::Brokers => draw_brokers(terminal, state),
     }
 }
 
-fn draw_topics(terminal: &mut Terminal, state: &State) -> Result<(), Error> {
+fn draw_topics(terminal: &mut Terminal, state: &State) -> Result<()> {
     terminal.draw(|mut f| {
         // top/status
         let chunks = Layout::default()
@@ -165,7 +165,7 @@ fn draw_topics(terminal: &mut Terminal, state: &State) -> Result<(), Error> {
             )
             .widths(&[Constraint::Length(10), Constraint::Length(10), Constraint::Length(10)])
             .block(Block::default()
-            .title("Topics")
+            .title("Partitions")
             .borders(Borders::ALL))
             .header_style(Style::default().fg(Color::Yellow))
             .column_spacing(1)
@@ -183,11 +183,11 @@ fn draw_topics(terminal: &mut Terminal, state: &State) -> Result<(), Error> {
     Ok(())
 }
 
-fn draw_brokers(_terminal: &mut Terminal, _state: &State) -> Result<(), Error> {
+fn draw_brokers(_terminal: &mut Terminal, _state: &State) -> Result<()> {
     unimplemented!()
 }
 
-async fn eval_loop(term: &mut Terminal, mut state: State, mut commands: tokio::sync::mpsc::Receiver<Cmd>) -> Result<(),Error> {
+async fn eval_loop(term: &mut Terminal, mut state: State, mut commands: tokio::sync::mpsc::Receiver<Cmd>) -> Result<()> {
     // Show initial state
     draw(term, &state)?;
     let mut term_events = EventStream::new();

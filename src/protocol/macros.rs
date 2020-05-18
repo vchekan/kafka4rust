@@ -38,24 +38,33 @@ macro_rules! response {
     ( { fn $fn:ident() -> $tp:ty} ) => {};
     ($id:ident) => {};
     ( [$id:ident] ) => {};
-
+    ([Result<$tp:ty>]) => {};
 
     // Array of complex type
     ( [ $sname:ident $tp:tt ] ) => (response!($sname $tp););
 
+    ([Result<$sname:ident> $def:tt ] ) => {
+        response!($sname $def);
+    };
 
-    ($sname:ident { $($f:ident : $tp:tt),* }) => {
+    // Complex object
+    ($sname:ident { $($f:tt : $tp:tt),* }) => {
         #[derive(Debug)]
         pub struct $sname {
             $(pub $f: get_type!($tp) ),*
         }
 
         impl FromKafka for $sname {
-            fn from_kafka(_buff: &mut impl Buf) -> $sname {
-                $sname { $($f: <get_type!($tp)>::from_kafka(_buff)),* }
+            fn from_kafka(_buff: &mut impl Buf) -> Result<$sname> {
+                Ok($sname { $($f: <get_type!($tp)>::from_kafka(_buff)?),* })
             }
         }
 
+        // Recursively generate complex types
         $( response!($tp); )*
+    };
+
+    (Result<$sname:ident> $def:tt) => {
+        response!($sname $def);
     };
 }

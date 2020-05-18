@@ -2,21 +2,19 @@ mod ui;
 
 use clap::{Arg, App, SubCommand, ArgMatches};
 use kafka4rust;
-use failure::Error;
 use std::process::exit;
 use kafka4rust::{
     Cluster,
     protocol,
 };
-use tracing::{span, debug_span, info_span, event, dispatcher};
+use tracing::{dispatcher};
 use opentelemetry::{sdk, global};
 use tracing_opentelemetry::{OpenTelemetryLayer};
 use tracing_subscriber::Registry;
 use opentelemetry::api::trace::provider::Provider;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing;
-
-type Result<T> = std::result::Result<T,Error>;
+use anyhow::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -129,7 +127,7 @@ pub fn init_tracer() -> Result<()> {
     global::set_provider(provider);
 
     let tracer = global::trace_provider().get_tracer("component1");
-    let otl = OpenTelemetryLayer::with_tracer(tracer);
+    let otl = tracing_opentelemetry::layer().with_tracer(tracer);
     let subscriber = Registry::default().with(otl);
     let dispatch = dispatcher::Dispatch::new(subscriber);
     dispatcher::set_global_default(dispatch)?;

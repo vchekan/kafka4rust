@@ -1,14 +1,13 @@
 use crate::connection::BrokerConnection;
-use crate::error::Result;
 use crate::protocol;
 use crate::protocol::*;
-use failure::_core::fmt::Debug;
 use log::{debug, trace};
 use std::io::Cursor;
 use std::net::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use bytes::BytesMut;
-use failure::ResultExt;
+use anyhow::{Result, Context};
+use std::fmt::Debug;
 
 // TODO: if move negotiated api and correlation to broker connection, this struct degenerates.
 // Is it redundant?
@@ -34,12 +33,14 @@ impl Broker {
         let correlation_id = 0;
 
         write_request(&req, correlation_id, None, &mut buf);
-        debug!("Requesting Api versions");
+        trace!("Requesting Api versions");
         conn.request(&mut buf).await.context("Broker:connect:request")?;
 
         let mut cursor = Cursor::new(buf);
-        let (_corr_id, response) = read_response(&mut cursor);
+        let (_corr_id, response): (u32, Result<protocol::ApiVersionsResponse0>) = read_response(&mut cursor);
+        let response = response.context("Broker::connect requesting Api versions")?;
         trace!("Got ApiVersionResponse {:?}", response);
+        response.error_code.as_result()?;
         let negotiated_api_version = Broker::build_api_compatibility(&response);
         Ok(Broker {
             negotiated_api_version,
@@ -60,7 +61,8 @@ impl Broker {
 
         self.conn.request(&mut buff).await.context("Broker: sending request")?;
         let mut cursor = Cursor::new(buff);
-        let (_corr_id, response): (_, R::Response) = read_response(&mut cursor);
+        let (_corr_id, response): (_, Result<R::Response>) = read_response(&mut cursor);
+        let response = response?;
         // TODO: check correlationId
         // TODO: check for response error
         Ok(response)
@@ -72,10 +74,10 @@ impl Broker {
         self.conn.request(&mut request).await.context("Broker: sending request")?;
         debug!("Sent conn.request(). Result buff len: {}", request.len());
         let mut cursor = Cursor::new(request);
-        let (_corr_id, response): (_, R) = read_response(&mut cursor);
+        let (_corr_id, response): (_, Result<R>) = read_response(&mut cursor);
         // TODO: check correlationId
         // TODO: check for response error
-        Ok(response)
+        response
     }
 
     /// Generate correlation_id and serialize request to buffer
@@ -130,7 +132,6 @@ impl Broker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    //use futures::executor;
     use async_std::task;
     use log::debug;
     use std::env;

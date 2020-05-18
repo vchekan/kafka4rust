@@ -28,16 +28,15 @@
 
 use crate::types::*;
 use crate::broker::Broker;
-use crate::error::{Error, Result};
+use crate::error::KafkaError;
 use crate::protocol;
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
-use crate::protocol::ErrorCode;
-use std::time::Duration;
 use crate::utils::to_bootstrap_addr;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use tracing;
 use tracing_attributes::instrument;
+use anyhow::Result;
 
 #[derive(Debug)]
 pub struct Cluster {
@@ -117,7 +116,7 @@ impl Cluster {
             }
         }
 
-        Err(Error::NoBrokerAvailable)
+        Err(KafkaError::NoBrokerAvailable.into())
 
         /*
 
@@ -164,7 +163,7 @@ impl Cluster {
                     debug!("broker_get_or_connect: broker_id={}, connected to {}", broker_id, addr);
                     Ok(entry.insert(broker))
                 } else {
-                    Err(Error::NoBrokerAvailable)
+                    Err(KafkaError::NoBrokerAvailable)?
                 }
             }
         }
@@ -211,32 +210,42 @@ impl Cluster {
         }
 
 
-        Err(Error::NoBrokerAvailable)
+        Err(KafkaError::NoBrokerAvailable)?
     }
 }
 
 /// Fetch metadata from broker. If retryable error happen, sleep and try again.
 async fn fetch_topic_with_broker_and_retry(broker: &Broker, topics: &[&str]) -> Result<protocol::MetadataResponse0> {
-    loop {
+    let req = protocol::MetadataRequest0 {
+        topics: topics.iter().map(|t| t.to_string()).collect(),
+    };
+    broker.send_request(&req).await
+
+    /*loop {
         let req = protocol::MetadataRequest0 {
             topics: topics.iter().map(|t| t.to_string()).collect(),
         };
         let meta = broker.send_request(&req).await?;
         let errors = meta.topics.iter().enumerate().
-            map(|(p,t)| (p,t.error_code)).
-            filter(|(_partition, e)| *e != ErrorCode::None).collect::<Vec<_>>();
+            filter_map(|(p, t)| match t {
+                Err(t) => Some((p,t)),
+                Ok(_) => None,
+            }).
+            collect::<Vec<_>>();
         // TODO: make retry more elegant
+        // TODO: await on failed pat only and not on all of them
         if !errors.is_empty() {
-            if errors.iter().all(|(_,e)|e.is_retriable()) {
+            if errors.iter().all(|(_,e)|e.error_code.is_retriable()) {
                 async_std::task::sleep(Duration::from_millis(500)).await;
                 continue
             } else {
-                return Err(Error::KafkaError(errors));
+                let errors = errors.iter().map(|(p,t)| (*p,t.error_code)).collect();
+                Err(Error::KafkaErrors(errors))?
             }
         } else {
             return Ok(meta);
         }
-    }
+    }*/
 }
 
 /*

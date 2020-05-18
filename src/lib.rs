@@ -12,13 +12,12 @@ mod producer;
 mod cluster;
 mod broker;
 mod consumer;
-mod api;
 mod murmur2a;
 
 #[macro_use]
 extern crate log;
 
 pub use self::consumer::{Consumer, ConsumerConfig};
-pub use self::producer::{Producer};
-pub use self::error::Error;
+pub use self::producer::{Producer, Response};
+pub use self::error::KafkaError;
 pub use self::cluster::Cluster;

@@ -15,7 +15,14 @@ x Serde
 * Wrappers
     * C#
     * Java
+* Enforce protocol response errors checks
 * Decide on error strategy. Use dynamic error?
+* Migrate off `failure` crate
+    * enum + impl Error manually (in library)
+    * anyhow (recommended by withoutboats)
+    * thiserror
+    * eyre
+    * snafu
 * Tcp: nodelay, experiment with tx,rx buffer size
 * Adaptive buffer size
 * Open Tracing
