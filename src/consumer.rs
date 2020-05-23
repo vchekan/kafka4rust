@@ -126,13 +126,10 @@ impl Consumer {
     }
 }
 
+#[instrument(level="debug", err, skip(cluster, tx, topic_meta, config))]
 async fn fetch_loop(mut cluster: Cluster, mut tx: Sender<Batch>, topic_meta: protocol::MetadataResponse0, config: ConsumerConfig) -> Result<()> {
-    let loop_span = debug_span!("fetch_loop");
-    let _loop_guard = loop_span.enter();
     let mut offsets = vec![0_u64; topic_meta.topics[0].partition_metadata.len()];
     loop {
-        let build_fetch_req_span = debug_span!(parent: &loop_span, "build fetch");
-        let _build_fetch_req_span_guard = build_fetch_req_span.enter();
         // group partitions by leader broker
         let mut grouped_partitions: Vec<(u32, i32)> = topic_meta.topics[0].partition_metadata.iter().map(|p| (p.partition, p.leader)).collect();
         grouped_partitions.sort_by_key(|(_p, leader)| *leader);
@@ -165,12 +162,8 @@ async fn fetch_loop(mut cluster: Cluster, mut tx: Sender<Batch>, topic_meta: pro
             };
             (leader, request)
         }).collect();
-        std::mem::drop(_build_fetch_req_span_guard);
-        std::mem::drop(build_fetch_req_span);
 
         for (leader, request) in fetch_requests.into_iter() {
-            let fetch_req_span = debug_span!("fetch_request", %leader);
-            let fetch_req_span_guard = fetch_req_span.enter();
             event!(Level::DEBUG, %leader, "sending");
 
             let broker: Result<&Broker> = cluster.broker_get_or_connect(leader).await;
@@ -213,13 +206,6 @@ async fn fetch_loop(mut cluster: Cluster, mut tx: Sender<Batch>, topic_meta: pro
                                 offsets[partition as usize] = last_offset + 1;
                                 debug!("Advanced offset partition#{} to {}", partition, last_offset + 1);
                             }
-                            /*}
-                            Err(e) => {
-                                error!("Error decoding recordset");
-                                event!(Level::ERROR, %leader, %partition, error = ?e, "Error decoding recordset");
-                                return Err(e).with_context(|| format!("FetchRequest: partition: {}", partition));
-                            }*/
-                            //}
                         }
                     }
                 },
@@ -228,20 +214,12 @@ async fn fetch_loop(mut cluster: Cluster, mut tx: Sender<Batch>, topic_meta: pro
                     debug!("Fetch failed");
                 }
             }
-            std::mem::drop(fetch_req_span_guard);
-            std::mem::drop(fetch_req_span);
         }
 
-
-        let delay_span = debug_span!("Delay between responses");
-        let delay_span_guard = delay_span.enter();
         // TODO: configurable fetch frequency
-        tokio::time::delay_for(Duration::from_millis(300 as u64)).await;
-        std::mem::drop(delay_span_guard);
-        std::mem::drop(delay_span);
+        tokio::time::delay_for(Duration::from_millis(300 as u64))
+            .instrument(debug_span!("Delay between fetches")).await;
     }
-    debug!("Exiting fetch loop");
-    Ok(())
 }
 
 /*

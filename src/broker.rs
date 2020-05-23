@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bytes::BytesMut;
 use anyhow::{Result, Context};
 use std::fmt::Debug;
+use tracing_attributes::instrument;
 
 // TODO: if move negotiated api and correlation to broker connection, this struct degenerates.
 // Is it redundant?
@@ -49,6 +50,7 @@ impl Broker {
         })
     }
 
+    #[instrument(level="debug", err, skip(self, request))]
     pub async fn send_request<R>(&self, request: &R) -> Result<R::Response>
     where
         R: protocol::Request,
@@ -68,6 +70,7 @@ impl Broker {
         Ok(response)
     }
 
+    #[instrument(level="debug", skip(self, request))]
     pub async fn send_request2<R: FromKafka + Debug>(&self, mut request: BytesMut) -> Result<R>
     {
         debug!("Sending conn.request()...");

@@ -11,13 +11,10 @@ use tokio;
 use crate::utils::*;
 use log::debug;
 use tracing::{self, Level, event, span, dispatcher};
-use opentelemetry::{api::Provider, sdk, global, api::trace::tracer::TracerGenerics};
-use opentelemetry::api::{Tracer, Span, KeyValue};
-use tracing_opentelemetry::OpenTelemetryLayer;
+use opentelemetry::{api::Provider, global};
 use tracing_subscriber::Registry;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_futures::Instrument;
-use std::time::Duration;
 
 fn random_topic() -> String{
     let topic: String = rand::thread_rng().sample_iter(Alphanumeric).take(7).collect();
@@ -29,12 +26,12 @@ async fn topic_is_autocreated_by_producer() -> Result<()> {
     simple_logger::init_with_level(log::Level::Debug)?;
     init_tracer()?;
     let tracer = global::trace_provider().get_tracer("component1");
-    let otl = OpenTelemetryLayer::with_tracer(tracer);
+    let otl = tracing_opentelemetry::layer().with_tracer(tracer);
     let subscriber = Registry::default().with(otl);
     let dispatch = dispatcher::Dispatch::new(subscriber);
     dispatcher::set_global_default(dispatch)?;
 
-    let span = tracing::span!(tracing::Level::INFO, "topic_is_autocreated_by_producer");
+    let span = span!(tracing::Level::INFO, "topic_is_autocreated_by_producer");
     let _guard = span.enter();
 
     let bootstrap = "localhost";
@@ -63,11 +60,14 @@ async fn topic_is_autocreated_by_producer() -> Result<()> {
     }
     producer.close()
         .instrument(tracing::trace_span!("Closing producer"))
-        .await;
+        .await?;
+    debug!("Producer closed");
 
     acks
         .instrument(tracing::trace_span!("Awaiting for acks"))
-        .await;
+        .await?;
+
+    debug!("Acks received");
 
     {
         let span = tracing::span!(tracing::Level::ERROR, "receive");
@@ -76,13 +76,18 @@ async fn topic_is_autocreated_by_producer() -> Result<()> {
             topic(topic).
             //span(&receive_span).
             bootstrap("localhost").build().await?;
-        for i in 1..=count {
+        let mut i = 0;
+        loop {
             let batch = consumer.recv().await.expect("Consumer closed");
+            i += batch.messages.len();
             for msg in batch.messages {
                 let msg = String::from_utf8(msg.value).unwrap();
-                debug!(">>>Receved #{} {:?}", i, msg);
+                debug!(">>>Receved #{}/{} {:?}", i, (count - i), msg);
                 event!(Level::INFO, %batch.high_watermark, %batch.partition, "Received {}", msg);
                 assert!(sent.remove(&msg));
+            }
+            if i >= count {
+                break;
             }
         }
     }

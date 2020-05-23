@@ -9,7 +9,6 @@ use kafka4rust::{
 };
 use tracing::{dispatcher};
 use opentelemetry::{sdk, global};
-use tracing_opentelemetry::{OpenTelemetryLayer};
 use tracing_subscriber::Registry;
 use opentelemetry::api::trace::provider::Provider;
 use tracing_subscriber::layer::SubscriberExt;

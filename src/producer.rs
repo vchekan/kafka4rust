@@ -9,16 +9,15 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use async_std::sync::Mutex;
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use rand::random;
 use crate::murmur2a;
-use tracing::{self, event};
+use tracing::{self, event, Level};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use crate::protocol::ErrorCode;
 use crate::error::KafkaError;
 use anyhow::{Result, Context};
-use futures::AsyncWriteExt;
 use std::convert::TryInto;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
@@ -144,6 +143,12 @@ impl Partitioner for Murmur2Partitioner {
     }
 }
 
+#[derive(Debug)]
+enum BuffCmd {
+    Flush,
+    FlushAndClose,
+}
+
 pub struct Producer<P: Partitioner> {
     phantom: PhantomData<P>,
     buffer: Arc<Mutex<Buffer>>,
@@ -151,6 +156,8 @@ pub struct Producer<P: Partitioner> {
     // TODO: is kafka topic case-sensitive?
     topics_meta: HashMap<String, ProducerTopicMetadata>,
     acks: Sender<Response>,
+    buffer_commands: Sender<BuffCmd>,
+    flush_loop_handle: tokio::task::JoinHandle<()>
 }
 
 impl Producer<Murmur2Partitioner> {
@@ -169,28 +176,61 @@ impl<P: Partitioner> Producer<P> {
             return Err(KafkaError::NoBrokerAvailable).context("Producer resolve seds");
         }
         let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::new(seed_list).context("Producer: new")?));
+        let cluster2 = cluster.clone();
         let (mut ack_tx, ack_rx) = tokio::sync::mpsc::channel(1000);
-        let producer = Producer {
-            phantom: PhantomData,
-            buffer: Arc::new(Mutex::new(Buffer::new(cluster.clone()))),
-            cluster: cluster.clone(),
-            topics_meta: HashMap::new(),
-            acks: ack_tx.clone(),
-        };
-        let buffer = producer.buffer.clone();
+        let mut ack_tx2 = ack_tx.clone();
+        let (buff_tx, buff_rx) = channel::<BuffCmd>(2);
 
-        tokio::spawn(async move {
-            loop {
+        let buffer = Arc::new(Mutex::new(Buffer::new(cluster.clone())));
+        let buffer2 = buffer.clone();
+
+        // TODO: wait in `close` for loop to end
+        let flush_loop_handle = tokio::spawn(async move {
+            let mut buff_rx = buff_rx;
+            let mut complete = false;
+            while !complete {
                 // TODO: check time since last flush
                 // TODO: configure flush time
-                async_std::task::sleep(Duration::from_secs(5)).await;
-                debug!("Buffer timer");
+                tokio::select! {
+                    _ = async_std::task::sleep(Duration::from_secs(5)) => { debug!("Buffer timer"); }
+                    cmd = buff_rx.recv() => {
+                        match cmd {
+                            Some(BuffCmd::Flush) => {
+                                debug!("Flushing buffer");
+                            }
+                            Some(BuffCmd::FlushAndClose) => {
+                                debug!("Buffer flush before closing");
+                                complete = true;
+                            }
+                            None => {
+                                debug!("Producer closed. Exiting buffer flush loop");
+                                complete = true;
+                            }
+                        }
+                    }
+                }
+
                 let mut buffer2 = buffer.lock().await;
                 //let mut cluster = buffer.cluster.write().await;
                 let mut cluster = cluster.write().await;
-                buffer2.flush(&mut ack_tx, &mut cluster).await;
+                // TODO: handle result
+                if let Err(e) = buffer2.flush(&mut ack_tx2, &mut cluster).await {
+                    error!("Failed to flush buffer. {}", e);
+                }
             }
+
+            debug!("Buffer flush loop quit");
         });
+
+        let producer = Producer {
+            phantom: PhantomData,
+            buffer: buffer2,
+            cluster: cluster2,
+            topics_meta: HashMap::new(),
+            acks: ack_tx,
+            buffer_commands: buff_tx,
+            flush_loop_handle
+        };
 
         Ok((producer, ack_rx))
     }
@@ -233,10 +273,10 @@ impl<P: Partitioner> Producer<P> {
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub async fn flush(&mut self) {
+    pub async fn flush(&mut self) -> Result<()> {
         let mut buffer = self.buffer.lock().await;
-        let mut cluster = self.cluster.write().await;//.expect("Failed to get lock on producer's cluster object");
-        buffer.flush(&mut self.acks, &mut cluster).await;
+        let mut cluster = self.cluster.write().await;
+        buffer.flush(&mut self.acks, &mut cluster).await
     }
 
     /// Get topic's meta from cache or request from broker.
@@ -272,7 +312,7 @@ impl<P: Partitioner> Producer<P> {
             match meta.protocol_metadata.topics[0].error_code.as_result() {
                 Err(e) if e.is_retriable() => {
                     info!("Retriable error {}", e);
-                    tokio::time::delay_for(Duration::from_secs(3))
+                    tokio::time::delay_for(Duration::from_millis(300))
                         .instrument(tracing::info_span!("Retry sleep")).await;
                     continue;
                 },
@@ -303,8 +343,13 @@ impl<P: Partitioner> Producer<P> {
         }
     }
 
-    pub async fn close(mut self) {
-        self.flush().await;
+    pub async fn close(mut self) -> Result<()> {
+        debug!("Closing producer...");
+        self.buffer_commands.send(BuffCmd::FlushAndClose).await?;
+        debug!("Sent BuffCmd::FlushAndClose, waiting for loop exit");
+        self.flush_loop_handle.await?;
+        debug!("Producer closed");
+        Ok(())
     }
 }
 
@@ -386,10 +431,12 @@ impl Buffer {
 
     /// TODO: rust BC to become smarter. Parameter `cluster` is member of `self` but I have to pass it separately because borrow checker
     /// complains about `self` being borrowed 2 times mutably.
-    #[instrument(level = "debug")]
+    #[instrument(level = "debug", skip(self, acks, cluster))]
     async fn flush(&mut self, acks: &mut Sender<Response>, cluster: &mut Cluster) -> Result<()> {
-        //let mut cluster = self.cluster.write().await;
         let broker_partitioned = self.group_queue_by_leader();
+        // Container to keep sucessful topic/partitions after the call loop. We can ot modify queue
+        // in the loop because loop keeps immutable reference to `self`.
+        let mut messages_to_discard = HashMap::<String, Vec<u32>>::new();
         for (&leader, data) in &broker_partitioned {
             let request = protocol::ProduceRequest3 {
                 transactional_id: None,
@@ -409,7 +456,8 @@ impl Buffer {
                 for partition_resp in &topic_resp.partition_responses {
                     let ack = if partition_resp.error_code.is_ok() {
                         debug!("Ok sent partition {}", partition_resp.partition);
-                        //self.topic_queues.
+                        messages_to_discard.entry(topic_resp.topic.clone()).or_default().push(partition_resp.partition as u32);
+                        // Notify caller
                         Response::Ack {
                             partition: partition_resp.partition as u32,
                             offset: partition_resp.base_offset as u64,
@@ -428,6 +476,18 @@ impl Buffer {
                         break;
                     }
                 }
+            }
+        }
+
+        // Discard messages which were sent successfully
+        for (topic, partitions) in messages_to_discard {
+            let queues = self.topic_queues.get_mut(&topic).expect("Topic not found");
+            for partition in partitions {
+                let queue = &mut queues[partition as usize];
+                queue.queue.drain(..queue.sending as usize);
+                queue.sending = 0;
+                let remaining = queue.queue.len();
+                event!(Level::DEBUG, ?topic, ?partition, ?remaining, "Truncated queue");
             }
         }
 
@@ -457,7 +517,6 @@ impl Buffer {
                 // TODO: limit message size
                 queue.sending = queue.queue.len().try_into().unwrap();
 
-                //(*leader, topic, partition, queue.queue.as_slices())
                 let topics = broker_partitioned.entry(*leader).or_insert_with(|| HashMap::new());
                 // TODO use raw entries
                 let partitions = topics.entry(topic).or_insert_with(|| HashMap::new());

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::process;
 use opentelemetry_jaeger;
-use opentelemetry::{api::Key, global, sdk};
+use opentelemetry::{global, sdk};
 
 pub fn docker_down() -> Result<()> {
     assert!(process::Command::new("docker-compose")
