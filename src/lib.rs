@@ -18,6 +18,6 @@ mod murmur2a;
 extern crate log;
 
 pub use self::consumer::{Consumer, ConsumerConfig};
-pub use self::producer::{Producer, Response};
+pub use self::producer::{Producer, Response, BinMessage, StringMessage};
 pub use self::error::KafkaError;
 pub use self::cluster::Cluster;

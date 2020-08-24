@@ -1,5 +1,4 @@
-# TODO: can't find zulu jre
-FROM azul/zulu-openjdk-debian:8
+FROM adoptopenjdk:8-jre-hotspot
 
 RUN apt-get install -y curl
 # TODO: how to redirect to the nearest download and not hardcode a concrete mirror?

@@ -6,6 +6,9 @@ edition = "2018"
 keywords = ["kafka"]
 description = "High performance, async Kafka client"
 
+[workspace]
+members = ["libkarst"]
+
 [profile.release]
 lto = true
 panic = 'abort'

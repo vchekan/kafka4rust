@@ -38,7 +38,7 @@ async fn topic_is_autocreated_by_producer() -> Result<()> {
     let topic = random_topic();
     let count = 200;
     let mut sent = HashSet::new();
-    let (mut producer, mut responses) = Producer::connect(bootstrap).await?;
+    let (mut producer, mut responses) = Producer::connect(bootstrap)?;
 
     let acks = tokio::spawn(async move {
         while let Some(ack) = responses.recv().await {

@@ -1,0 +1,18 @@
+[package]
+name = "libkarst"
+version = "0.1.0"
+authors = ["Vadim Chekan <kot.begemot@gmail.com>"]
+edition = "2018"
+
+[lib]
+name = "karst"
+crate-type = ["cdylib"]
+
+[dependencies]
+kafka4rust = {path = "../"}
+tokio = "0.2.21"
+lazy_static = "1.4.0"
+anyhow = "1.0.32"
+
+log = "0.4.11"
+simple_logger = "1.6.0"

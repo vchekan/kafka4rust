@@ -6,8 +6,8 @@
 - [x] Tokio
 - [x] Serde
 - [ ] Client API
-  x Producer
-  x Consumer
+  - [x] Producer
+  - [x] Consumer
   * Admin
   * Transactions
 - [ ] Integration testing
@@ -16,8 +16,8 @@
     - [x] Use crate::tracing
 - [x] Decide on error strategy. Use dynamic error?
 * Wrappers
-    * C#
-    * Java
+    - [x] C#
+    - [ ] Java
 * Enforce protocol response errors checks
 - [x] Migrate off `failure` crate
     * enum + impl Error manually (in library)

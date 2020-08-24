@@ -5,7 +5,6 @@ use crate::utils;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::time::{UNIX_EPOCH, Duration};
-use std::marker::PhantomData;
 use std::sync::Arc;
 use async_std::sync::Mutex;
 use tokio::sync::RwLock;
@@ -19,6 +18,7 @@ use crate::protocol::ErrorCode;
 use crate::error::KafkaError;
 use anyhow::{Result, Context};
 use std::convert::TryInto;
+use std::fmt;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -130,16 +130,21 @@ pub trait ToMessage: Send {
     fn value(&self) -> Vec<u8>;
 }
 
-/// Partitioner needs to implement only case when
-pub trait Partitioner {
-    fn partition(key: &[u8]) -> u32;
+pub trait Partitioner : Debug + Send {
+    fn partition(&self, key: &[u8]) -> u32;
 }
 
 // clients/src/main/java/org/apache/kafka/clients/producer/internals/DefaultPartitioner.java
 pub struct Murmur2Partitioner {}
 impl Partitioner for Murmur2Partitioner {
-    fn partition(key: &[u8]) -> u32 {
+    fn partition(&self, key: &[u8]) -> u32 {
         murmur2a::hash32(key)
+    }
+}
+
+impl Debug for Murmur2Partitioner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Murmur2Partitioner")
     }
 }
 
@@ -149,10 +154,11 @@ enum BuffCmd {
     FlushAndClose,
 }
 
-pub struct Producer<P: Partitioner> {
-    phantom: PhantomData<P>,
+pub struct Producer {
+    bootstrap: String,
     buffer: Arc<Mutex<Buffer>>,
     cluster: Arc<tokio::sync::RwLock<Cluster>>,
+    partitioner: Box<dyn Partitioner>,
     // TODO: is kafka topic case-sensitive?
     topics_meta: HashMap<String, ProducerTopicMetadata>,
     acks: Sender<Response>,
@@ -160,20 +166,25 @@ pub struct Producer<P: Partitioner> {
     flush_loop_handle: tokio::task::JoinHandle<()>
 }
 
-impl Producer<Murmur2Partitioner> {
-    #[instrument(level = "debug")]
-    pub async fn connect(seed: &str) -> Result<(Self, Receiver<Response>)> {
-        Producer::with_hasher(seed).await
+impl Debug for Producer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Producer: {{seed: '{}', partitioner: {:?}}}", self.bootstrap, self.partitioner)
     }
 }
 
-impl<P: Partitioner> Producer<P> {
+impl Producer {
     #[instrument(level = "debug")]
-    pub async fn with_hasher(seed: &str) -> Result<(Self,Receiver<Response>)> {
-        //let msg_sender = ProducerImpl::new::<M,P>(seed).await?;
+    pub fn connect(seed: &str) -> Result<(Self, Receiver<Response>)> {
+        Producer::with_hasher(seed, Box::new(Murmur2Partitioner{}))
+    }
+}
+
+impl Producer {
+    #[instrument(level = "debug", skip(partitioner))]
+    pub fn with_hasher(seed: &str, partitioner: Box<dyn Partitioner>) -> Result<(Self,Receiver<Response>)> {
         let seed_list = utils::to_bootstrap_addr(seed);
         if seed_list.len() == 0 {
-            return Err(KafkaError::NoBrokerAvailable).context("Producer resolve seds");
+            return Err(KafkaError::NoBrokerAvailable).context(format!("Failed to resolve seed servers: '{}'", seed));
         }
         let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::new(seed_list).context("Producer: new")?));
         let cluster2 = cluster.clone();
@@ -223,9 +234,10 @@ impl<P: Partitioner> Producer<P> {
         });
 
         let producer = Producer {
-            phantom: PhantomData,
+            bootstrap: seed.to_string(),
             buffer: buffer2,
             cluster: cluster2,
+            partitioner,
             topics_meta: HashMap::new(),
             acks: ack_tx,
             buffer_commands: buff_tx,
@@ -246,7 +258,7 @@ impl<P: Partitioner> Producer<P> {
 
         let partitions_count = topic_meta.partition_metadata.len() as u32;
         let partition = match msg.key() {
-            Some(key) if key.len() > 0 => P::partition(&key),
+            Some(key) if key.len() > 0 => self.partitioner.partition(&key),
             _ => {
                 meta.null_key_partition_counter += 1;
                 meta.null_key_partition_counter
@@ -605,8 +617,8 @@ enum TimestampType {
 }
 
 pub struct BinMessage {
-    key: Vec<u8>,
-    value: Vec<u8>,
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
 }
 
 impl ToMessage for BinMessage {
