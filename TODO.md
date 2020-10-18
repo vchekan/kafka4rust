@@ -1,5 +1,4 @@
-* Try parallel-streams
-
+## Features
 * IPv6 support
 * Instrumentation
 
@@ -25,6 +24,15 @@
     * thiserror
     * eyre
     * snafu
+
+## Techniques
+* Try parallel-streams
+* Consider Cow<> when deserializing.
+* Consider `flume` for channels
+* Considr `dashmap` for mutithreading access.
+* Consider `parking_lot` for non-poisoning locks.
+* Consider `tinyvec` and `smolstr` for stack-optimized strings/arrays
+* Audit that `copy` is used whenever possible, instead of `clone`
 * Tcp: nodelay, experiment with tx,rx buffer size
 * Adaptive buffer size
 * Trained dictionary for lz4

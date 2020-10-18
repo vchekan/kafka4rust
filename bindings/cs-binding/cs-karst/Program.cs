@@ -165,7 +165,7 @@ namespace cs_karst
         private IntPtr producer;
 
         // API
-        public async Task Connect(String bootstrap) {
+        public async Task Connect(string bootstrap) {
             var res = await new CreateAwaitable(bootstrap);
             this.producer = res;
         }

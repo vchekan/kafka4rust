@@ -176,7 +176,7 @@ async fn fetch_loop(mut cluster: Cluster, mut tx: Sender<Batch>, topic_meta: pro
                 Ok(response) => {
                     if response.throttle_time != 0 {
                         debug!("Throttling: sleeping for {}ms", response.throttle_time);
-                        tokio::time::delay_for(Duration::from_millis(response.throttle_time as u64)).await;
+                        tokio::time::sleep(Duration::from_millis(response.throttle_time as u64)).await;
                     }
                     for response in response.responses {
                         // TODO: return topic in message
@@ -217,7 +217,7 @@ async fn fetch_loop(mut cluster: Cluster, mut tx: Sender<Batch>, topic_meta: pro
         }
 
         // TODO: configurable fetch frequency
-        tokio::time::delay_for(Duration::from_millis(300 as u64))
+        tokio::time::sleep(Duration::from_millis(300 as u64))
             .instrument(debug_span!("Delay between fetches")).await;
     }
 }

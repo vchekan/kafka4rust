@@ -7,7 +7,7 @@ keywords = ["kafka"]
 description = "High performance, async Kafka client"
 
 [workspace]
-members = ["libkarst"]
+members = ["libkarst", "bindings/karst-jvm"]
 
 [profile.release]
 lto = true
@@ -20,7 +20,7 @@ thiserror = "1.0"
 
 futures = "0.3.1"
 async-std = { version = "1.5.0", features = ["unstable"] }
-tokio = { version = "0.2.21", features = ["full"] }
+tokio = { version = "0.3.0", features = ["full"] }
 
 bytes = "0.4.12"
 byteorder = "1.3.2"

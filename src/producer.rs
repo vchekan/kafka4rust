@@ -324,7 +324,7 @@ impl Producer {
             match meta.protocol_metadata.topics[0].error_code.as_result() {
                 Err(e) if e.is_retriable() => {
                     info!("Retriable error {}", e);
-                    tokio::time::delay_for(Duration::from_millis(300))
+                    tokio::time::sleep(Duration::from_millis(300))
                         .instrument(tracing::info_span!("Retry sleep")).await;
                     continue;
                 },
@@ -347,7 +347,7 @@ impl Producer {
                 for partition_meta in topic_metadata.partition_metadata.iter().filter(|m| m.error_code != ErrorCode::None) {
                     event!(target: "get_or_request_meta", tracing::Level::ERROR, error_code = ?partition_meta.error_code, partition = ?partition_meta.partition);
                 }
-                tokio::time::delay_for(Duration::from_secs(3))
+                tokio::time::sleep(Duration::from_secs(3))
                     .instrument(tracing::info_span!("Retry sleep")).await;
                 // TODO: check either error is recoverable
                 continue;
@@ -632,8 +632,8 @@ impl ToMessage for BinMessage {
 
 #[derive(Debug)]
 pub struct StringMessage {
-    key: String,
-    value: String,
+    pub key: String,
+    pub value: String,
 }
 
 impl ToMessage for StringMessage {
