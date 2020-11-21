@@ -9,6 +9,7 @@ use bytes::BytesMut;
 use anyhow::{Result, Context};
 use std::fmt::Debug;
 use tracing_attributes::instrument;
+use anyhow::anyhow;
 
 // TODO: if move negotiated api and correlation to broker connection, this struct degenerates.
 // Is it redundant?
@@ -35,7 +36,7 @@ impl Broker {
 
         write_request(&req, correlation_id, None, &mut buf);
         trace!("Requesting Api versions");
-        conn.request(&mut buf).await.context("Broker:connect:request")?;
+        conn.request(&mut buf).await.context(anyhow!("Broker:connect({}) failed", addr))?;
 
         let mut cursor = Cursor::new(buf);
         let (_corr_id, response): (u32, Result<protocol::ApiVersionsResponse0>) = read_response(&mut cursor);

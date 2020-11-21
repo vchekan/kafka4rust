@@ -50,6 +50,7 @@ crossterm = {version = "0.17", features = ['event-stream'] }
 
 [dev-dependencies]
 criterion = "0.3"
+assert_cmd = "1.0.1"
 
 [[bench]]
 name = "tokio_channel_clone"

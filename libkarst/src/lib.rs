@@ -84,7 +84,7 @@ pub extern fn create_producer(continuation: OpaqueDotnetPointer, bootstrap: *con
     TOKIO_RUNTIME.spawn( async move {
         println!("rust: create_producer: before runtime");
         println!("rust: got param: {}", bootstrap);
-        match Producer::connect(&bootstrap) {
+        match Producer::new(&bootstrap) {
             Ok((producer, rx)) => {
                 println!("Connected {:?}", producer);
                 let id = PRODUCER_ID.fetch_add(1, Ordering::SeqCst);

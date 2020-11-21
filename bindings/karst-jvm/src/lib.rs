@@ -41,7 +41,7 @@ pub extern fn Java_org_karst_Karst_createProducer(env: JNIEnv, _klass: JClass, b
     debug!("rust:create_producer: {}", bootstrap);
 
     let mut res = TOKIO_RUNTIME.spawn( async move {
-        match Producer::connect(&bootstrap) {
+        match Producer::new(&bootstrap) {
             Ok((producer, rx)) => {
                 debug!("Connected {:?}", producer);
                 let id = PRODUCER_ID.fetch_add(1, Ordering::SeqCst);

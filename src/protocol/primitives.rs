@@ -209,18 +209,18 @@ impl FromKafka for Recordset {
         
         let base_offset = buff.get_i64_be() as u64;
         // TODO: should I apply additional len-restricted view?
-        let batch_len = buff.get_u32_be();
-        let partition_leader_epoch = buff.get_u32_be();
+        let _batch_len = buff.get_u32_be();
+        let _partition_leader_epoch = buff.get_u32_be();
         buff.get_u8();  // skip magic, we've checked it already
         // TODO: check crc
-        let crc = buff.get_u32_be();
-        let attributes = buff.get_u16_be();
+        let _crc = buff.get_u32_be();
+        let _attributes = buff.get_u16_be();
         let last_offset_delta = buff.get_u32_be();
-        let first_timestamp = buff.get_u64_be();
-        let max_timestamp = buff.get_u64_be();
-        let producer_id = buff.get_u64_be();
-        let producer_epoch = buff.get_u16_be();
-        let base_sequence = buff.get_u32_be();
+        let _first_timestamp = buff.get_u64_be();
+        let _max_timestamp = buff.get_u64_be();
+        let _producer_id = buff.get_u64_be();
+        let _producer_epoch = buff.get_u16_be();
+        let _base_sequence = buff.get_u32_be();
 
         let records_len = buff.get_u32_be();
         let mut recordset = Recordset{
@@ -234,8 +234,8 @@ impl FromKafka for Recordset {
                 return Err(KafkaError::CorruptMessage("Recordset deserialization").into());
             }
             let _attributes = buff.get_u8();
-            let timestamp_delta = get_zigzag64(buff);
-            let offset_delta = get_zigzag64(buff);
+            let _timestamp_delta = get_zigzag64(buff);
+            let _offset_delta = get_zigzag64(buff);
 
             let key_len = get_zigzag64(buff);
             let _key = if key_len <= 0 {

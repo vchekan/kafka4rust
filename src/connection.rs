@@ -28,7 +28,7 @@ use async_std::net::TcpStream;
 use async_std::prelude::*;
 use async_std::sync::Mutex;
 use std::sync::Arc;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 pub(crate) const CLIENT_ID: &str = "k4rs";
 
@@ -61,11 +61,11 @@ impl BrokerConnection {
         Ok(conn)
     }
 
-    pub async fn request(&self, buf: &mut BytesMut) -> io::Result<()> {
+    pub async fn request(&self, buf: &mut BytesMut) -> Result<()> {
         let mut inner = self.inner.lock().await;
         let tcp = &mut inner.tcp;
-        //debug!("Sending request[{}]", buf.len());
-        tcp.write_all(&buf).await?;
+        trace!("Sending request[{}] to {:?}", buf.len(), tcp.peer_addr());
+        tcp.write_all(&buf).await.context(anyhow!("writing {} bytes to socket {:?}", buf.len(), tcp.peer_addr()))?;
         //debug!("Sent request");
 
         // TODO: buffer reuse
@@ -75,7 +75,7 @@ impl BrokerConnection {
         // Read length into buffer
         buf.resize(4, 0_u8);
         // TODO: ensure length is sane
-        tcp.read_exact(buf).await?;
+        tcp.read_exact(buf).await.context("Reading buff size")?;
         let len = BigEndian::read_u32(&buf);
         //debug!("Response len: {}, reading body...", len);
         buf.resize(len as usize, 0_u8);

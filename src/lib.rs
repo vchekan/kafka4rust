@@ -13,6 +13,7 @@ mod cluster;
 mod broker;
 mod consumer;
 mod murmur2a;
+mod futures;
 
 #[macro_use]
 extern crate log;

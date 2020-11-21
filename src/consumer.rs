@@ -18,7 +18,7 @@ use tracing::{debug_span, event, Level};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use crate::protocol::Recordset;
-use anyhow::{Result, Context};
+use anyhow::Result;
 
 // TODO: offset start: -2, end: -1
 pub enum StartOffset {
@@ -55,14 +55,14 @@ impl ConsumerConfig {
         }
     }
 
-    fn get_topic(&self) -> Result<&str> {
+    fn get_topic(&self) -> Result<&str, KafkaError> {
         match &self.topic {
             Some(t) => Ok(t.as_str()),
             None => Err(KafkaError::Config("Consumer topic is not set".to_string()).into())
         }
     }
 
-    pub async fn build(self) -> Result<Receiver<Batch>> {
+    pub async fn build(self) -> Result<Receiver<Batch>, KafkaError> {
         Consumer::new(self).await
     }
 }
@@ -103,14 +103,15 @@ impl Consumer {
     pub fn builder() -> ConsumerConfig { ConsumerConfig::new() }
 
     #[instrument(skip(config))]
-    pub async fn new(config: ConsumerConfig) -> Result<Receiver<Batch>> {
-        let seed_list = utils::to_bootstrap_addr(&config.get_bootstrap());
+    pub async fn new(config: ConsumerConfig) -> Result<Receiver<Batch>, KafkaError> {
+        let seed_list = utils::resolve_addr(&config.get_bootstrap());
+        debug!("Resolved bootstrap list: {:?}", seed_list);
         if seed_list.len() == 0 {
-            return Err(KafkaError::NoBrokerAvailable).context("Consumer resolve bootstrap");
+            return Err(KafkaError::NoBrokerAvailable(format!("Failed to resolve any address in bootstrap: {:?}", config.bootstrap)));
         }
 
-        let mut cluster = Cluster::new(seed_list).context("Consumer: new")?;
-        let topic_meta = cluster.fetch_topic_meta(&vec![config.get_topic()?]).await.context("Consumer:new:resolve topic")?;
+        let mut cluster = Cluster::new(seed_list);
+        let topic_meta = cluster.fetch_topic_meta(&vec![config.get_topic()?]).await?;
         debug!("Resolved topic: {:?}", topic_meta);
         assert_eq!(1, topic_meta.topics.len());
 
@@ -127,7 +128,7 @@ impl Consumer {
 }
 
 #[instrument(level="debug", err, skip(cluster, tx, topic_meta, config))]
-async fn fetch_loop(mut cluster: Cluster, mut tx: Sender<Batch>, topic_meta: protocol::MetadataResponse0, config: ConsumerConfig) -> Result<()> {
+async fn fetch_loop(mut cluster: Cluster, tx: Sender<Batch>, topic_meta: protocol::MetadataResponse0, config: ConsumerConfig) -> Result<()> {
     let mut offsets = vec![0_u64; topic_meta.topics[0].partition_metadata.len()];
     loop {
         // group partitions by leader broker
@@ -140,7 +141,7 @@ async fn fetch_loop(mut cluster: Cluster, mut tx: Sender<Batch>, topic_meta: pro
                 replica_id: -1,
                 max_wait_time: 1000,    // TODO: config
                 min_bytes: 0,           // TODO: config
-                max_bytes: 1000_000,    // TODO: config
+                max_bytes: 1_000_000,    // TODO: config
                 isolation_level: 0,     // 0: READ_UNCOMMITTED; TODO: config, enum
                 topics: vec![
                     protocol::FetchTopic {
@@ -154,7 +155,7 @@ async fn fetch_loop(mut cluster: Cluster, mut tx: Sender<Batch>, topic_meta: pro
                                 partition,
                                 fetch_offset: offsets[partition as usize] as i64,
                                 log_start_offset: -1,
-                                partition_max_bytes: 1000_000,
+                                partition_max_bytes: 1_000_000,
                             }
                         }).collect()
                     }

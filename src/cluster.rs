@@ -32,11 +32,14 @@ use crate::error::KafkaError;
 use crate::protocol;
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
-use crate::utils::to_bootstrap_addr;
+use crate::utils::resolve_addr;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
-use tracing;
+use crate::futures::repeat;
 use tracing_attributes::instrument;
 use anyhow::Result;
+use std::future::Future;
+use tokio::time::Duration;
+use tracing_futures::Instrument;
 
 #[derive(Debug)]
 pub struct Cluster {
@@ -48,12 +51,12 @@ pub struct Cluster {
 impl Cluster {
     #[instrument]
     pub fn with_bootstrap(bootstrap: &str) -> Result<Self> {
-        let bootstrap = to_bootstrap_addr(bootstrap);
-        Self::new(bootstrap)
+        let bootstrap = resolve_addr(bootstrap);
+        Ok(Self::new(bootstrap))
     }
 
     /// Connect to at least one broker successfully .
-    pub fn new(bootstrap: Vec<SocketAddr>) -> Result<Self> {
+    pub fn new(bootstrap: Vec<SocketAddr>) -> Self {
         /*let connect_futures = bootstrap.iter()
             // TODO: log bad addresses which did not parse
             //.filter_map(|addr| addr.parse().ok())
@@ -82,41 +85,42 @@ impl Cluster {
             broker_addr_map: HashMap::new(),
         };
 
-        Ok(cluster)
+        cluster
     }
 
     /// Connect to known or seed broker and get topic metadata.
     /// If `topics` is empty, then fetch metadata for all topics.
     #[instrument(skip(self))]
-    pub async fn fetch_topic_meta(&mut self, topics: &[&str]) -> Result<protocol::MetadataResponse0> {
+    pub async fn fetch_topic_meta(&mut self, topics: &[&str]) -> Result<protocol::MetadataResponse0, KafkaError> {
+        debug!("fetch_topic_meta({:?})", topics);
         // TODO: wait with timeout
         for broker in self.broker_id_map.values() {
-            match fetch_topic_with_broker_and_retry(broker, topics).await {
+            match repeat(|| {fetch_topic_with_broker_and_retry(broker, topics)}, Duration::from_secs(1), 5).await {
                 Ok(meta) => {
                     self.update_brokers_map(&meta);
                     return Ok(meta)
                 },
                 Err(e) => {
                     tracing::event!(tracing::Level::ERROR, "Error fetching topic meta: {}", e);
-                    info!("Error fetching topic meta: {}", e)
+                    info!("Error fetching topic meta1: {}", e)
                 },
             }
         }
 
         for addr in &self.bootstrap {
-            match Broker::connect(addr.clone()).await {
-                Ok(broker) => match fetch_topic_with_broker_and_retry(&broker, topics).await {
+            match repeat(|| Broker::connect(addr.clone()), Duration::from_secs(1), 10).await {
+                Ok(broker) => match repeat(|| fetch_topic_with_broker_and_retry(&broker, topics), Duration::from_secs(1), 5).await {
                     Ok(meta) => {
                         self.update_brokers_map(&meta);
                         return Ok(meta)
                     },
-                    Err(e) => info!("Error fetching topic meta: {}", e),
+                    Err(e) => info!("Error fetching topic meta2: {:#}", e),
                 }
-                Err(e) => info!("Error fetching topic meta: {}", e),
+                Err(e) => info!("Error fetching topic meta3: {:#}", e),
             }
         }
 
-        Err(KafkaError::NoBrokerAvailable.into())
+        Err(KafkaError::NoBrokerAvailable("Failed to find broker to fetch topics metadata".to_owned()).into())
 
         /*
 
@@ -163,7 +167,7 @@ impl Cluster {
                     debug!("broker_get_or_connect: broker_id={}, connected to {}", broker_id, addr);
                     Ok(entry.insert(broker))
                 } else {
-                    Err(KafkaError::NoBrokerAvailable)?
+                    Err(KafkaError::NoBrokerAvailable(format!("Failed to find broker for broker_id: {}", broker_id)))?
                 }
             }
         }
@@ -210,7 +214,7 @@ impl Cluster {
         }
 
 
-        Err(KafkaError::NoBrokerAvailable)?
+        Err(KafkaError::NoBrokerAvailable("Can not find broker to send request".to_owned()))?
     }
 }
 
@@ -247,6 +251,8 @@ async fn fetch_topic_with_broker_and_retry(broker: &Broker, topics: &[&str]) -> 
         }
     }*/
 }
+
+
 
 /*
 #[cfg(test)]

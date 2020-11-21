@@ -16,7 +16,7 @@ use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use crate::protocol::ErrorCode;
 use crate::error::KafkaError;
-use anyhow::{Result, Context};
+use anyhow::Result;
 use std::convert::TryInto;
 use std::fmt;
 
@@ -173,20 +173,36 @@ impl Debug for Producer {
 }
 
 impl Producer {
+    /// Synchronously resolve bootstrap servers DNS addresses and start background worker process
+    /// to connect and flush data buffer periodically.
+    /// Note, that actual connection to the broker is not happenings until first message is sent.
+    /// Default MURMUR2 hasher is used (the same as Java).
     #[instrument(level = "debug")]
-    pub fn connect(seed: &str) -> Result<(Self, Receiver<Response>)> {
+    pub fn new(seed: &str) -> Result<(Self, Receiver<Response>), KafkaError> {
         Producer::with_hasher(seed, Box::new(Murmur2Partitioner{}))
     }
+
+    // pub async fn connect(&mut self, topics: &[&str]) -> Result<()> {
+    //
+    //     let missing: Vec<_> = topics.iter().filter(|t| !self.topics_meta.contains_key(t)).collect();
+    //     if missing.is_empty() {
+    //         return Ok(());
+    //     }
+    //
+    //     self.cluster.
+    //
+    //     Ok(())
+    // }
 }
 
 impl Producer {
     #[instrument(level = "debug", skip(partitioner))]
-    pub fn with_hasher(seed: &str, partitioner: Box<dyn Partitioner>) -> Result<(Self,Receiver<Response>)> {
-        let seed_list = utils::to_bootstrap_addr(seed);
+    pub fn with_hasher(seed: &str, partitioner: Box<dyn Partitioner>) -> Result<(Self,Receiver<Response>), KafkaError> {
+        let seed_list = utils::resolve_addr(seed);
         if seed_list.len() == 0 {
-            return Err(KafkaError::NoBrokerAvailable).context(format!("Failed to resolve seed servers: '{}'", seed));
+            return Err(KafkaError::NoBrokerAvailable(format!("No address can be resolved: {}", seed)));
         }
-        let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::new(seed_list).context("Producer: new")?));
+        let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::new(seed_list)));
         let cluster2 = cluster.clone();
         let (mut ack_tx, ack_rx) = tokio::sync::mpsc::channel(1000);
         let mut ack_tx2 = ack_tx.clone();
@@ -355,7 +371,7 @@ impl Producer {
         }
     }
 
-    pub async fn close(mut self) -> Result<()> {
+    pub async fn close(self) -> Result<()> {
         debug!("Closing producer...");
         self.buffer_commands.send(BuffCmd::FlushAndClose).await?;
         debug!("Sent BuffCmd::FlushAndClose, waiting for loop exit");
@@ -611,7 +627,7 @@ enum BufferingResult {
     Overflow,
 }
 
-enum TimestampType {
+pub enum TimestampType {
     Create = 0,
     LogAppend = 1,
 }

@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
         ("list", Some(list)) => {
             let mut cluster = Cluster::with_bootstrap(bootstrap)?;
             // TODO: check for errors
-            let meta = cluster.fetch_topic_meta(&vec![]).await?;
+            let meta = cluster.fetch_topic_meta(&[]).await?;
             match list.subcommand() {
                 ("topics", Some(_matches)) => {
                     let topics = meta.topics.iter().map(|t| t.topic.to_string());

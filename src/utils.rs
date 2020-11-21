@@ -9,7 +9,7 @@ use std::net::{SocketAddr, IpAddr, ToSocketAddrs};
 /// let bootstrap = "127.0.0.1,192.169.1.1, 192.169.1.2, , 192.169.1.3:9099 localhost:1 www.ibm.com";
 /// let result = bootstrap.to_bootstrap_addr()?;
 /// ```
-pub (crate) fn to_bootstrap_addr(addr: &str) -> Vec<SocketAddr> {
+pub (crate) fn resolve_addr(addr: &str) -> Vec<SocketAddr> {
     addr.split(|c| c == ',' || c == ' ').
         filter(|a| a.len() != 0).
         flat_map(|addr: &str| {
