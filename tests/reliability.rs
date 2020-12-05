@@ -1,13 +1,16 @@
-use kafka4rust::{Producer, KafkaError, Consumer};
+use kafka4rust::{Producer, KafkaError, Consumer, FixedPartitioner};
 use rand;
 use rand::seq::IteratorRandom;
 use std::iter::FromIterator;
 use std::matches;
-use futures::StreamExt;
+use futures::stream::{self, StreamExt};
 use simple_logger;
-use log::LevelFilter;
+use log::{debug, info, LevelFilter};
 use std::thread::sleep;
 use std::time::Duration;
+use std::collections::HashSet;
+use kafka4rust::admin;
+use anyhow::Result;
 
 mod docker;
 
@@ -42,7 +45,8 @@ async fn one_valid_address_connect() {
 #[tokio::test]
 async fn producer_creates_topic() {
     init_log();
-    let _d = docker::Docker::up();
+    info!("Starting test");
+    let _d = docker::up();
     let topic = format!("test_topic_{}", random_string(5));
     let (mut p,rx) = Producer::new("localhost").unwrap();
     for i in &[1,2,3,4,5] {
@@ -52,22 +56,54 @@ async fn producer_creates_topic() {
     p.close().await;
 
     let mut consumer = Consumer::builder().bootstrap("localhost").topic(topic).build().await.unwrap();
-    let messages = consumer.recv().await.unwrap();
-    println!("res: {:?}", messages.messages);
-
+    let res: Vec<_> = consumer.flat_map(|batch| stream::iter(batch.messages))
+        .map(|msg| String::from_utf8(msg.value).unwrap())
+        .take(5).collect().await;
+    //let messages = consumer.recv().await.unwrap();
+    println!("res: {:?}", res);
+    assert_eq!(
+        (1..=5).map(|n| format!("msg-{}", n)).collect::<HashSet<_>>(),
+        HashSet::from_iter(res.into_iter())
+    );
 }
 
 /*
 Mutithreading save
  */
 
-/*
-        // if leader goes down, messages keep being accepted
-        // and are committed (can be read) within (5sec?)
-        // Also, order of messages is preserved
-        [Test]
-        public async Task LeaderDownProducerAndConsumerRecovery()
- */
+// if leader goes down, messages keep being accepted
+// and are committed (can be read) within (5sec?)
+// Also, order of messages is preserved
+#[tokio::test]
+async fn leader_down_producer_and_consumer_recovery() {
+    init_log();
+    info!("Starting leader_down_producer_and_consumer_recovery()");
+    let _d = docker::up();
+    let topic = format!("test_topic_{}", random_string(5));
+    let (mut p,rx) = Producer::with_hasher("localhost", Box::new(FixedPartitioner{0: 0_u32})).unwrap();
+    for i in 1..10 {
+        if i == 5 {
+            let meta = admin::get_topic_metadata("localhost", &topic).await.unwrap();
+            //debug!("Got metadata: {:#?}", meta);
+            let leader = meta.topics[0].partition_metadata[0].leader;
+            let leader = &meta.brokers.iter().find(|b| b.node_id == leader).unwrap();
+            debug!("Sending {}", i);
+            docker::hard_kill_kafka(leader.port);
+        }
+        let msg = format!("msg-{}", i);
+        p.send(msg, &topic).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // let mut consumer = Consumer::builder().bootstrap("localhost").topic(topic).build().await.unwrap();
+    // let res: Vec<_> = consumer.flat_map(|batch| stream::iter(batch.messages))
+    //     .map(|msg| String::from_utf8(msg.value).unwrap())
+    //     .take(50).collect().await;
+
+    p.close().await;
+}
+
+// Timeout if no service
 
 /*
 ListenerOnNonExistentTopicWaitsForTopicCreation
@@ -262,5 +298,5 @@ JavaCanReadCompressedMessages
 
 
 fn init_log() {
-    simple_logger::SimpleLogger::default().with_level(LevelFilter::Trace).init();
+    simple_logger::SimpleLogger::default().with_level(LevelFilter::Debug).init();
 }

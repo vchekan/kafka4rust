@@ -19,6 +19,7 @@ use crate::error::KafkaError;
 use anyhow::Result;
 use std::convert::TryInto;
 use std::fmt;
+use tracing::field::debug;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -139,6 +140,14 @@ pub struct Murmur2Partitioner {}
 impl Partitioner for Murmur2Partitioner {
     fn partition(&self, key: &[u8]) -> u32 {
         murmur2a::hash32(key)
+    }
+}
+
+#[derive(Debug)]
+pub struct FixedPartitioner(pub u32);
+impl Partitioner for FixedPartitioner {
+    fn partition(&self, _key: &[u8]) -> u32 {
+        self.0
     }
 }
 
@@ -351,6 +360,7 @@ impl Producer {
             if topic_metadata.partition_metadata.iter().all(|m| m.error_code == ErrorCode::None) {
                 let mut partition_leader_map: Vec<i32> = vec![-1; topic_metadata.partition_metadata.len()];
                 for partition_meta in &topic_metadata.partition_metadata {
+                    // TODO: got exception once: index 5 is out of range of 5. How come? Switch to map?
                     partition_leader_map[partition_meta.partition as usize] = partition_meta.leader;
                 }
                 assert!(partition_leader_map.iter().all(|l| *l != -1));

@@ -15,10 +15,13 @@ mod consumer;
 mod murmur2a;
 mod futures;
 
+pub mod admin;
+
 #[macro_use]
 extern crate log;
 
 pub use self::consumer::{Consumer, ConsumerConfig};
-pub use self::producer::{Producer, Response, BinMessage, StringMessage};
+pub use self::producer::{Producer, Response, BinMessage, StringMessage, FixedPartitioner};
 pub use self::error::KafkaError;
 pub use self::cluster::Cluster;
+
