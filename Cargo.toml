@@ -19,12 +19,12 @@ anyhow = "1.0"
 thiserror = "1.0"
 
 futures = "0.3.1"
-async-std = { version = "1.5.0", features = ["unstable"] }
-tokio = { version = "0.3.0", features = ["full"] }
+async-std = { version = "1.7.0", features = ["unstable"] }
+tokio = { version = "1.0", features = ["full"] }
 
-bytes = "0.4.12"
-byteorder = "1.3.2"
-crc32c = "0.4.0"
+bytes = "0.4"
+byteorder = "1.3"
+crc32c = "0.5"
 
 log =  "0.4.8"
 simple_logger = "1.6.0"
@@ -44,9 +44,10 @@ rand = "0.7.3"
 
 # CLI
 clap = "2.33"
-regex = "1.3"
-tui = { version = "0.8", default-features = false, features = ['crossterm'] }
-crossterm = {version = "0.17", features = ['event-stream'] }
+regex = "1.4"
+tui = {git = "https://github.com/vchekan/tui-rs", branch="table-render-fix", default-features = false, features = ['crossterm']}
+#{ version = "0.13", default-features = false, features = ['crossterm'] }
+crossterm = {version = "0.18", features = ['event-stream'] }
 
 [dev-dependencies]
 criterion = "0.3"
