@@ -1,13 +1,7 @@
 use std::io::{stdout, Write};
 use anyhow::Result;
 use kafka4rust::{protocol, Cluster};
-use tui::{
-    self,
-    widgets::{Widget, Block, Borders, SelectableList, Text, Paragraph, Row, Table},
-    layout::{Layout, Constraint, Direction},
-    style::{Style, Color},
-    backend::{CrosstermBackend},
-};
+use tui::{self, widgets::{Widget, Block, Borders, List, Paragraph, Row, Table}, layout::{Layout, Constraint, Direction}, style::{Style, Color}, backend::{CrosstermBackend}, Frame};
 use crossterm::{self, execute, 
     terminal::{enable_raw_mode, disable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     event::{Event, KeyEvent, KeyCode, EventStream}};
@@ -18,6 +12,12 @@ use std::collections::HashMap;
 use std::iter::FromIterator;
 use tracing;
 use tracing_futures::Instrument;
+use tui::text::{Text, Span, Spans};
+use tui::widgets::{ListItem, Wrap, ListState, BorderType, Cell};
+use tui::layout::Rect;
+use tui::style::Modifier;
+use kafka4rust::protocol::Broker;
+use std::fmt::{Display, Formatter};
 
 enum Page {
     Brokers,
@@ -33,6 +33,24 @@ enum Page {
 enum Cmd {
     TopicMeta(protocol::MetadataResponse0),
     Offsets(protocol::ListOffsetsResponse0),
+    ConnState(ConnState),
+}
+
+impl Display for Cmd {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Cmd::TopicMeta(_) => f.write_str("TopicMeta"),
+            Cmd::Offsets(_) => f.write_str("Offsets"),
+            Cmd::ConnState(s) => f.write_fmt(format_args!("ConnState({:?})", s)),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ConnState {
+    Connecting,
+    Connected,
+    Disconnected,
 }
 
 struct State {
@@ -41,6 +59,21 @@ struct State {
     master_selected: usize,
     topics: Vec<String>,
     partitions: HashMap<String,Vec<PartitionRecord>>,
+    brokers: Vec<Broker>,
+    conn_state: ConnState,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        State {
+            page: Page::Topics,
+            master_selected: 0,
+            topics: vec![],
+            partitions: HashMap::new(),
+            brokers: vec![],
+            conn_state: ConnState::Disconnected,
+        }
+    }
 }
 
 struct PartitionRecord {
@@ -59,7 +92,6 @@ impl Drop for TerminalRawModeGuard {
     fn drop(&mut self) {
         // Do not check result because might be called from panic
         let _ = disable_raw_mode();
-        println!("Dropped");
     }
 }
 
@@ -71,134 +103,177 @@ pub async fn main_ui(bootstrap: &str) -> Result<()> {
     let _terminal_guard = TerminalRawModeGuard {};
 
     let mut stdout = stdout();
+
+    // Capture current screen to be restored upon exit
     execute!(stdout, EnterAlternateScreen)?;
+
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     terminal.hide_cursor()?;
     terminal.clear()?;
 
     let bootstrap = bootstrap.to_string();
+    // kafka client runs in tokio future and communicates with UI main thread via channel
     let (mut tx, rx) = tokio::sync::mpsc::channel(2);
     tokio::spawn(async move {
-        tracing::event!(tracing::Level::DEBUG, "Connecting to {}", bootstrap);
+        tracing::event!(tracing::Level::DEBUG, %bootstrap, "Connecting");
+        tx.send(Cmd::ConnState(ConnState::Connecting));
         let mut cluster = Cluster::with_bootstrap(&bootstrap)?;
         let topics_meta = cluster.fetch_topic_meta(&vec![]).await?;
+        tracing::debug_span!("Connected");
+        tx.send(Cmd::ConnState(ConnState::Connected));
         let topics: Vec<_> = topics_meta.topics.iter().map(|t| (t.topic.as_str(), t.partition_metadata.len() as u32)).collect();
         let offsets = crate::get_offsets(&cluster, &topics).await.unwrap();
+        tracing::debug_span!("Sending topic meta");
         tx.send(Cmd::TopicMeta(topics_meta)).await?;
         tx.send(Cmd::Offsets(offsets)).await?;
 
         Ok::<_,anyhow::Error>(())
-    }.inspect_err(|e| {
+    }.instrument(tracing::debug_span!("kafka client loop"))
+    .inspect_err(|e| {
         panic!("Error in kafka loop: {}", e);
-    })).instrument(tracing::debug_span!("UI eval loop"));
+    }));
 
-    let state = State {
-        page: Page::Topics,
-        master_selected: 0,
-        topics: vec![],
-        partitions: HashMap::new(),
-    };
-    eval_loop(&mut terminal, state, rx).await?;
-
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    // Start eval loop
+    eval_loop(&mut terminal, State::default(), rx).await?;
 
     // Cleanup
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
     disable_raw_mode()?;
 
     Ok(())
 }
 
 fn draw(terminal: &mut Terminal, state: &State) -> Result<()> {
-    match state.page {
-        Page::Topics => draw_topics(terminal, state),
-        Page::Brokers => draw_brokers(terminal, state),
-    }
-}
-
-fn draw_topics(terminal: &mut Terminal, state: &State) -> Result<()> {
-    terminal.draw(|mut f| {
-        // top/status
-        let chunks = Layout::default()
+    terminal.draw(|frame| {
+        let main_and_status = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(4),
+                Constraint::Min(8),
                 Constraint::Length(1),
             ].as_ref())
-            .split(f.size());
-        let (top, status) = (chunks[0], chunks[1]);
-        
-        let chunks = Layout::default()
+            .split(frame.size());
+        let (main_area, status_area) = (main_and_status[0], main_and_status[1]);
+
+        let status_text = match state.conn_state {
+            ConnState::Disconnected => Span::styled("X", Style::default().fg(Color::Red)),
+            ConnState::Connecting => Span::styled("-", Style::default().fg(Color::LightYellow)),
+            ConnState::Connected => Span::styled("|", Style::default().fg(Color::LightGreen)),
+        };
+
+        // status line
+        let status_style = Style::default().bg(Color::LightBlue);
+        let status_line = Paragraph::new(Spans(vec![
+            Span::from(" 1"), Span::styled("Help", status_style),
+            Span::from(" 3"), Span::styled("Log", status_style),
+            Span::from(" 4"), Span::styled("Brokers", status_style),
+            Span::from(" 8"), Span::styled("Delete", status_style),
+            Span::from(" 10"), Span::styled("Quit", status_style),
+            Span::from(" "), status_text
+        ]));
+        frame.render_widget(status_line, status_area);
+
+        match state.page {
+            Page::Topics => draw_topics(frame, main_area, state),
+            Page::Brokers => draw_brokers(frame, main_area, state),
+        };
+    })?;
+
+    Ok(())
+}
+
+fn draw_topics<T: tui::backend::Backend>(frame: &mut Frame<T>, area: Rect, state: &State) -> Result<()> {
+        //
+        // -main_frame--------------------------
+        // |     master_box        | detail_box|
+        // |                       |           |
+        // -------------------------------------
+        // ......status_frame...................
+        //
+
+        let master_and_detail = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Min(10),
-                Constraint::Max(50)
+                Constraint::Min(30),
+                Constraint::Length(50)
             ].as_ref())
-            .split(top);
-        let (master_box, detail_box) = (chunks[0], chunks[1]);
+            .split(area);
+        let (master_box, detail_box) = (master_and_detail[0], master_and_detail[1]);
 
-        //let topics: Vec<&str> = state.topics.map(|meta| meta.topics.iter().map(|t| t.topic.as_str()).collect()).unwrap_or(vec![]);
-        SelectableList::default()
-            .items(&state.topics)
-            .select(Some(state.master_selected))
+        let topics: Vec<ListItem> = state.topics.iter().map(|t| ListItem::new(t.as_str())).collect();
+        let mut topic_state = ListState::default();
+        topic_state.select(Some(state.master_selected));
+        let topics = List::new(topics)
+            //.select(Some(state.master_selected))
             .highlight_symbol(">")
             .highlight_style(Style::default().fg(Color::Yellow))
-            .block(Block::default()
-                .title("Topics")
-                .borders(Borders::ALL))
-            .render(&mut f, master_box);
+            .block(Block::default().title("Topics").borders(Borders::ALL));
+            //.render(&mut f, master_box);
+        frame.render_stateful_widget(topics, master_box, &mut topic_state);
 
         let empty = vec![];
         let partitions = state.topics.get(state.master_selected)
             .and_then(|t| state.partitions.get(t))
             .unwrap_or(&empty);
 
-        Table::new(
-                ["#", "First", "Last"/*, "Size"*/].iter(),
+        let table = Table::new(
+                // Row::new(vec!["#", "First", "Last"/*, "Size"*/])
                 partitions.into_iter().map(|row| {
-                    Row::StyledData(vec![
+                    Row::new(vec![
                         format!("{}", row.partition),
                         format!("{}", row.first),
                         format!("{}", row.last),
-                    ].into_iter(), Style::default())
+                    ])
                 })
             )
             .widths(&[Constraint::Length(10), Constraint::Length(10), Constraint::Length(10)])
-            .block(Block::default()
-            .title("Partitions")
-            .borders(Borders::ALL))
-            .header_style(Style::default().fg(Color::Yellow))
-            .column_spacing(1)
-            .render(&mut f, detail_box);
+            .block(Block::default().title("Partitions").borders(Borders::ALL))
+            // .header_style(Style::default().fg(Color::Yellow))
+            .column_spacing(1);
+            //.render(&mut f, detail_box);
+        frame.render_widget(table, detail_box);
 
-        // status line
-        Paragraph::new([
-            Text::raw(" 1"), Text::styled("Help", Style::default().bg(Color::LightBlue)), 
-            Text::raw(" 3"), Text::styled("Brokers", Style::default().bg(Color::LightBlue)), 
-            Text::raw(" 8"), Text::styled("Delete", Style::default().bg(Color::LightBlue)),
-            Text::raw(" 10"), Text::styled("Quit", Style::default().bg(Color::LightBlue)),
-        ].iter()).wrap(true).render(&mut f, status);
-        
-    })?;
     Ok(())
 }
 
-fn draw_brokers(_terminal: &mut Terminal, _state: &State) -> Result<()> {
-    unimplemented!()
+fn draw_brokers<B: tui::backend::Backend>(frame: &mut Frame<B>, area: Rect, _state: &State) -> Result<()> {
+    let table = Table::new(
+        _state.brokers.iter().map(|b| Row::new(vec![
+            Cell::from(format!("{}:{}", b.host, b.port)),
+            Cell::from(b.node_id.to_string()),
+            Cell::from("")
+        ]))
+    )
+        .header(Row::new(vec!["Host", "Id", "Parts prim/repl"]))
+        .block(Block::default().title("Brokers").borders(Borders::ALL));
+
+    frame.render_widget(table, area);
+
+    Ok(())
 }
 
-async fn eval_loop(term: &mut Terminal, mut state: State, mut commands: tokio::sync::mpsc::Receiver<Cmd>) -> Result<()> {
+async fn eval_loop(term: &mut Terminal, mut state: State, mut kafka_commands: tokio::sync::mpsc::Receiver<Cmd>) -> Result<()> {
     // Show initial state
     draw(term, &state)?;
     let mut term_events = EventStream::new();
 
+    // Await for 2 event sources: kafka events and keyboard events
     loop {
         tokio::select! {
-            cmd = commands.recv() => {
+            cmd = kafka_commands.recv() => {
                 match cmd {
-                    Some(Cmd::TopicMeta(topics)) => {
-                        state.topics = topics.topics.iter().map(|t| t.topic.clone()).collect();
+                    Some(ref cmd) => tracing::debug_span!("eval_loop: got kafka command", %cmd),
+                    None => tracing::debug_span!("eval_loop: got kafka command 'None'"),
+                };
+
+                match cmd {
+                    // Changes in the list of topics
+                    Some(Cmd::TopicMeta(topics_meta)) => {
+                        state.topics = topics_meta.topics.iter().map(|t| t.topic.clone()).collect();
+                        state.brokers = topics_meta.brokers;
+                        tracing::debug_span!("Got Cmd::TopicMeta", "topics" = state.topics.join(",").as_str());
                     }
+                    // Changes in offsets
                     Some(Cmd::Offsets(offsets)) => {
                         state.partitions = HashMap::from_iter(offsets.responses.into_iter().map(|r| (
                             r.topic,
@@ -208,6 +283,9 @@ async fn eval_loop(term: &mut Terminal, mut state: State, mut commands: tokio::s
                                 last: *p.offsets.get(0).unwrap_or(&0),
                             }).collect()
                         )));
+                    }
+                    Some(Cmd::ConnState(conn_state)) => {
+                        state.conn_state = conn_state;
                     }
                     None => {
                         //break
@@ -220,7 +298,8 @@ async fn eval_loop(term: &mut Terminal, mut state: State, mut commands: tokio::s
                 match key_event {
                     Some(Ok(Event::Key(KeyEvent{code, modifiers: _}))) => {
                         match code {
-                            KeyCode::Char('q') => break,
+                            KeyCode::Char('q') | KeyCode::F(10) => break,
+                            KeyCode::F(3) => state.page = Page::Brokers,
                             KeyCode::Down => {
                                 let len = state.topics.len();
                                 if len == 0 { continue }

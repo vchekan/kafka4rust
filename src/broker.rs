@@ -10,6 +10,7 @@ use anyhow::{Result, Context};
 use std::fmt::Debug;
 use tracing_attributes::instrument;
 use anyhow::anyhow;
+use tracing_futures::Instrument;
 
 // TODO: if move negotiated api and correlation to broker connection, this struct degenerates.
 // Is it redundant?

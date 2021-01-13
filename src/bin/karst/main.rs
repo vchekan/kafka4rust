@@ -1,3 +1,5 @@
+#![feature(iterator_fold_self)]
+
 mod ui;
 
 use clap::{Arg, App, SubCommand, ArgMatches};
@@ -6,6 +8,7 @@ use std::process::exit;
 use kafka4rust::{
     Cluster,
     protocol,
+    Producer
 };
 use tracing::{dispatcher};
 use opentelemetry::{sdk, global};
@@ -14,6 +17,7 @@ use opentelemetry::api::trace::provider::Provider;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing;
 use anyhow::Result;
+use itertools::Itertools;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,6 +27,12 @@ async fn main() -> Result<()> {
 
     let cli = parse_cli();
     let bootstrap = cli.value_of("bootstrap").expect("Bootstrap is required");
+
+    let v = vec![1,2,3];
+    let mut vi = v.iter();
+    v.iter().fold(vi.next().cloned(), |a, i| a.map(|a| a + i));
+
+    vec![1,2,3].iter().cloned().fold_first(|a, b| a + b);
 
     match cli.subcommand() {
         ("list", Some(list)) => {
@@ -43,6 +53,20 @@ async fn main() -> Result<()> {
                     exit(1);
                 }
             }    
+        }
+        ("publish", Some(args)) => {
+            let key = args.value_of("key");
+            let topic = args.value_of("topic").unwrap();
+            let single_message = args.value_of("single-message");
+            let val = args.value_of("MSG-VALUE").expect("Message value is not provided");
+            let (mut producer, acks) = Producer::new(bootstrap).expect("Failed to create publisher");
+            if let Some(key) = key {
+                let msg = (key.to_string(), val.to_string());
+                producer.send(msg, topic).await?;
+            } else {
+                producer.send(val.to_string(), topic).await?;
+            }
+            producer.close().await?;
         }
         ("ui", Some(_)) => {
             ui::main_ui(bootstrap).await?;
@@ -67,11 +91,9 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
         takes_value(true)
     ).subcommand(SubCommand::with_name("ui")
         .about("start terminal UI")
-    ).subcommand(SubCommand::with_name("webui")
-        .about("start web UI")
     ).subcommand(
         SubCommand::with_name("list")
-        .about("list items").
+        .about("list items (topics, brokers, partitions)").
         subcommand(SubCommand::with_name("topics").
             about("List topics").
             arg(
@@ -90,6 +112,39 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
         ).subcommand(SubCommand::with_name("brokers").
             about("list brokers (from metadata, not from seeds)")
         )
+    ).subcommand(
+        SubCommand::with_name("publish")
+            .about("Publish message")
+            // .arg_from_usage("-k --key=<KEY> 'publish message with given key'")
+            .arg(Arg::with_name("key")
+                .takes_value(true)
+                .short("k")
+                .long("key")
+                .help("publish message with given key")
+            ).arg(
+                Arg::with_name("topic")
+                    .short("t")
+                    .long("topic")
+                    .help("topic")
+                    .required(true)
+                    .takes_value(true)
+            ).arg(
+                    Arg::with_name("single-message")
+                        .short("s")
+                        .long("single-message")
+                        .help("Interpret input file as a single message or as a message per line")
+            ).arg(Arg::with_name("file")
+                .short("f")
+                .long("file")
+                .help("Read values from file. By default, one message per line, but can change with --single-message")
+                .takes_value(true)
+            ).arg(
+                Arg::with_name("MSG-VALUE")
+                    .conflicts_with("from-file")
+                    .index(1)
+            )
+            // .arg_from_usage("-f --from-file=<FILE> 'file as a value (one message per line by default)'")
+            // TODO: timeout
     ).get_matches()
 }
 

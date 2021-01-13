@@ -21,7 +21,6 @@
 
 use byteorder::BigEndian;
 use bytes::{ByteOrder, BytesMut};
-use std::io;
 use std::net::{SocketAddr};
 
 use async_std::net::TcpStream;
@@ -29,6 +28,7 @@ use async_std::prelude::*;
 use async_std::sync::Mutex;
 use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
+use tracing_attributes::instrument;
 
 pub(crate) const CLIENT_ID: &str = "k4rs";
 
@@ -61,6 +61,7 @@ impl BrokerConnection {
         Ok(conn)
     }
 
+    #[instrument(level="debug", err, skip(self, buf))]
     pub async fn request(&self, buf: &mut BytesMut) -> Result<()> {
         let mut inner = self.inner.lock().await;
         let tcp = &mut inner.tcp;
