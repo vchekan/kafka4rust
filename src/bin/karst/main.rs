@@ -3,7 +3,6 @@
 mod ui;
 
 use clap::{Arg, App, SubCommand, ArgMatches};
-use kafka4rust;
 use std::process::exit;
 use kafka4rust::{
     Cluster,
@@ -15,9 +14,7 @@ use opentelemetry::{sdk, global};
 use tracing_subscriber::Registry;
 use opentelemetry::api::trace::provider::Provider;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing;
 use anyhow::Result;
-use itertools::Itertools;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -57,9 +54,9 @@ async fn main() -> Result<()> {
         ("publish", Some(args)) => {
             let key = args.value_of("key");
             let topic = args.value_of("topic").unwrap();
-            let single_message = args.value_of("single-message");
+            let _single_message = args.value_of("single-message");
             let val = args.value_of("MSG-VALUE").expect("Message value is not provided");
-            let (mut producer, acks) = Producer::new(bootstrap).expect("Failed to create publisher");
+            let (mut producer, _acks) = Producer::new(bootstrap).expect("Failed to create publisher");
             if let Some(key) = key {
                 let msg = (key.to_string(), val.to_string());
                 producer.send(msg, topic).await?;

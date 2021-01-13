@@ -34,7 +34,7 @@ pub fn put_zigzag64(mut n: u64, buf: &mut [u8]) -> &[u8] {
         i += 1;
     }
     buf[i - 1] &= 0b0111_1111;
-    return &buf[..i];
+    &buf[..i]
 }
 
 pub fn get_zigzag64(buf: &mut impl Buf) -> i64 {

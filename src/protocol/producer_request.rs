@@ -117,7 +117,7 @@ impl ProduceRequest3<'_> {
                 // TODO: if timestamp is client generated, it is possible it will be negative.
                 //  Should we find min or encode signed i64?
                 // TODO: take into account, is timestamp client or log type.
-                let first_timestamp = recordset1.first().or(recordset2.first()).
+                let first_timestamp = recordset1.first().or_else(|| recordset2.first()).
                     expect("Empty recordset").timestamp;
                 buf.put_u64_be(first_timestamp);
                 // TODO: max timestamp

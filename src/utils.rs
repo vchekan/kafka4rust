@@ -11,7 +11,7 @@ use std::net::{SocketAddr, IpAddr, ToSocketAddrs};
 /// ```
 pub (crate) fn resolve_addr(addr: &str) -> Vec<SocketAddr> {
     addr.split(|c| c == ',' || c == ' ').
-        filter(|a| a.len() != 0).
+        filter(|a| !a.is_empty()).
         flat_map(|addr: &str| {
             if let Ok(addr) = addr.parse::<IpAddr>() {
                 return vec![SocketAddr::new(addr, 9092)];

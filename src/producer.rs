@@ -19,7 +19,6 @@ use crate::error::KafkaError;
 use anyhow::Result;
 use std::convert::TryInto;
 use std::fmt;
-use tracing::field::debug;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -208,12 +207,12 @@ impl Producer {
     #[instrument(level = "debug", skip(partitioner))]
     pub fn with_hasher(seed: &str, partitioner: Box<dyn Partitioner>) -> Result<(Self,Receiver<Response>), KafkaError> {
         let seed_list = utils::resolve_addr(seed);
-        if seed_list.len() == 0 {
+        if seed_list.is_empty() {
             return Err(KafkaError::NoBrokerAvailable(format!("No address can be resolved: {}", seed)));
         }
         let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::new(seed_list)));
         let cluster2 = cluster.clone();
-        let (mut ack_tx, ack_rx) = tokio::sync::mpsc::channel(1000);
+        let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(1000);
         let mut ack_tx2 = ack_tx.clone();
         let (buff_tx, buff_rx) = channel::<BuffCmd>(2);
 
@@ -276,14 +275,14 @@ impl Producer {
     pub async fn send<M: ToMessage + 'static>(&mut self, msg: M, topic: &str) -> Result<()> {
         let mut buffer = self.buffer.lock().await;
         // TODO: share metadata cache between self and Buffer
-        let meta = Self::get_or_request_meta(&mut self.cluster, &mut self.topics_meta, &mut buffer.meta_cache, topic).await?;
+        let meta = Self::get_or_request_meta(&self.cluster, &mut self.topics_meta, &mut buffer.meta_cache, topic).await?;
         assert_eq!(1, meta.protocol_metadata.topics.len());
         assert_eq!(topic, meta.protocol_metadata.topics[0].topic);
         let topic_meta = meta.protocol_metadata.topics.get(0).expect("Expect exacly 1 topic configured");
 
         let partitions_count = topic_meta.partition_metadata.len() as u32;
         let partition = match msg.key() {
-            Some(key) if key.len() > 0 => self.partitioner.partition(&key),
+            Some(key) if !key.is_empty() => self.partitioner.partition(&key),
             _ => {
                 meta.null_key_partition_counter += 1;
                 meta.null_key_partition_counter
@@ -342,7 +341,7 @@ impl Producer {
         // and await only for failed ones?
         loop {
             debug!("Fetching topic meta from server");
-            let meta = cluster.write().await.fetch_topic_meta(&vec![topic]).await?;
+            let meta = cluster.write().await.fetch_topic_meta(&[topic]).await?;
             let meta = ProducerTopicMetadata { protocol_metadata: meta, null_key_partition_counter: random() };
             let topic_metadata = &meta.protocol_metadata.topics[0];
 
@@ -484,7 +483,7 @@ impl Buffer {
             };
 
             let broker = Cluster::broker_get_or_connect(cluster, leader).await
-                .expect(format!("Can not find broker_id {}", leader).as_str());
+                .unwrap_or_else(|_| panic!(format!("Can not find broker_id {}", leader)));
             let cmd_buf = broker.mk_request(request);
             debug!("Sending Produce");
             let res = broker.send_request2::<protocol::ProduceResponse3>(cmd_buf).await?;
@@ -509,7 +508,7 @@ impl Buffer {
                             error: partition_resp.error_code,
                         }
                     };
-                    if let Err(_) = acks.send(ack).await {
+                    if acks.send(ack).await.is_err() {
                         info!("Application closed channel. Exiting receiving loop");
                         break;
                     }
@@ -545,9 +544,9 @@ impl Buffer {
         >::new();
 
         for (topic, partitioned_queue) in &mut self.topic_queues {
-            for (partition, queue) in partitioned_queue.into_iter().enumerate()
+            for (partition, queue) in partitioned_queue.iter_mut().enumerate()
                 // Only non-empty queues
-                .filter(|(_, q)| q.queue.len() > 0) {
+                .filter(|(_, q)| !q.queue.is_empty()) {
                 let partition = partition as u32;
                 let leader = self.meta_cache.
                     get(topic).expect("Topic metadata is expected").
@@ -555,9 +554,9 @@ impl Buffer {
                 // TODO: limit message size
                 queue.sending = queue.queue.len().try_into().unwrap();
 
-                let topics = broker_partitioned.entry(*leader).or_insert_with(|| HashMap::new());
+                let topics = broker_partitioned.entry(*leader).or_insert_with(HashMap::new);
                 // TODO use raw entries
-                let partitions = topics.entry(topic).or_insert_with(|| HashMap::new());
+                let partitions = topics.entry(topic).or_insert_with(HashMap::new);
                 partitions.insert(partition, queue.queue.as_slices());
             }
         }

@@ -37,9 +37,7 @@ use std::collections::hash_map::Entry::{Occupied, Vacant};
 use crate::futures::repeat;
 use tracing_attributes::instrument;
 use anyhow::Result;
-use std::future::Future;
 use tokio::time::Duration;
-use tracing_futures::Instrument;
 
 #[derive(Debug)]
 pub struct Cluster {
@@ -78,14 +76,12 @@ impl Cluster {
         debug!("Connected to {:?}", broker);
         */
 
-        let cluster = Cluster {
+        Cluster {
             bootstrap,
             //seed_broker: broker,
             broker_id_map: HashMap::new(),
             broker_addr_map: HashMap::new(),
-        };
-
-        cluster
+        }
     }
 
     /// Connect to known or seed broker and get topic metadata.
@@ -108,7 +104,7 @@ impl Cluster {
         }
 
         for addr in &self.bootstrap {
-            match repeat(|| Broker::connect(addr.clone()), Duration::from_secs(1), 10).await {
+            match repeat(|| Broker::connect(*addr), Duration::from_secs(1), 10).await {
                 Ok(broker) => match repeat(|| fetch_topic_with_broker_and_retry(&broker, topics), Duration::from_secs(1), 5).await {
                     Ok(meta) => {
                         self.update_brokers_map(&meta);
@@ -120,7 +116,7 @@ impl Cluster {
             }
         }
 
-        Err(KafkaError::NoBrokerAvailable("Failed to find broker to fetch topics metadata".to_owned()).into())
+        Err(KafkaError::NoBrokerAvailable("Failed to find broker to fetch topics metadata".to_owned()))
 
         /*
 
@@ -163,11 +159,11 @@ impl Cluster {
             }
             Vacant(entry) => {
                 if let Some(addr) = self.broker_addr_map.get(&broker_id) {
-                    let broker = Broker::connect(addr.clone()).await?;
+                    let broker = Broker::connect(*addr).await?;
                     debug!("broker_get_or_connect: broker_id={}, connected to {}", broker_id, addr);
                     Ok(entry.insert(broker))
                 } else {
-                    Err(KafkaError::NoBrokerAvailable(format!("Failed to find broker for broker_id: {}", broker_id)))?
+                    Err(KafkaError::NoBrokerAvailable(format!("Failed to find broker for broker_id: {}", broker_id)).into())
                 }
             }
         }
@@ -178,7 +174,7 @@ impl Cluster {
             match (broker.host.as_str(), broker.port as u16).to_socket_addrs() {
                 Ok(addr) => {
                     let addr: Vec<SocketAddr> = addr.collect();
-                    if addr.len() != 0 {
+                    if !addr.is_empty() {
                         self.broker_addr_map.insert(broker.node_id, addr[0]);
                     }
                 }
@@ -202,7 +198,7 @@ impl Cluster {
         // TODO: after connect we have list of broker addresses but can not know their ID yet.
         // Because of that, I have to check 2 lists, brokers with known ID and without (bootstrap ones)
         for addr in &self.bootstrap {
-            match Broker::connect(addr.clone()).await {
+            match Broker::connect(*addr).await {
                 Ok(broker) => {
                     match broker.send_request(&request).await {
                         Ok(resp) => return Ok(resp),
@@ -214,7 +210,7 @@ impl Cluster {
         }
 
 
-        Err(KafkaError::NoBrokerAvailable("Can not find broker to send request".to_owned()))?
+        Err(KafkaError::NoBrokerAvailable("Can not find broker to send request".to_owned()).into())
     }
 }
 

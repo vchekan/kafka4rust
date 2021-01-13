@@ -1,7 +1,6 @@
 use tokio::time::Duration;
 use std::future::Future;
 use anyhow::Result;
-use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 
 pub async fn repeat<FF,F,T>(f: FF, delay: Duration, mut retries: u32) -> F::Output

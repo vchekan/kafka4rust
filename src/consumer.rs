@@ -58,7 +58,7 @@ impl ConsumerConfig {
     fn get_topic(&self) -> Result<&str, KafkaError> {
         match &self.topic {
             Some(t) => Ok(t.as_str()),
-            None => Err(KafkaError::Config("Consumer topic is not set".to_string()).into())
+            None => Err(KafkaError::Config("Consumer topic is not set".to_string()))
         }
     }
 
@@ -106,12 +106,12 @@ impl Consumer {
     pub async fn new(config: ConsumerConfig) -> Result<Receiver<Batch>, KafkaError> {
         let seed_list = utils::resolve_addr(&config.get_bootstrap());
         debug!("Resolved bootstrap list: {:?}", seed_list);
-        if seed_list.len() == 0 {
+        if seed_list.is_empty() {
             return Err(KafkaError::NoBrokerAvailable(format!("Failed to resolve any address in bootstrap: {:?}", config.bootstrap)));
         }
 
         let mut cluster = Cluster::new(seed_list);
-        let topic_meta = cluster.fetch_topic_meta(&vec![config.get_topic()?]).await?;
+        let topic_meta = cluster.fetch_topic_meta(&[config.get_topic()?]).await?;
         debug!("Resolved topic: {:?}", topic_meta);
         assert_eq!(1, topic_meta.topics.len());
 
@@ -196,7 +196,7 @@ async fn fetch_loop(mut cluster: Cluster, tx: Sender<Batch>, topic_meta: protoco
                                     .instrument(debug_span!("Sending message", %leader, %partition, %last_offset, %dataset_size))
                                     .await;
 
-                                if let Err(_) = send_res {
+                                if send_res.is_err() {
                                     info!("Listener closed. Exiting fetch loop");
                                     return Ok(());
                                 }
@@ -218,7 +218,7 @@ async fn fetch_loop(mut cluster: Cluster, tx: Sender<Batch>, topic_meta: protoco
         }
 
         // TODO: configurable fetch frequency
-        tokio::time::sleep(Duration::from_millis(300 as u64))
+        tokio::time::sleep(Duration::from_millis(300))
             .instrument(debug_span!("Delay between fetches")).await;
     }
 }

@@ -213,16 +213,8 @@ const ERROR_RETRIABLE: [ErrorCode; 22] = [CorruptMessage,UnknownTopicOrPartition
     ElectionNotNeeded];
 
 impl ErrorCode {
-    pub fn is_ok(&self) -> bool {
-        match self {
-            ErrorCode::None => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_retriable(&self) -> bool {
-        ERROR_RETRIABLE.contains(self)
-    }
+    pub fn is_ok(&self) -> bool { matches!(self, ErrorCode::None) }
+    pub fn is_retriable(&self) -> bool { ERROR_RETRIABLE.contains(self) }
     pub fn as_result(&self) -> Result<(), ErrorCode> {
         match self {
             ErrorCode::None => std::result::Result::Ok(()),

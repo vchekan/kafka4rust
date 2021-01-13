@@ -1,21 +1,17 @@
 use std::io::{stdout, Write};
 use anyhow::Result;
 use kafka4rust::{protocol, Cluster};
-use tui::{self, widgets::{Widget, Block, Borders, List, Paragraph, Row, Table}, layout::{Layout, Constraint, Direction}, style::{Style, Color}, backend::{CrosstermBackend}, Frame};
+use tui::{self, widgets::{Block, Borders, List, Paragraph, Row, Table}, layout::{Layout, Constraint, Direction}, style::{Style, Color}, backend::{CrosstermBackend}, Frame};
 use crossterm::{self, execute, 
     terminal::{enable_raw_mode, disable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     event::{Event, KeyEvent, KeyCode, EventStream}};
 use futures::{StreamExt, TryFutureExt};
 use std::panic;
-use tokio;
 use std::collections::HashMap;
-use std::iter::FromIterator;
-use tracing;
 use tracing_futures::Instrument;
-use tui::text::{Text, Span, Spans};
-use tui::widgets::{ListItem, Wrap, ListState, BorderType, Cell};
+use tui::text::{Span, Spans};
+use tui::widgets::{ListItem, ListState, Cell};
 use tui::layout::Rect;
-use tui::style::Modifier;
 use kafka4rust::protocol::Broker;
 use std::fmt::{Display, Formatter};
 
@@ -113,14 +109,14 @@ pub async fn main_ui(bootstrap: &str) -> Result<()> {
 
     let bootstrap = bootstrap.to_string();
     // kafka client runs in tokio future and communicates with UI main thread via channel
-    let (mut tx, rx) = tokio::sync::mpsc::channel(2);
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
     tokio::spawn(async move {
         tracing::event!(tracing::Level::DEBUG, %bootstrap, "Connecting");
-        tx.send(Cmd::ConnState(ConnState::Connecting));
+        tx.send(Cmd::ConnState(ConnState::Connecting)).await?;
         let mut cluster = Cluster::with_bootstrap(&bootstrap)?;
-        let topics_meta = cluster.fetch_topic_meta(&vec![]).await?;
+        let topics_meta = cluster.fetch_topic_meta(&[]).await?;
         tracing::debug_span!("Connected");
-        tx.send(Cmd::ConnState(ConnState::Connected));
+        tx.send(Cmd::ConnState(ConnState::Connected)).await?;
         let topics: Vec<_> = topics_meta.topics.iter().map(|t| (t.topic.as_str(), t.partition_metadata.len() as u32)).collect();
         let offsets = crate::get_offsets(&cluster, &topics).await.unwrap();
         tracing::debug_span!("Sending topic meta");
@@ -176,13 +172,13 @@ fn draw(terminal: &mut Terminal, state: &State) -> Result<()> {
         match state.page {
             Page::Topics => draw_topics(frame, main_area, state),
             Page::Brokers => draw_brokers(frame, main_area, state),
-        };
+        }
     })?;
 
     Ok(())
 }
 
-fn draw_topics<T: tui::backend::Backend>(frame: &mut Frame<T>, area: Rect, state: &State) -> Result<()> {
+fn draw_topics<T: tui::backend::Backend>(frame: &mut Frame<T>, area: Rect, state: &State) {
         //
         // -main_frame--------------------------
         // |     master_box        | detail_box|
@@ -218,7 +214,7 @@ fn draw_topics<T: tui::backend::Backend>(frame: &mut Frame<T>, area: Rect, state
 
         let table = Table::new(
                 // Row::new(vec!["#", "First", "Last"/*, "Size"*/])
-                partitions.into_iter().map(|row| {
+                partitions.iter().map(|row| {
                     Row::new(vec![
                         format!("{}", row.partition),
                         format!("{}", row.first),
@@ -232,11 +228,9 @@ fn draw_topics<T: tui::backend::Backend>(frame: &mut Frame<T>, area: Rect, state
             .column_spacing(1);
             //.render(&mut f, detail_box);
         frame.render_widget(table, detail_box);
-
-    Ok(())
 }
 
-fn draw_brokers<B: tui::backend::Backend>(frame: &mut Frame<B>, area: Rect, _state: &State) -> Result<()> {
+fn draw_brokers<B: tui::backend::Backend>(frame: &mut Frame<B>, area: Rect, _state: &State) {
     let table = Table::new(
         _state.brokers.iter().map(|b| Row::new(vec![
             Cell::from(format!("{}:{}", b.host, b.port)),
@@ -248,8 +242,6 @@ fn draw_brokers<B: tui::backend::Backend>(frame: &mut Frame<B>, area: Rect, _sta
         .block(Block::default().title("Brokers").borders(Borders::ALL));
 
     frame.render_widget(table, area);
-
-    Ok(())
 }
 
 async fn eval_loop(term: &mut Terminal, mut state: State, mut kafka_commands: tokio::sync::mpsc::Receiver<Cmd>) -> Result<()> {
@@ -275,14 +267,14 @@ async fn eval_loop(term: &mut Terminal, mut state: State, mut kafka_commands: to
                     }
                     // Changes in offsets
                     Some(Cmd::Offsets(offsets)) => {
-                        state.partitions = HashMap::from_iter(offsets.responses.into_iter().map(|r| (
+                        state.partitions = offsets.responses.into_iter().map(|r| (
                             r.topic,
                             r.partition_responses.into_iter().map(|p| PartitionRecord {
                                 partition: p.partition,
                                 first: *p.offsets.get(1).unwrap_or(&0),
                                 last: *p.offsets.get(0).unwrap_or(&0),
                             }).collect()
-                        )));
+                        )).collect();
                     }
                     Some(Cmd::ConnState(conn_state)) => {
                         state.conn_state = conn_state;
@@ -295,21 +287,18 @@ async fn eval_loop(term: &mut Terminal, mut state: State, mut kafka_commands: to
                 }
             }
             key_event = term_events.next() => {
-                match key_event {
-                    Some(Ok(Event::Key(KeyEvent{code, modifiers: _}))) => {
-                        match code {
-                            KeyCode::Char('q') | KeyCode::F(10) => break,
-                            KeyCode::F(3) => state.page = Page::Brokers,
-                            KeyCode::Down => {
-                                let len = state.topics.len();
-                                if len == 0 { continue }
-                                state.master_selected = (state.master_selected + 1).min(len - 1)
-                            },
-                            KeyCode::Up => state.master_selected = (state.master_selected as isize - 1).max(0) as usize,
-                            _ => {}
-                        }
+                if let Some(Ok(Event::Key(KeyEvent{code, modifiers: _}))) = key_event {
+                    match code {
+                        KeyCode::Char('q') | KeyCode::F(10) => break,
+                        KeyCode::F(3) => state.page = Page::Brokers,
+                        KeyCode::Down => {
+                            let len = state.topics.len();
+                            if len == 0 { continue }
+                            state.master_selected = (state.master_selected + 1).min(len - 1)
+                        },
+                        KeyCode::Up => state.master_selected = (state.master_selected as isize - 1).max(0) as usize,
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
