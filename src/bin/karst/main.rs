@@ -2,7 +2,7 @@
 
 mod ui;
 
-use clap::{Arg, App, SubCommand, ArgMatches};
+use clap::{Arg, App, SubCommand, ArgMatches, AppSettings};
 use std::process::exit;
 use kafka4rust::{
     Cluster,
@@ -23,17 +23,12 @@ async fn main() -> Result<()> {
     let _guard = span.enter();
 
     let cli = parse_cli();
-    let bootstrap = cli.value_of("bootstrap").expect("Bootstrap is required");
-
-    let v = vec![1,2,3];
-    let mut vi = v.iter();
-    v.iter().fold(vi.next().cloned(), |a, i| a.map(|a| a + i));
-
-    vec![1,2,3].iter().cloned().fold_first(|a, b| a + b);
+    let brokers = cli.value_of("brokers");
 
     match cli.subcommand() {
         ("list", Some(list)) => {
-            let mut cluster = Cluster::with_bootstrap(bootstrap)?;
+            let brokers = list.value_of("brokers").unwrap();
+            let mut cluster = Cluster::with_bootstrap(brokers)?;
             // TODO: check for errors
             let meta = cluster.fetch_topic_meta(&[]).await?;
             match list.subcommand() {
@@ -56,7 +51,7 @@ async fn main() -> Result<()> {
             let topic = args.value_of("topic").unwrap();
             let _single_message = args.value_of("single-message");
             let val = args.value_of("MSG-VALUE").expect("Message value is not provided");
-            let (mut producer, _acks) = Producer::new(bootstrap).expect("Failed to create publisher");
+            let (mut producer, _acks) = Producer::new(brokers.unwrap()).expect("Failed to create publisher");
             if let Some(key) = key {
                 let msg = (key.to_string(), val.to_string());
                 producer.send(msg, topic).await?;
@@ -66,32 +61,36 @@ async fn main() -> Result<()> {
             producer.close().await?;
         }
         ("ui", Some(_)) => {
-            ui::main_ui(bootstrap).await?;
+            ui::main_ui(brokers.unwrap()).await?;
         }
-        _ => { 
-                eprintln!("No command provided");
-                exit(1);
-        }
+        _ => {}
     }
     Ok(())
 }
 
-fn parse_cli<'a>() -> ArgMatches<'a> {
-    App::new("karst").
-    version(env!("CARGO_PKG_VERSION")).
-    about("Kafka command line and UI tool").
-    arg(Arg::with_name("bootstrap").
+fn brokers_arg<'a,'b>() -> Arg<'a,'b> {
+    Arg::with_name("brokers").
         default_value("localhost:9092").
         short("b").
-        long("bootstrap").
+        long("brokers").
         help("Bootstrap servers, comma separated, port is optional, for example host1.dc.net,192.168.1.1:9092").
         takes_value(true)
-    ).subcommand(SubCommand::with_name("ui")
+}
+
+fn parse_cli<'a>() -> ArgMatches<'a> {
+    App::new("karst")
+        .settings(&[AppSettings::ArgRequiredElseHelp, AppSettings::ColoredHelp])
+        .version(env!("CARGO_PKG_VERSION"))
+        .about("Kafka command line and UI tool")
+    .subcommand(SubCommand::with_name("ui")
         .about("start terminal UI")
+        .setting(AppSettings::ColoredHelp)
     ).subcommand(
         SubCommand::with_name("list")
-        .about("list items (topics, brokers, partitions)").
-        subcommand(SubCommand::with_name("topics").
+        .about("list items (topics, brokers, partitions)")
+        .setting(AppSettings::ColoredHelp)
+        .arg(brokers_arg())
+            .subcommand(SubCommand::with_name("topics").
             about("List topics").
             arg(
                 Arg::with_name("filter").
@@ -108,10 +107,12 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
             )    
         ).subcommand(SubCommand::with_name("brokers").
             about("list brokers (from metadata, not from seeds)")
+            .setting(AppSettings::ColoredHelp)
         )
     ).subcommand(
         SubCommand::with_name("publish")
             .about("Publish message")
+            .setting(AppSettings::ColoredHelp)
             // .arg_from_usage("-k --key=<KEY> 'publish message with given key'")
             .arg(Arg::with_name("key")
                 .takes_value(true)
