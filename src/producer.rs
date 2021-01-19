@@ -1,24 +1,24 @@
-use crate::types::*;
 use crate::cluster::Cluster;
-use crate::protocol;
-use crate::utils;
-use std::collections::{HashMap, VecDeque};
-use std::fmt::Debug;
-use std::time::{UNIX_EPOCH, Duration};
-use std::sync::Arc;
-use async_std::sync::Mutex;
-use tokio::sync::RwLock;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-use rand::random;
+use crate::error::KafkaError;
 use crate::murmur2a;
+use crate::protocol;
+use crate::protocol::ErrorCode;
+use crate::types::*;
+use crate::utils;
+use anyhow::Result;
+use async_std::sync::Mutex;
+use rand::random;
+use std::collections::{HashMap, VecDeque};
+use std::convert::TryInto;
+use std::fmt;
+use std::fmt::Debug;
+use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::RwLock;
 use tracing::{self, event, Level};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
-use crate::protocol::ErrorCode;
-use crate::error::KafkaError;
-use anyhow::Result;
-use std::convert::TryInto;
-use std::fmt;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -122,7 +122,7 @@ use std::fmt;
 ///
 /// Q: How to report produce errors?
 /// A: ???
-/// 
+///
 
 // TODO: is `Send` needed? Can we convert to QueuedMessage before crossing thread boundaries?
 pub trait ToMessage: Send {
@@ -130,7 +130,7 @@ pub trait ToMessage: Send {
     fn value(&self) -> Vec<u8>;
 }
 
-pub trait Partitioner : Debug + Send {
+pub trait Partitioner: Debug + Send {
     fn partition(&self, key: &[u8]) -> u32;
 }
 
@@ -171,12 +171,16 @@ pub struct Producer {
     topics_meta: HashMap<String, ProducerTopicMetadata>,
     acks: Sender<Response>,
     buffer_commands: Sender<BuffCmd>,
-    flush_loop_handle: tokio::task::JoinHandle<()>
+    flush_loop_handle: tokio::task::JoinHandle<()>,
 }
 
 impl Debug for Producer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Producer: {{seed: '{}', partitioner: {:?}}}", self.bootstrap, self.partitioner)
+        write!(
+            f,
+            "Producer: {{seed: '{}', partitioner: {:?}}}",
+            self.bootstrap, self.partitioner
+        )
     }
 }
 
@@ -187,7 +191,7 @@ impl Producer {
     /// Default MURMUR2 hasher is used (the same as Java).
     #[instrument(level = "debug")]
     pub fn new(seed: &str) -> Result<(Self, Receiver<Response>), KafkaError> {
-        Producer::with_hasher(seed, Box::new(Murmur2Partitioner{}))
+        Producer::with_hasher(seed, Box::new(Murmur2Partitioner {}))
     }
 
     // pub async fn connect(&mut self, topics: &[&str]) -> Result<()> {
@@ -205,10 +209,16 @@ impl Producer {
 
 impl Producer {
     #[instrument(level = "debug", skip(partitioner))]
-    pub fn with_hasher(seed: &str, partitioner: Box<dyn Partitioner>) -> Result<(Self,Receiver<Response>), KafkaError> {
+    pub fn with_hasher(
+        seed: &str,
+        partitioner: Box<dyn Partitioner>,
+    ) -> Result<(Self, Receiver<Response>), KafkaError> {
         let seed_list = utils::resolve_addr(seed);
         if seed_list.is_empty() {
-            return Err(KafkaError::NoBrokerAvailable(format!("No address can be resolved: {}", seed)));
+            return Err(KafkaError::NoBrokerAvailable(format!(
+                "No address can be resolved: {}",
+                seed
+            )));
         }
         let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::new(seed_list)));
         let cluster2 = cluster.clone();
@@ -265,7 +275,7 @@ impl Producer {
             topics_meta: HashMap::new(),
             acks: ack_tx,
             buffer_commands: buff_tx,
-            flush_loop_handle
+            flush_loop_handle,
         };
 
         Ok((producer, ack_rx))
@@ -275,10 +285,20 @@ impl Producer {
     pub async fn send<M: ToMessage + 'static>(&mut self, msg: M, topic: &str) -> Result<()> {
         let mut buffer = self.buffer.lock().await;
         // TODO: share metadata cache between self and Buffer
-        let meta = Self::get_or_request_meta(&self.cluster, &mut self.topics_meta, &mut buffer.meta_cache, topic).await?;
+        let meta = Self::get_or_request_meta(
+            &self.cluster,
+            &mut self.topics_meta,
+            &mut buffer.meta_cache,
+            topic,
+        )
+        .await?;
         assert_eq!(1, meta.protocol_metadata.topics.len());
         assert_eq!(topic, meta.protocol_metadata.topics[0].topic);
-        let topic_meta = meta.protocol_metadata.topics.get(0).expect("Expect exacly 1 topic configured");
+        let topic_meta = meta
+            .protocol_metadata
+            .topics
+            .get(0)
+            .expect("Expect exacly 1 topic configured");
 
         let partitions_count = topic_meta.partition_metadata.len() as u32;
         let partition = match msg.key() {
@@ -286,7 +306,7 @@ impl Producer {
             _ => {
                 meta.null_key_partition_counter += 1;
                 meta.null_key_partition_counter
-            },
+            }
         };
         let partition = partition % partitions_count;
 
@@ -342,22 +362,31 @@ impl Producer {
         loop {
             debug!("Fetching topic meta from server");
             let meta = cluster.write().await.fetch_topic_meta(&[topic]).await?;
-            let meta = ProducerTopicMetadata { protocol_metadata: meta, null_key_partition_counter: random() };
+            let meta = ProducerTopicMetadata {
+                protocol_metadata: meta,
+                null_key_partition_counter: random(),
+            };
             let topic_metadata = &meta.protocol_metadata.topics[0];
 
             match meta.protocol_metadata.topics[0].error_code.as_result() {
                 Err(e) if e.is_retriable() => {
                     info!("Retriable error {}", e);
                     tokio::time::sleep(Duration::from_millis(300))
-                        .instrument(tracing::info_span!("Retry sleep")).await;
+                        .instrument(tracing::info_span!("Retry sleep"))
+                        .await;
                     continue;
-                },
+                }
                 Err(e) => return Err(e.into()),
                 _ => {}
             }
 
-            if topic_metadata.partition_metadata.iter().all(|m| m.error_code == ErrorCode::None) {
-                let mut partition_leader_map: Vec<i32> = vec![-1; topic_metadata.partition_metadata.len()];
+            if topic_metadata
+                .partition_metadata
+                .iter()
+                .all(|m| m.error_code == ErrorCode::None)
+            {
+                let mut partition_leader_map: Vec<i32> =
+                    vec![-1; topic_metadata.partition_metadata.len()];
                 for partition_meta in &topic_metadata.partition_metadata {
                     // TODO: got exception once: index 5 is out of range of 5. How come? Switch to map?
                     partition_leader_map[partition_meta.partition as usize] = partition_meta.leader;
@@ -369,11 +398,16 @@ impl Producer {
                 let meta = topics_meta.get_mut(topic).unwrap();
                 return Ok(meta);
             } else {
-                for partition_meta in topic_metadata.partition_metadata.iter().filter(|m| m.error_code != ErrorCode::None) {
+                for partition_meta in topic_metadata
+                    .partition_metadata
+                    .iter()
+                    .filter(|m| m.error_code != ErrorCode::None)
+                {
                     event!(target: "get_or_request_meta", tracing::Level::ERROR, error_code = ?partition_meta.error_code, partition = ?partition_meta.partition);
                 }
                 tokio::time::sleep(Duration::from_secs(3))
-                    .instrument(tracing::info_span!("Retry sleep")).await;
+                    .instrument(tracing::info_span!("Retry sleep"))
+                    .await;
                 // TODO: check either error is recoverable
                 continue;
             }
@@ -446,8 +480,7 @@ impl Buffer {
         topic: String,
         partition: u32,
         meta: &protocol::TopicMetadata,
-    ) -> BufferingResult
-    {
+    ) -> BufferingResult {
         if self.bytes + msg.value.len() as u32 > self.size_limit {
             debug!("Overflow");
             return BufferingResult::Overflow;
@@ -479,21 +512,27 @@ impl Buffer {
                 transactional_id: None,
                 acks: 1,
                 timeout: 1500,
-                topic_data: &data
+                topic_data: &data,
             };
 
-            let broker = Cluster::broker_get_or_connect(cluster, leader).await
+            let broker = Cluster::broker_get_or_connect(cluster, leader)
+                .await
                 .unwrap_or_else(|_| panic!(format!("Can not find broker_id {}", leader)));
             let cmd_buf = broker.mk_request(request);
             debug!("Sending Produce");
-            let res = broker.send_request2::<protocol::ProduceResponse3>(cmd_buf).await?;
+            let res = broker
+                .send_request2::<protocol::ProduceResponse3>(cmd_buf)
+                .await?;
             // TODO: throttle_time
             debug!("Got Produce response: {:?}", res);
             for topic_resp in &res.responses {
                 for partition_resp in &topic_resp.partition_responses {
                     let ack = if partition_resp.error_code.is_ok() {
                         debug!("Ok sent partition {}", partition_resp.partition);
-                        messages_to_discard.entry(topic_resp.topic.clone()).or_default().push(partition_resp.partition as u32);
+                        messages_to_discard
+                            .entry(topic_resp.topic.clone())
+                            .or_default()
+                            .push(partition_resp.partition as u32);
                         // Notify caller
                         Response::Ack {
                             partition: partition_resp.partition as u32,
@@ -501,7 +540,10 @@ impl Buffer {
                             error: partition_resp.error_code,
                         }
                     } else {
-                        error!("Produce error. Topic {} partition {} error {:?}", topic_resp.topic, partition_resp.partition, partition_resp.error_code);
+                        error!(
+                            "Produce error. Topic {} partition {} error {:?}",
+                            topic_resp.topic, partition_resp.partition, partition_resp.error_code
+                        );
                         tracing::event!(tracing::Level::ERROR, ?leader, ?topic_resp.topic, partition = ?partition_resp.partition, error_code = ?partition_resp.error_code, "Produce error");
                         Response::Nack {
                             partition: partition_resp.partition as u32,
@@ -524,7 +566,13 @@ impl Buffer {
                 queue.queue.drain(..queue.sending as usize);
                 queue.sending = 0;
                 let remaining = queue.queue.len();
-                event!(Level::DEBUG, ?topic, ?partition, ?remaining, "Truncated queue");
+                event!(
+                    Level::DEBUG,
+                    ?topic,
+                    ?partition,
+                    ?remaining,
+                    "Truncated queue"
+                );
             }
         }
 
@@ -534,7 +582,10 @@ impl Buffer {
     /// Scan message buffer and group messages by the leader and update `sending` counter.
     /// Two queues because that's how dequeue works.
     /// Returns leader->topic->partition->messages
-    fn group_queue_by_leader(&mut self) -> HashMap<BrokerId,HashMap<&String, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>>> {
+    fn group_queue_by_leader(
+        &mut self,
+    ) -> HashMap<BrokerId, HashMap<&String, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>>>
+    {
         // TODO: implement FIFO and request size bound algorithm
 
         // leader->topic->partition->recordset[]
@@ -544,17 +595,25 @@ impl Buffer {
         >::new();
 
         for (topic, partitioned_queue) in &mut self.topic_queues {
-            for (partition, queue) in partitioned_queue.iter_mut().enumerate()
+            for (partition, queue) in partitioned_queue
+                .iter_mut()
+                .enumerate()
                 // Only non-empty queues
-                .filter(|(_, q)| !q.queue.is_empty()) {
+                .filter(|(_, q)| !q.queue.is_empty())
+            {
                 let partition = partition as u32;
-                let leader = self.meta_cache.
-                    get(topic).expect("Topic metadata is expected").
-                    get(partition as usize).expect("Corrupt topic metadata partition info");
+                let leader = self
+                    .meta_cache
+                    .get(topic)
+                    .expect("Topic metadata is expected")
+                    .get(partition as usize)
+                    .expect("Corrupt topic metadata partition info");
                 // TODO: limit message size
                 queue.sending = queue.queue.len().try_into().unwrap();
 
-                let topics = broker_partitioned.entry(*leader).or_insert_with(HashMap::new);
+                let topics = broker_partitioned
+                    .entry(*leader)
+                    .or_insert_with(HashMap::new);
                 // TODO use raw entries
                 let partitions = topics.entry(topic).or_insert_with(HashMap::new);
                 partitions.insert(partition, queue.queue.as_slices());
@@ -618,11 +677,11 @@ pub enum Response {
     Nack {
         partition: u32,
         error: ErrorCode,
-    }
+    },
 }
 
-    /// Serialized message with topic and partition preserved because we need them in case topic
-    /// resolved or topology change.
+/// Serialized message with topic and partition preserved because we need them in case topic
+/// resolved or topology change.
 #[derive(Debug)]
 pub(crate) struct QueuedMessage {
     pub key: Option<Vec<u8>>,
@@ -681,12 +740,20 @@ impl ToMessage for &str {
 }
 
 impl ToMessage for String {
-    fn key(&self) -> Option<Vec<u8>> { None }
-    fn value(&self) -> Vec<u8> { Vec::from(self.as_bytes()) }
+    fn key(&self) -> Option<Vec<u8>> {
+        None
+    }
+    fn value(&self) -> Vec<u8> {
+        Vec::from(self.as_bytes())
+    }
 }
 
 // TODO: see if Send can be eliminated
-impl<K,V> ToMessage for (K,V) where K: Send, V: Send {
+impl<K, V> ToMessage for (K, V)
+where
+    K: Send,
+    V: Send,
+{
     fn key(&self) -> Option<Vec<u8>> {
         unimplemented!()
     }
@@ -699,9 +766,9 @@ impl<K,V> ToMessage for (K,V) where K: Send, V: Send {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::utils;
     use std::time::Duration;
     use tokio;
-    use crate::utils;
 
     /*
     #[test]
@@ -810,7 +877,3 @@ mod test {
     }
     */
 }
-
-
-
-

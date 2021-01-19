@@ -26,18 +26,18 @@
 //! querying? Which connections should be used for metadata query, because long polling problem?
 //! A: ???
 
-use crate::types::*;
 use crate::broker::Broker;
 use crate::error::KafkaError;
+use crate::futures::repeat;
 use crate::protocol;
+use crate::types::*;
+use crate::utils::resolve_addr;
+use anyhow::Result;
+use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
-use crate::utils::resolve_addr;
-use std::collections::hash_map::Entry::{Occupied, Vacant};
-use crate::futures::repeat;
-use tracing_attributes::instrument;
-use anyhow::Result;
 use tokio::time::Duration;
+use tracing_attributes::instrument;
 
 #[derive(Debug)]
 pub struct Cluster {
@@ -87,36 +87,53 @@ impl Cluster {
     /// Connect to known or seed broker and get topic metadata.
     /// If `topics` is empty, then fetch metadata for all topics.
     #[instrument(skip(self))]
-    pub async fn fetch_topic_meta(&mut self, topics: &[&str]) -> Result<protocol::MetadataResponse0, KafkaError> {
+    pub async fn fetch_topic_meta(
+        &mut self,
+        topics: &[&str],
+    ) -> Result<protocol::MetadataResponse0, KafkaError> {
         debug!("fetch_topic_meta({:?})", topics);
         // TODO: wait with timeout
         for broker in self.broker_id_map.values() {
-            match repeat(|| {fetch_topic_with_broker_and_retry(broker, topics)}, Duration::from_secs(1), 5).await {
+            match repeat(
+                || fetch_topic_with_broker_and_retry(broker, topics),
+                Duration::from_secs(1),
+                5,
+            )
+            .await
+            {
                 Ok(meta) => {
                     self.update_brokers_map(&meta);
-                    return Ok(meta)
-                },
+                    return Ok(meta);
+                }
                 Err(e) => {
                     tracing::event!(tracing::Level::ERROR, "Error fetching topic meta: {}", e);
                     info!("Error fetching topic meta1: {}", e)
-                },
+                }
             }
         }
 
         for addr in &self.bootstrap {
             match repeat(|| Broker::connect(*addr), Duration::from_secs(1), 10).await {
-                Ok(broker) => match repeat(|| fetch_topic_with_broker_and_retry(&broker, topics), Duration::from_secs(1), 5).await {
+                Ok(broker) => match repeat(
+                    || fetch_topic_with_broker_and_retry(&broker, topics),
+                    Duration::from_secs(1),
+                    5,
+                )
+                .await
+                {
                     Ok(meta) => {
                         self.update_brokers_map(&meta);
-                        return Ok(meta)
-                    },
+                        return Ok(meta);
+                    }
                     Err(e) => info!("Error fetching topic meta2: {:#}", e),
-                }
+                },
                 Err(e) => info!("Error fetching topic meta3: {:#}", e),
             }
         }
 
-        Err(KafkaError::NoBrokerAvailable("Failed to find broker to fetch topics metadata".to_owned()))
+        Err(KafkaError::NoBrokerAvailable(
+            "Failed to find broker to fetch topics metadata".to_owned(),
+        ))
 
         /*
 
@@ -154,16 +171,21 @@ impl Cluster {
 
     pub(crate) async fn broker_get_or_connect(&mut self, broker_id: BrokerId) -> Result<&Broker> {
         match self.broker_id_map.entry(broker_id) {
-            Occupied(entry) => {
-                Ok(entry.into_mut())
-            }
+            Occupied(entry) => Ok(entry.into_mut()),
             Vacant(entry) => {
                 if let Some(addr) = self.broker_addr_map.get(&broker_id) {
                     let broker = Broker::connect(*addr).await?;
-                    debug!("broker_get_or_connect: broker_id={}, connected to {}", broker_id, addr);
+                    debug!(
+                        "broker_get_or_connect: broker_id={}, connected to {}",
+                        broker_id, addr
+                    );
                     Ok(entry.insert(broker))
                 } else {
-                    Err(KafkaError::NoBrokerAvailable(format!("Failed to find broker for broker_id: {}", broker_id)).into())
+                    Err(KafkaError::NoBrokerAvailable(format!(
+                        "Failed to find broker for broker_id: {}",
+                        broker_id
+                    ))
+                    .into())
                 }
             }
         }
@@ -183,7 +205,6 @@ impl Cluster {
         }
     }
 
-
     /// Execute request on every broker until success
     /// TODO: what is the list of all known brokers?
     /// TODO: retry policy
@@ -191,7 +212,9 @@ impl Cluster {
         for broker in self.broker_id_map.values() {
             match broker.send_request(&request).await {
                 Ok(resp) => return Ok(resp),
-                Err(e) => {info!("Error {}", e)},
+                Err(e) => {
+                    info!("Error {}", e)
+                }
             }
         }
 
@@ -199,23 +222,25 @@ impl Cluster {
         // Because of that, I have to check 2 lists, brokers with known ID and without (bootstrap ones)
         for addr in &self.bootstrap {
             match Broker::connect(*addr).await {
-                Ok(broker) => {
-                    match broker.send_request(&request).await {
-                        Ok(resp) => return Ok(resp),
-                        Err(e) => {info!("Error {}", e)},
+                Ok(broker) => match broker.send_request(&request).await {
+                    Ok(resp) => return Ok(resp),
+                    Err(e) => {
+                        info!("Error {}", e)
                     }
-                }
+                },
                 Err(e) => info!("Error fetching topic meta: {}", e),
             }
         }
-
 
         Err(KafkaError::NoBrokerAvailable("Can not find broker to send request".to_owned()).into())
     }
 }
 
 /// Fetch metadata from broker. If retryable error happen, sleep and try again.
-async fn fetch_topic_with_broker_and_retry(broker: &Broker, topics: &[&str]) -> Result<protocol::MetadataResponse0> {
+async fn fetch_topic_with_broker_and_retry(
+    broker: &Broker,
+    topics: &[&str],
+) -> Result<protocol::MetadataResponse0> {
     let req = protocol::MetadataRequest0 {
         topics: topics.iter().map(|t| t.to_string()).collect(),
     };
@@ -247,8 +272,6 @@ async fn fetch_topic_with_broker_and_retry(broker: &Broker, topics: &[&str]) -> 
         }
     }*/
 }
-
-
 
 /*
 #[cfg(test)]

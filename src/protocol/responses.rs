@@ -1,7 +1,7 @@
 use super::api::*;
-use bytes::Buf;
 use crate::protocol::primitives::Recordset;
 use anyhow::Result;
+use bytes::Buf;
 
 // 0
 response!(ProduceResponse3 {
@@ -106,8 +106,6 @@ response!(Result<ApiVersionsResponse1> {
     throttle_time_ms: u32
 });
 
-
-
 #[repr(i16)]
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum ErrorCode {
@@ -205,16 +203,38 @@ pub enum ErrorCode {
 use ErrorCode::*;
 //use failure::_core::fmt::Formatter;
 
-const ERROR_RETRIABLE: [ErrorCode; 22] = [CorruptMessage,UnknownTopicOrPartition,LeaderNotAvailable,NotLeaderForPartition,
-    RequestTimedOut,NetworkException,CoordinatorLoadInProgress,CoordinatorNotAvailable,NotCoordinator,
-    NotEnoughReplicas,NotEnoughReplicasAfterAppend,NotController,KafkaStorageError,
-    FetchSessionIdNotFound,InvalidFetchSessionEpoch,ListenerNotFound,FencedLeaderEpoch,
-    UnknownLeaderEpoch,OffsetNotAvailable,PreferredLeaderNotAvailable,EligibleLeadersNotAvailable,
-    ElectionNotNeeded];
+const ERROR_RETRIABLE: [ErrorCode; 22] = [
+    CorruptMessage,
+    UnknownTopicOrPartition,
+    LeaderNotAvailable,
+    NotLeaderForPartition,
+    RequestTimedOut,
+    NetworkException,
+    CoordinatorLoadInProgress,
+    CoordinatorNotAvailable,
+    NotCoordinator,
+    NotEnoughReplicas,
+    NotEnoughReplicasAfterAppend,
+    NotController,
+    KafkaStorageError,
+    FetchSessionIdNotFound,
+    InvalidFetchSessionEpoch,
+    ListenerNotFound,
+    FencedLeaderEpoch,
+    UnknownLeaderEpoch,
+    OffsetNotAvailable,
+    PreferredLeaderNotAvailable,
+    EligibleLeadersNotAvailable,
+    ElectionNotNeeded,
+];
 
 impl ErrorCode {
-    pub fn is_ok(&self) -> bool { matches!(self, ErrorCode::None) }
-    pub fn is_retriable(&self) -> bool { ERROR_RETRIABLE.contains(self) }
+    pub fn is_ok(&self) -> bool {
+        matches!(self, ErrorCode::None)
+    }
+    pub fn is_retriable(&self) -> bool {
+        ERROR_RETRIABLE.contains(self)
+    }
     pub fn as_result(&self) -> Result<(), ErrorCode> {
         match self {
             ErrorCode::None => std::result::Result::Ok(()),
@@ -223,9 +243,7 @@ impl ErrorCode {
     }
 }
 
-impl std::error::Error for ErrorCode {
-
-}
+impl std::error::Error for ErrorCode {}
 
 impl std::fmt::Display for ErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -241,4 +259,3 @@ impl From<ErrorCode> for std::result::Result<(), ErrorCode> {
         }
     }
 }
-

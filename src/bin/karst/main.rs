@@ -2,19 +2,15 @@
 
 mod ui;
 
-use clap::{Arg, App, SubCommand, ArgMatches, AppSettings};
-use std::process::exit;
-use kafka4rust::{
-    Cluster,
-    protocol,
-    Producer
-};
-use tracing::{dispatcher};
-use opentelemetry::{sdk, global};
-use tracing_subscriber::Registry;
-use opentelemetry::api::trace::provider::Provider;
-use tracing_subscriber::layer::SubscriberExt;
 use anyhow::Result;
+use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
+use kafka4rust::{protocol, Cluster, Producer};
+use opentelemetry::api::trace::provider::Provider;
+use opentelemetry::{global, sdk};
+use std::process::exit;
+use tracing::dispatcher;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Registry;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,21 +33,27 @@ async fn main() -> Result<()> {
                     topics.for_each(|t| println!("{}", t));
                 }
                 ("brokers", Some(_matches)) => {
-                    let brokers = meta.brokers.iter().map(|b| format!("{}:{}", b.host, b.port));
+                    let brokers = meta
+                        .brokers
+                        .iter()
+                        .map(|b| format!("{}:{}", b.host, b.port));
                     brokers.for_each(|t| println!("{}", t));
                 }
                 _ => {
                     eprintln!("Subcommand required. Don't know what to list");
                     exit(1);
                 }
-            }    
+            }
         }
         ("publish", Some(args)) => {
             let key = args.value_of("key");
             let topic = args.value_of("topic").unwrap();
             let _single_message = args.value_of("single-message");
-            let val = args.value_of("MSG-VALUE").expect("Message value is not provided");
-            let (mut producer, _acks) = Producer::new(brokers.unwrap()).expect("Failed to create publisher");
+            let val = args
+                .value_of("MSG-VALUE")
+                .expect("Message value is not provided");
+            let (mut producer, _acks) =
+                Producer::new(brokers.unwrap()).expect("Failed to create publisher");
             if let Some(key) = key {
                 let msg = (key.to_string(), val.to_string());
                 producer.send(msg, topic).await?;
@@ -68,7 +70,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn brokers_arg<'a,'b>() -> Arg<'a,'b> {
+fn brokers_arg<'a, 'b>() -> Arg<'a, 'b> {
     Arg::with_name("brokers").
         default_value("localhost:9092").
         short("b").
@@ -104,7 +106,7 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
                 long("filter-regex").
                 help("filter topics which match given regex. See https://docs.rs/regex/1.3.4/regex/#syntax").
                 takes_value(true)
-            )    
+            )
         ).subcommand(SubCommand::with_name("brokers").
             about("list brokers (from metadata, not from seeds)")
             .setting(AppSettings::ColoredHelp)
@@ -146,17 +148,25 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
     ).get_matches()
 }
 
-async fn get_offsets(cluster: &Cluster, topics_partition_count: &[(&str, u32)]) -> Result<protocol::ListOffsetsResponse0> {
+async fn get_offsets(
+    cluster: &Cluster,
+    topics_partition_count: &[(&str, u32)],
+) -> Result<protocol::ListOffsetsResponse0> {
     let req = protocol::ListOffsetsRequest0 {
         replica_id: -1,
-        topics: topics_partition_count.iter().map(|t| protocol::Topics {
-            topic: t.0.to_string(),
-            partitions: (0 .. t.1).map(|partition| protocol::Partition {
-                partition,
-                timestamp: -1,
-                max_num_offsets: 2
-            }).collect()
-        }).collect()
+        topics: topics_partition_count
+            .iter()
+            .map(|t| protocol::Topics {
+                topic: t.0.to_string(),
+                partitions: (0..t.1)
+                    .map(|partition| protocol::Partition {
+                        partition,
+                        timestamp: -1,
+                        max_num_offsets: 2,
+                    })
+                    .collect(),
+            })
+            .collect(),
     };
     Ok(cluster.request(req).await?)
 }

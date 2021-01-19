@@ -7,26 +7,27 @@
 //! Cancellation from .net
 //!
 //! panic handling
-use kafka4rust::{Producer, BinMessage};
-use tokio;
+use kafka4rust::{BinMessage, Producer};
 use lazy_static::lazy_static;
+use log::debug;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::ptr::null;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio;
 use tokio::sync::{Mutex, RwLock};
-use log::debug;
 
 lazy_static! {
     static ref TOKIO_RUNTIME: tokio::runtime::Runtime = tokio::runtime::Runtime::new().unwrap();
-    static ref MANAGED_PRODUCERS: RwLock<HashMap<usize,Mutex<Producer>>> = RwLock::new(HashMap::new());
+    static ref MANAGED_PRODUCERS: RwLock<HashMap<usize, Mutex<Producer>>> =
+        RwLock::new(HashMap::new());
 }
 
 static PRODUCER_ID: AtomicUsize = AtomicUsize::new(1);
 
-type DotnetCallback = extern fn(result: Result);
-type CreateProducerCallback = extern fn(result: CreateProducerResult);
+type DotnetCallback = extern "C" fn(result: Result);
+type CreateProducerCallback = extern "C" fn(result: CreateProducerResult);
 
 #[repr(C)]
 pub struct OpaqueDotnetPointer(*mut Ptr);
@@ -56,13 +57,20 @@ pub struct SyncResult {
 }
 
 #[no_mangle]
-pub extern fn create_producer(continuation: OpaqueDotnetPointer, bootstrap: *const c_char, callback: CreateProducerCallback) {
+pub extern "C" fn create_producer(
+    continuation: OpaqueDotnetPointer,
+    bootstrap: *const c_char,
+    callback: CreateProducerCallback,
+) {
     // TODO: catch all panics
     // TODO: implement `DotnetString` with `!Send`.
     // Dotnet string is valid only during synchronous part of the call and can be reclaimed after call completion.
     // So it is unsafe to pass the pointer to thread and operate on it after call is completed.
     // String must be cloned if pass to thread is required.
-    let bootstrap = match unsafe { CStr::from_ptr(bootstrap) }.to_str().map(String::from) {
+    let bootstrap = match unsafe { CStr::from_ptr(bootstrap) }
+        .to_str()
+        .map(String::from)
+    {
         Ok(bootstrap) => bootstrap,
         Err(e) => {
             println!("rust:create_producer: failed utf8: {:#}", e);
@@ -81,26 +89,35 @@ pub extern fn create_producer(continuation: OpaqueDotnetPointer, bootstrap: *con
 
     println!("rust:create_producer: {}", bootstrap);
 
-    TOKIO_RUNTIME.spawn( async move {
+    TOKIO_RUNTIME.spawn(async move {
         println!("rust: create_producer: before runtime");
         println!("rust: got param: {}", bootstrap);
         match Producer::new(&bootstrap) {
             Ok((producer, rx)) => {
                 println!("Connected {:?}", producer);
                 let id = PRODUCER_ID.fetch_add(1, Ordering::SeqCst);
-                MANAGED_PRODUCERS.write().await.insert(id, Mutex::new(producer));
+                MANAGED_PRODUCERS
+                    .write()
+                    .await
+                    .insert(id, Mutex::new(producer));
                 callback(CreateProducerResult {
                     msg: 0 as *const u8,
                     data: id,
                     continuation,
                     error: false,
                 })
-            },
+            }
             Err(e) => {
                 println!("rust error: {:#}", e);
-                let msg = CString::new(format!("{:#}\0", e)).expect("Failed to convert String to CString\0");
+                let msg = CString::new(format!("{:#}\0", e))
+                    .expect("Failed to convert String to CString\0");
                 let msg = msg.as_ptr() as *const u8;
-                callback(CreateProducerResult { error: false, msg, data: 0, continuation })
+                callback(CreateProducerResult {
+                    error: false,
+                    msg,
+                    data: 0,
+                    continuation,
+                })
             }
         }
     });
@@ -108,26 +125,37 @@ pub extern fn create_producer(continuation: OpaqueDotnetPointer, bootstrap: *con
 
 // TODO: can be called from multiple threads, need synchronization?
 #[no_mangle]
-pub extern fn send(producer_id: usize, topic: *const c_char,
-                   key: *const u8, key_len: u32, val: *const u8, val_len: u32,
-                   continuation: OpaqueDotnetPointer, send_callback: DotnetCallback) {
-    let topic  = match unsafe {CStr::from_ptr(topic)}.to_str().map(String::from) {
+pub extern "C" fn send(
+    producer_id: usize,
+    topic: *const c_char,
+    key: *const u8,
+    key_len: u32,
+    val: *const u8,
+    val_len: u32,
+    continuation: OpaqueDotnetPointer,
+    send_callback: DotnetCallback,
+) {
+    let topic = match unsafe { CStr::from_ptr(topic) }.to_str().map(String::from) {
         Ok(topic) => topic,
         Err(e) => {
             let msg = format!("Failed to convert topic into utf8 string: {:#}\0", e);
             send_callback(Result {
                 error: true,
                 ptr: msg.as_ptr() as *const c_void,
-                continuation
+                continuation,
             });
             return;
         }
     };
 
-    let mut key_owned =  Vec::<u8>::with_capacity(key_len as usize);
-    unsafe { key_owned.as_mut_ptr().copy_from(key, key_len as usize); }
+    let mut key_owned = Vec::<u8>::with_capacity(key_len as usize);
+    unsafe {
+        key_owned.as_mut_ptr().copy_from(key, key_len as usize);
+    }
     let mut val_owned = Vec::<u8>::with_capacity(val_len as usize);
-    unsafe { val_owned.as_mut_ptr().copy_from(val, val_len as usize); }
+    unsafe {
+        val_owned.as_mut_ptr().copy_from(val, val_len as usize);
+    }
 
     TOKIO_RUNTIME.spawn(async move {
         debug!("rs:send");
@@ -159,11 +187,12 @@ pub extern fn send(producer_id: usize, topic: *const c_char,
                         });
                     }
                 }
-            },
+            }
             None => {
                 send_callback(Result {
                     error: true,
-                    ptr: format!("Invalid producer id: {}\0", producer_id).as_ptr() as *const c_void,
+                    ptr: format!("Invalid producer id: {}\0", producer_id).as_ptr()
+                        as *const c_void,
                     continuation,
                 });
                 return;
@@ -173,32 +202,46 @@ pub extern fn send(producer_id: usize, topic: *const c_char,
 }
 
 #[no_mangle]
-pub extern fn close(producer_id: usize, continuation: OpaqueDotnetPointer, callback: DotnetCallback) {
+pub extern "C" fn close(
+    producer_id: usize,
+    continuation: OpaqueDotnetPointer,
+    callback: DotnetCallback,
+) {
     debug!("r:close called id: {}", producer_id);
     TOKIO_RUNTIME.spawn(async move {
         match MANAGED_PRODUCERS.write().await.remove(&producer_id) {
-            Some(producer) => {
-                match producer.into_inner().close().await {
-                    Ok(_) => {
-                        debug!("r:closed producer OK");
-                        callback(Result{error: false, ptr: null(), continuation})
-                    },
-                    Err(e) => {
-                        debug!("rs:close:error: {:#}", e);
-                        callback(Result{error: true, ptr: format!("{:#}\0", e).as_ptr() as *const c_void, continuation})
-                    }
+            Some(producer) => match producer.into_inner().close().await {
+                Ok(_) => {
+                    debug!("r:closed producer OK");
+                    callback(Result {
+                        error: false,
+                        ptr: null(),
+                        continuation,
+                    })
                 }
-            }
+                Err(e) => {
+                    debug!("rs:close:error: {:#}", e);
+                    callback(Result {
+                        error: true,
+                        ptr: format!("{:#}\0", e).as_ptr() as *const c_void,
+                        continuation,
+                    })
+                }
+            },
             None => {
-                callback(Result {error: true, ptr: format!("Invalid producer id: {}\0", producer_id).as_ptr() as *const c_void, continuation});
+                callback(Result {
+                    error: true,
+                    ptr: format!("Invalid producer id: {}\0", producer_id).as_ptr()
+                        as *const c_void,
+                    continuation,
+                });
             }
         };
-
     });
 }
 
 #[no_mangle]
-pub extern fn init_log() {
+pub extern "C" fn init_log() {
     use log::debug;
     simple_logger::init_with_level(log::Level::Debug).expect("Failed to init logging");
     debug!("Test debug level");

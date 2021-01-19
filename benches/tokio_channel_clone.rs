@@ -1,7 +1,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-use kafka4rust::{Response};
+use kafka4rust::Response;
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 async fn direct_send(rx: &mut Receiver<Response>, tx: &mut Sender<Response>) {
     let res = Response::Ack {
@@ -28,8 +28,12 @@ fn bench_tokio_clone(c: &mut Criterion) {
     let mut rt = Runtime::new().unwrap();
     let (mut tx, mut rx) = channel::<Response>(1000);
     let mut group = c.benchmark_group("Tokio channel clone");
-    group.bench_function("Direct", |b| b.iter(|| rt.block_on(direct_send(&mut rx, &mut tx))));
-    group.bench_function("Cloned", |b| b.iter(|| rt.block_on(cloned_send(&mut rx, &mut tx))));
+    group.bench_function("Direct", |b| {
+        b.iter(|| rt.block_on(direct_send(&mut rx, &mut tx)))
+    });
+    group.bench_function("Cloned", |b| {
+        b.iter(|| rt.block_on(cloned_send(&mut rx, &mut tx)))
+    });
     group.finish();
 }
 

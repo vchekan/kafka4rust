@@ -1,9 +1,9 @@
+use anyhow::Result;
 use byteorder::BigEndian;
+use bytes::BytesMut;
 use bytes::{Buf, BufMut, ByteOrder};
 use std::fmt::Debug;
-use bytes::BytesMut;
 use std::marker::Sized;
-use anyhow::Result;
 
 #[repr(u16)]
 pub enum ApiKey {
@@ -20,7 +20,10 @@ pub trait ToKafka {
 }
 
 // TODO: do I really need Buf trait or can use concrete MutBuf type?
-pub trait FromKafka where Self: Sized {
+pub trait FromKafka
+where
+    Self: Sized,
+{
     fn from_kafka(buff: &mut impl Buf) -> Result<Self>;
 }
 
@@ -67,4 +70,3 @@ where
     let response = T::from_kafka(buff);
     (corr_id, response)
 }
-

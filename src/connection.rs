@@ -21,13 +21,13 @@
 
 use byteorder::BigEndian;
 use bytes::{ByteOrder, BytesMut};
-use std::net::{SocketAddr};
+use std::net::SocketAddr;
 
+use anyhow::{anyhow, Context, Result};
 use async_std::net::TcpStream;
 use async_std::prelude::*;
 use async_std::sync::Mutex;
 use std::sync::Arc;
-use anyhow::{Context, Result, anyhow};
 use tracing_attributes::instrument;
 
 pub(crate) const CLIENT_ID: &str = "k4rs";
@@ -48,7 +48,9 @@ struct Inner {
 impl BrokerConnection {
     /// Connect to address but do not perform any check beyond successful tcp connection.
     pub async fn connect(addr: SocketAddr) -> Result<Self> {
-        let tcp = TcpStream::connect(&addr).await.with_context(|| format!("BrokerConnection failed to connect to {:?}", addr))?;
+        let tcp = TcpStream::connect(&addr)
+            .await
+            .with_context(|| format!("BrokerConnection failed to connect to {:?}", addr))?;
 
         let conn = BrokerConnection {
             addr,
@@ -61,12 +63,16 @@ impl BrokerConnection {
         Ok(conn)
     }
 
-    #[instrument(level="debug", err, skip(self, buf))]
+    #[instrument(level = "debug", err, skip(self, buf))]
     pub async fn request(&self, buf: &mut BytesMut) -> Result<()> {
         let mut inner = self.inner.lock().await;
         let tcp = &mut inner.tcp;
         trace!("Sending request[{}] to {:?}", buf.len(), tcp.peer_addr());
-        tcp.write_all(&buf).await.context(anyhow!("writing {} bytes to socket {:?}", buf.len(), tcp.peer_addr()))?;
+        tcp.write_all(&buf).await.context(anyhow!(
+            "writing {} bytes to socket {:?}",
+            buf.len(),
+            tcp.peer_addr()
+        ))?;
         //debug!("Sent request");
 
         // TODO: buffer reuse
@@ -250,7 +256,8 @@ mod tests {
                     let mut buff = BytesMut::with_capacity(1024); //Vec::new();
                     write_request(&request, 0, None, &mut buff);
                     conn.request(&mut buff).await.unwrap();
-                    let (correlation_id, versions): (_, Result<ApiVersionsResponse0>) = read_response(&mut Cursor::new(buff));
+                    let (correlation_id, versions): (_, Result<ApiVersionsResponse0>) =
+                        read_response(&mut Cursor::new(buff));
                     debug!(
                         "correlationId: {}, versions: {:?}",
                         correlation_id, versions

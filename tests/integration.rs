@@ -1,23 +1,26 @@
 extern crate kafka4rust;
 mod utils;
 
-use kafka4rust::{Producer, Consumer, Response};
-use rand;
-use rand::Rng;
-use rand::distributions::Alphanumeric;
+use crate::utils::*;
 use anyhow::Result;
+use kafka4rust::{Consumer, Producer, Response};
+use log::debug;
+use opentelemetry::{api::Provider, global};
+use rand;
+use rand::distributions::Alphanumeric;
+use rand::Rng;
 use std::collections::HashSet;
 use tokio;
-use crate::utils::*;
-use log::debug;
-use tracing::{self, Level, event, span, dispatcher};
-use opentelemetry::{api::Provider, global};
-use tracing_subscriber::Registry;
-use tracing_subscriber::layer::SubscriberExt;
+use tracing::{self, dispatcher, event, span, Level};
 use tracing_futures::Instrument;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Registry;
 
-fn random_topic() -> String{
-    let topic: String = rand::thread_rng().sample_iter(Alphanumeric).take(7).collect();
+fn random_topic() -> String {
+    let topic: String = rand::thread_rng()
+        .sample_iter(Alphanumeric)
+        .take(7)
+        .collect();
     format!("test_{}", topic)
 }
 
@@ -43,11 +46,10 @@ async fn topic_is_autocreated_by_producer() -> Result<()> {
     let acks = tokio::spawn(async move {
         while let Some(ack) = responses.recv().await {
             match ack {
-                Response::Ack {..} => debug!("Ack: {:?}", ack),
-                Response::Nack {..} => assert!(false, "Got nack, send failed: {:?}", ack),
+                Response::Ack { .. } => debug!("Ack: {:?}", ack),
+                Response::Nack { .. } => assert!(false, "Got nack, send failed: {:?}", ack),
             }
-
-        };
+        }
     });
 
     let span = tracing::span!(tracing::Level::ERROR, "send");
@@ -58,13 +60,13 @@ async fn topic_is_autocreated_by_producer() -> Result<()> {
         event!(Level::INFO, %msg, "Sent");
         producer.send(msg, &topic).await?;
     }
-    producer.close()
+    producer
+        .close()
         .instrument(tracing::trace_span!("Closing producer"))
         .await?;
     debug!("Producer closed");
 
-    acks
-        .instrument(tracing::trace_span!("Awaiting for acks"))
+    acks.instrument(tracing::trace_span!("Awaiting for acks"))
         .await?;
 
     debug!("Acks received");
@@ -101,11 +103,7 @@ async fn leader_down_producer_and_consumer_recovery() -> Result<()> {
     docker_up()?;
     let _dg = DockerGuard {};
 
-
-
     Ok(())
 }
 
-fn topic_can_not_be_created() {
-    
-}
+fn topic_can_not_be_created() {}

@@ -8,7 +8,6 @@ pub enum KafkaError {
 
     //#[error("Dns resolution failed: {0}")]
     //DnsFailed(String),
-
     #[error("Unexpected recordset magic. Can handle only '2' but got '{0}'")]
     UnexpectedRecordsetMagic(u8),
 

@@ -1,15 +1,15 @@
 use crate::connection::BrokerConnection;
 use crate::protocol;
 use crate::protocol::*;
+use anyhow::anyhow;
+use anyhow::{Context, Result};
+use bytes::BytesMut;
 use log::{debug, trace};
+use std::fmt::Debug;
 use std::io::Cursor;
 use std::net::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use bytes::BytesMut;
-use anyhow::{Result, Context};
-use std::fmt::Debug;
 use tracing_attributes::instrument;
-use anyhow::anyhow;
 
 // TODO: if move negotiated api and correlation to broker connection, this struct degenerates.
 // Is it redundant?
@@ -27,7 +27,9 @@ impl Broker {
     /// Connect to address and issue ApiVersion request, build compatible Api Versions for all Api
     /// Keys
     pub async fn connect(addr: SocketAddr) -> Result<Self> {
-        let conn = BrokerConnection::connect(addr).await.context("Broker:connect")?;
+        let conn = BrokerConnection::connect(addr)
+            .await
+            .context("Broker:connect")?;
         let req = protocol::ApiVersionsRequest0 {};
         //let mut buf = Vec::with_capacity(1024);
         let mut buf = BytesMut::with_capacity(1024);
@@ -36,10 +38,13 @@ impl Broker {
 
         write_request(&req, correlation_id, None, &mut buf);
         trace!("Requesting Api versions");
-        conn.request(&mut buf).await.context(anyhow!("Broker:connect({}) failed", addr))?;
+        conn.request(&mut buf)
+            .await
+            .context(anyhow!("Broker:connect({}) failed", addr))?;
 
         let mut cursor = Cursor::new(buf);
-        let (_corr_id, response): (u32, Result<protocol::ApiVersionsResponse0>) = read_response(&mut cursor);
+        let (_corr_id, response): (u32, Result<protocol::ApiVersionsResponse0>) =
+            read_response(&mut cursor);
         let response = response.context("Broker::connect requesting Api versions")?;
         trace!("Got ApiVersionResponse {:?}", response);
         response.error_code.as_result()?;
@@ -51,18 +56,21 @@ impl Broker {
         })
     }
 
-    #[instrument(level="debug", err, skip(self, request))]
+    #[instrument(level = "debug", err, skip(self, request))]
     pub async fn send_request<R>(&self, request: &R) -> Result<R::Response>
     where
         R: protocol::Request,
     {
         // TODO: buffer management
         // TODO: ensure capacity (BytesMut will panic if out of range)
-        let mut buff = BytesMut::with_capacity(20*1024); //Vec::with_capacity(1024);
+        let mut buff = BytesMut::with_capacity(20 * 1024); //Vec::with_capacity(1024);
         let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
         protocol::write_request(request, correlation_id, None, &mut buff);
 
-        self.conn.request(&mut buff).await.context("Broker: sending request")?;
+        self.conn
+            .request(&mut buff)
+            .await
+            .context("Broker: sending request")?;
         let mut cursor = Cursor::new(buff);
         let (_corr_id, response): (_, Result<R::Response>) = read_response(&mut cursor);
         let response = response?;
@@ -71,11 +79,13 @@ impl Broker {
         Ok(response)
     }
 
-    #[instrument(level="debug", skip(self, request))]
-    pub async fn send_request2<R: FromKafka + Debug>(&self, mut request: BytesMut) -> Result<R>
-    {
+    #[instrument(level = "debug", skip(self, request))]
+    pub async fn send_request2<R: FromKafka + Debug>(&self, mut request: BytesMut) -> Result<R> {
         debug!("Sending conn.request()...");
-        self.conn.request(&mut request).await.context("Broker: sending request")?;
+        self.conn
+            .request(&mut request)
+            .await
+            .context("Broker: sending request")?;
         debug!("Sent conn.request(). Result buff len: {}", request.len());
         let mut cursor = Cursor::new(request);
         let (_corr_id, response): (_, Result<R>) = read_response(&mut cursor);
@@ -86,12 +96,12 @@ impl Broker {
 
     /// Generate correlation_id and serialize request to buffer
     pub fn mk_request<R>(&self, request: R) -> BytesMut
-        where
-            R: protocol::Request,
+    where
+        R: protocol::Request,
     {
         // TODO: buffer management
         // TODO: dynamic buffer allocation
-        let mut buff = BytesMut::with_capacity(10*1024); //Vec::with_capacity(1024);
+        let mut buff = BytesMut::with_capacity(10 * 1024); //Vec::with_capacity(1024);
         let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
         protocol::write_request(&request, correlation_id, None, &mut buff);
 
@@ -109,7 +119,8 @@ impl Broker {
         let my_versions = protocol::supported_versions();
         trace!(
             "build_api_compatibility my_versions: {:?} them: {:?}",
-            my_versions, them
+            my_versions,
+            them
         );
 
         them.api_versions

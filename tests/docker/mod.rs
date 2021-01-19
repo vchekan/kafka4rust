@@ -1,11 +1,11 @@
+use log::{debug, error, info};
 use std::process::{Command, Output};
-use log::{debug, info, error};
 
 pub struct DockerGuard {}
 
 pub fn up() -> DockerGuard {
     docker_cmd(&["--log-level", "ERROR", "up", "-d"]);
-    DockerGuard{}
+    DockerGuard {}
 }
 
 impl Drop for DockerGuard {
@@ -19,16 +19,17 @@ fn docker_cmd(cmd: &[&str]) -> Output {
         .current_dir("docker")
         .args(cmd)
         .spawn()
-        .expect("Docker command failed").wait_with_output().unwrap()
+        .expect("Docker command failed")
+        .wait_with_output()
+        .unwrap()
 }
-
 
 pub fn hard_kill_kafka(port: i32) {
     // See docker/docker-compose.yml
-    let service = match(port) {
+    let service = match (port) {
         9092 => "broker1",
         9093 => "broker2",
-        _ => panic!("Unknown port: {}", port)
+        _ => panic!("Unknown port: {}", port),
     };
     info!("Killing broker '{}'", service);
     let out = docker_cmd(&["exec", service, "kill", "-9", "6"]);

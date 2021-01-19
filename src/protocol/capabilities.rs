@@ -8,27 +8,41 @@ use super::requests::*;
 }*/
 
 impl HasApiKey for FetchRequest5 {
-    fn api_key() -> ApiKey { ApiKey::Fetch }
+    fn api_key() -> ApiKey {
+        ApiKey::Fetch
+    }
 }
 
 impl HasApiKey for ListOffsetsRequest0 {
-    fn api_key() -> ApiKey { ApiKey::ListOffsets }
+    fn api_key() -> ApiKey {
+        ApiKey::ListOffsets
+    }
 }
 impl HasApiKey for MetadataRequest0 {
-    fn api_key() -> ApiKey { ApiKey::Metadata }
+    fn api_key() -> ApiKey {
+        ApiKey::Metadata
+    }
 }
 impl HasApiKey for ListGroupRequest0 {
-    fn api_key() -> ApiKey { ApiKey::ListGroup }
+    fn api_key() -> ApiKey {
+        ApiKey::ListGroup
+    }
 }
 impl HasApiKey for ApiVersionsRequest0 {
-    fn api_key() -> ApiKey { ApiKey::ApiVersions }
+    fn api_key() -> ApiKey {
+        ApiKey::ApiVersions
+    }
 }
 impl HasApiKey for ApiVersionsRequest1 {
-    fn api_key() -> ApiKey { ApiKey::ApiVersions }
+    fn api_key() -> ApiKey {
+        ApiKey::ApiVersions
+    }
 }
 
 impl HasApiVersion for FetchRequest5 {
-    fn api_version() -> u16 { 5 }
+    fn api_version() -> u16 {
+        5
+    }
 }
 impl HasApiVersion for ListOffsetsRequest0 {
     fn api_version() -> u16 {

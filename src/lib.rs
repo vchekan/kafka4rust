@@ -2,26 +2,25 @@
 #![feature(async_closure)]
 #![feature(backtrace)]
 
-mod types;
-mod error;
-pub mod protocol;
-mod zigzag;
-mod utils;
-mod connection;
-mod producer;
-mod cluster;
 mod broker;
+mod cluster;
+mod connection;
 mod consumer;
-mod murmur2a;
+mod error;
 mod futures;
+mod murmur2a;
+mod producer;
+pub mod protocol;
+mod types;
+mod utils;
+mod zigzag;
 
 pub mod admin;
 
 #[macro_use]
 extern crate log;
 
-pub use self::consumer::{Consumer, ConsumerConfig};
-pub use self::producer::{Producer, Response, BinMessage, StringMessage, FixedPartitioner};
-pub use self::error::KafkaError;
 pub use self::cluster::Cluster;
-
+pub use self::consumer::{Consumer, ConsumerConfig};
+pub use self::error::KafkaError;
+pub use self::producer::{BinMessage, FixedPartitioner, Producer, Response, StringMessage};

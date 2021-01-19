@@ -1,16 +1,16 @@
-use kafka4rust::{Producer, KafkaError, Consumer, FixedPartitioner};
+use anyhow::Result;
+use futures::stream::{self, StreamExt};
+use kafka4rust::admin;
+use kafka4rust::{Consumer, FixedPartitioner, KafkaError, Producer};
+use log::{debug, info, LevelFilter};
 use rand;
 use rand::seq::IteratorRandom;
+use simple_logger;
+use std::collections::HashSet;
 use std::iter::FromIterator;
 use std::matches;
-use futures::stream::{self, StreamExt};
-use simple_logger;
-use log::{debug, info, LevelFilter};
 use std::thread::sleep;
 use std::time::Duration;
-use std::collections::HashSet;
-use kafka4rust::admin;
-use anyhow::Result;
 
 mod docker;
 
@@ -48,21 +48,31 @@ async fn producer_creates_topic() {
     info!("Starting test");
     let _d = docker::up();
     let topic = format!("test_topic_{}", random_string(5));
-    let (mut p,rx) = Producer::new("localhost").unwrap();
-    for i in &[1,2,3,4,5] {
+    let (mut p, rx) = Producer::new("localhost").unwrap();
+    for i in &[1, 2, 3, 4, 5] {
         let msg = format!("msg-{}", i);
         p.send(msg, &topic).await;
     }
     p.close().await;
 
-    let mut consumer = Consumer::builder().bootstrap("localhost").topic(topic).build().await.unwrap();
-    let res: Vec<_> = consumer.flat_map(|batch| stream::iter(batch.messages))
+    let mut consumer = Consumer::builder()
+        .bootstrap("localhost")
+        .topic(topic)
+        .build()
+        .await
+        .unwrap();
+    let res: Vec<_> = consumer
+        .flat_map(|batch| stream::iter(batch.messages))
         .map(|msg| String::from_utf8(msg.value).unwrap())
-        .take(5).collect().await;
+        .take(5)
+        .collect()
+        .await;
     //let messages = consumer.recv().await.unwrap();
     println!("res: {:?}", res);
     assert_eq!(
-        (1..=5).map(|n| format!("msg-{}", n)).collect::<HashSet<_>>(),
+        (1..=5)
+            .map(|n| format!("msg-{}", n))
+            .collect::<HashSet<_>>(),
         HashSet::from_iter(res.into_iter())
     );
 }
@@ -80,10 +90,13 @@ async fn leader_down_producer_and_consumer_recovery() {
     info!("Starting leader_down_producer_and_consumer_recovery()");
     let _d = docker::up();
     let topic = format!("test_topic_{}", random_string(5));
-    let (mut p,rx) = Producer::with_hasher("localhost", Box::new(FixedPartitioner{0: 0_u32})).unwrap();
+    let (mut p, rx) =
+        Producer::with_hasher("localhost", Box::new(FixedPartitioner { 0: 0_u32 })).unwrap();
     for i in 1..10 {
         if i == 5 {
-            let meta = admin::get_topic_metadata("localhost", &topic).await.unwrap();
+            let meta = admin::get_topic_metadata("localhost", &topic)
+                .await
+                .unwrap();
             //debug!("Got metadata: {:#?}", meta);
             let leader = meta.topics[0].partition_metadata[0].leader;
             let leader = &meta.brokers.iter().find(|b| b.node_id == leader).unwrap();
@@ -162,20 +175,20 @@ ReadFromHead
  */
 
 /*
-        // if attempt to fetch from offset out of range, excption is thrown
-        //[Test]
-        //public void OutOfRangeOffsetThrows()
-        //{
+       // if attempt to fetch from offset out of range, excption is thrown
+       //[Test]
+       //public void OutOfRangeOffsetThrows()
+       //{
 
-        //}
+       //}
 
-        //// implicit offset is defaulted to fetching from the end
-        //[Test]
-        //public void DefaultPositionToTheTail()
-        //{
+       //// implicit offset is defaulted to fetching from the end
+       //[Test]
+       //public void DefaultPositionToTheTail()
+       //{
 
-        //}
- */
+       //}
+*/
 
 /*
 TopicPartitionOffsetsSerializeAndDeSerialize
@@ -207,7 +220,6 @@ slow consumer
             // 2. Create slow consumer and start consuming at rate 1msg/sec
             // 3. ???
  */
-
 
 /*
 InvalidOffsetShouldLogErrorAndStopFetching
@@ -242,51 +254,51 @@ memory consumption
  */
 
 /*
-        // if one broker hangs on connect, client will be ready as soon as connected via another broker
+       // if one broker hangs on connect, client will be ready as soon as connected via another broker
 
-        // Short disconnect (within timeout) wont lose any messages and will deliver all of them.
-        // Temp error will be triggered
+       // Short disconnect (within timeout) wont lose any messages and will deliver all of them.
+       // Temp error will be triggered
 
-        // Parallel producers send messages to proper topics
+       // Parallel producers send messages to proper topics
 
-        // Test non-keyed messages. What to test?
+       // Test non-keyed messages. What to test?
 
-        // Big message batching does not cause too big payload exception
+       // Big message batching does not cause too big payload exception
 
-        // when kafka delete is implemented, test deleting topic cause delete metadata in driver
-        // and proper message error
+       // when kafka delete is implemented, test deleting topic cause delete metadata in driver
+       // and proper message error
 
-        // Analize correlation example
-        // C:\funprojects\rx\Rx.NET\Samples\EventCorrelationSample\EventCorrelationSample\Program.cs
+       // Analize correlation example
+       // C:\funprojects\rx\Rx.NET\Samples\EventCorrelationSample\EventCorrelationSample\Program.cs
 
-        // Adaptive timeout and buffer size on fetch?
+       // Adaptive timeout and buffer size on fetch?
 
-        // If connection lost, recover. But if too frequent, do not loop infinitely
-        // establishing connection but fail permanently.
+       // If connection lost, recover. But if too frequent, do not loop infinitely
+       // establishing connection but fail permanently.
 
-        // When one consumer fails and recovers (leader changed), another, inactive one will
-        // update its connection mapping just by listening to changes in routing table and not
-        // though error and recovery, when it becomes active.
+       // When one consumer fails and recovers (leader changed), another, inactive one will
+       // update its connection mapping just by listening to changes in routing table and not
+       // though error and recovery, when it becomes active.
 
-        // The same key sends message to be in the same partition
+       // The same key sends message to be in the same partition
 
-        // If 2 consumers subscribed, and than unsubscribed, fetcher must stop pooling.
+       // If 2 consumers subscribed, and than unsubscribed, fetcher must stop pooling.
 
-        // Kafka bug? Fetch to broker that has topic but not the partition, returns no error for partition, but [-1,-1,0] offsets
+       // Kafka bug? Fetch to broker that has topic but not the partition, returns no error for partition, but [-1,-1,0] offsets
 
-        // Do I need SynchronizationContext in addition to EventLoopScheduler when using async?
+       // Do I need SynchronizationContext in addition to EventLoopScheduler when using async?
 
-        // When server close tcp socket, Fetch will wait until timeout. It would be better to
-        // react to connection closure immediatelly.
+       // When server close tcp socket, Fetch will wait until timeout. It would be better to
+       // react to connection closure immediatelly.
 
-        // Sending messages to Producer after shutdown causes error
+       // Sending messages to Producer after shutdown causes error
 
-        // Clean shutdown doe not produce shutdown error callbacks
+       // Clean shutdown doe not produce shutdown error callbacks
 
-        // OnSuccess is fired if topic was autocreated, there was no errors, there were 1 or more errors with leaders change
+       // OnSuccess is fired if topic was autocreated, there was no errors, there were 1 or more errors with leaders change
 
-        // For same key, order of the messages is preserved
- */
+       // For same key, order of the messages is preserved
+*/
 
 /*
 UncompressJavaGeneratedMessage
@@ -296,7 +308,8 @@ UncompressJavaGeneratedMessage
 JavaCanReadCompressedMessages
  */
 
-
 fn init_log() {
-    simple_logger::SimpleLogger::default().with_level(LevelFilter::Debug).init();
+    simple_logger::SimpleLogger::default()
+        .with_level(LevelFilter::Debug)
+        .init();
 }

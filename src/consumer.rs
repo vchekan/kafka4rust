@@ -4,26 +4,26 @@
 //!
 //!
 
-use crate::cluster::Cluster;
-use crate::protocol;
-use crate::error::KafkaError;
-use crate::types::{BrokerId, Partition};
 use crate::broker::Broker;
+use crate::cluster::Cluster;
+use crate::error::KafkaError;
+use crate::protocol;
+use crate::protocol::Recordset;
+use crate::types::{BrokerId, Partition};
 use crate::utils;
+use anyhow::Result;
+use itertools::Itertools;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-use itertools::Itertools;
 use tracing::{debug_span, event, Level};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
-use crate::protocol::Recordset;
-use anyhow::Result;
 
 // TODO: offset start: -2, end: -1
 pub enum StartOffset {
     Earliest,
-    Latest
+    Latest,
 }
 
 pub struct ConsumerConfig {
@@ -51,14 +51,14 @@ impl ConsumerConfig {
     fn get_bootstrap(&self) -> &str {
         match &self.bootstrap {
             Some(b) => b.as_str(),
-            None => "localhost"
+            None => "localhost",
         }
     }
 
     fn get_topic(&self) -> Result<&str, KafkaError> {
         match &self.topic {
             Some(t) => Ok(t.as_str()),
-            None => Err(KafkaError::Config("Consumer topic is not set".to_string()))
+            None => Err(KafkaError::Config("Consumer topic is not set".to_string())),
         }
     }
 
@@ -84,9 +84,11 @@ impl Batch {
         Batch {
             partition,
             high_watermark,
-            messages: rs.messages.into_iter().map(|value|
-                Message {key: vec![], value}
-            ).collect()
+            messages: rs
+                .messages
+                .into_iter()
+                .map(|value| Message { key: vec![], value })
+                .collect(),
         }
     }
 }
@@ -100,14 +102,19 @@ pub struct Consumer {
 }
 
 impl Consumer {
-    pub fn builder() -> ConsumerConfig { ConsumerConfig::new() }
+    pub fn builder() -> ConsumerConfig {
+        ConsumerConfig::new()
+    }
 
     #[instrument(skip(config))]
     pub async fn new(config: ConsumerConfig) -> Result<Receiver<Batch>, KafkaError> {
         let seed_list = utils::resolve_addr(&config.get_bootstrap());
         debug!("Resolved bootstrap list: {:?}", seed_list);
         if seed_list.is_empty() {
-            return Err(KafkaError::NoBrokerAvailable(format!("Failed to resolve any address in bootstrap: {:?}", config.bootstrap)));
+            return Err(KafkaError::NoBrokerAvailable(format!(
+                "Failed to resolve any address in bootstrap: {:?}",
+                config.bootstrap
+            )));
         }
 
         let mut cluster = Cluster::new(seed_list);
@@ -127,14 +134,25 @@ impl Consumer {
     }
 }
 
-#[instrument(level="debug", err, skip(cluster, tx, topic_meta, config))]
-async fn fetch_loop(mut cluster: Cluster, tx: Sender<Batch>, topic_meta: protocol::MetadataResponse0, config: ConsumerConfig) -> Result<()> {
+#[instrument(level = "debug", err, skip(cluster, tx, topic_meta, config))]
+async fn fetch_loop(
+    mut cluster: Cluster,
+    tx: Sender<Batch>,
+    topic_meta: protocol::MetadataResponse0,
+    config: ConsumerConfig,
+) -> Result<()> {
     let mut offsets = vec![0_u64; topic_meta.topics[0].partition_metadata.len()];
     loop {
         // group partitions by leader broker
-        let mut grouped_partitions: Vec<(u32, i32)> = topic_meta.topics[0].partition_metadata.iter().map(|p| (p.partition, p.leader)).collect();
+        let mut grouped_partitions: Vec<(u32, i32)> = topic_meta.topics[0]
+            .partition_metadata
+            .iter()
+            .map(|p| (p.partition, p.leader))
+            .collect();
         grouped_partitions.sort_by_key(|(_p, leader)| *leader);
-        let grouped_partitions = grouped_partitions.into_iter().group_by(|(_p, leader)| *leader);
+        let grouped_partitions = grouped_partitions
+            .into_iter()
+            .group_by(|(_p, leader)| *leader);
 
         let fetch_requests: Vec<_> = grouped_partitions.into_iter().map(|(leader, partition_meta_group)| {
             let request = protocol::FetchRequest5 {
@@ -177,7 +195,8 @@ async fn fetch_loop(mut cluster: Cluster, tx: Sender<Batch>, topic_meta: protoco
                 Ok(response) => {
                     if response.throttle_time != 0 {
                         debug!("Throttling: sleeping for {}ms", response.throttle_time);
-                        tokio::time::sleep(Duration::from_millis(response.throttle_time as u64)).await;
+                        tokio::time::sleep(Duration::from_millis(response.throttle_time as u64))
+                            .await;
                     }
                     for response in response.responses {
                         // TODO: return topic in message
@@ -189,8 +208,17 @@ async fn fetch_loop(mut cluster: Cluster, tx: Sender<Batch>, topic_meta: protoco
                             let last_offset = recordset.last_offset();
                             let dataset_size = recordset.messages.len();
                             if dataset_size > 0 {
-                                debug!("Partition#{} records[{}] offset {}", partition, recordset.messages.len(), recordset.base_offset);
-                                let batch = Batch::form_recordset(partition, fetch_partition.high_watermark, recordset);
+                                debug!(
+                                    "Partition#{} records[{}] offset {}",
+                                    partition,
+                                    recordset.messages.len(),
+                                    recordset.base_offset
+                                );
+                                let batch = Batch::form_recordset(
+                                    partition,
+                                    fetch_partition.high_watermark,
+                                    recordset,
+                                );
 
                                 let send_res = tx.send(batch)
                                     .instrument(debug_span!("Sending message", %leader, %partition, %last_offset, %dataset_size))
@@ -205,11 +233,15 @@ async fn fetch_loop(mut cluster: Cluster, tx: Sender<Batch>, topic_meta: protoco
                             // advance offset
                             if dataset_size > 0 {
                                 offsets[partition as usize] = last_offset + 1;
-                                debug!("Advanced offset partition#{} to {}", partition, last_offset + 1);
+                                debug!(
+                                    "Advanced offset partition#{} to {}",
+                                    partition,
+                                    last_offset + 1
+                                );
                             }
                         }
                     }
-                },
+                }
                 Err(_e) => {
                     // TODO: find error and log it. Check either it is recoverable.
                     debug!("Fetch failed");
@@ -219,7 +251,8 @@ async fn fetch_loop(mut cluster: Cluster, tx: Sender<Batch>, topic_meta: protoco
 
         // TODO: configurable fetch frequency
         tokio::time::sleep(Duration::from_millis(300))
-            .instrument(debug_span!("Delay between fetches")).await;
+            .instrument(debug_span!("Delay between fetches"))
+            .await;
     }
 }
 

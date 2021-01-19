@@ -1,10 +1,10 @@
 use crate::producer::QueuedMessage;
+use crate::protocol::{ApiKey, HasApiKey, HasApiVersion, ProduceResponse3, Request, ToKafka};
 use crate::zigzag::{put_zigzag64, zigzag_len};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use crc32c::crc32c;
 use std::collections::HashMap;
-use crate::protocol::{ApiKey, HasApiKey, Request, ProduceResponse3, HasApiVersion, ToKafka};
 
 const ZERO32: [u8; 4] = [0, 0, 0, 0];
 const ZERO64: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
@@ -37,7 +37,9 @@ pub(crate) struct ProduceRequest3<'a> {
 }
 
 impl HasApiKey for ProduceRequest3<'_> {
-    fn api_key() -> ApiKey { ApiKey::Produce }
+    fn api_key() -> ApiKey {
+        ApiKey::Produce
+    }
 }
 
 impl Request for ProduceRequest3<'_> {
@@ -45,9 +47,10 @@ impl Request for ProduceRequest3<'_> {
 }
 
 impl HasApiVersion for ProduceRequest3<'_> {
-    fn api_version() -> u16 { 3 }
+    fn api_version() -> u16 {
+        3
+    }
 }
-
 
 impl ToKafka for ProduceRequest3<'_> {
     fn to_kafka(&self, buff: &mut BytesMut) {
@@ -55,10 +58,8 @@ impl ToKafka for ProduceRequest3<'_> {
     }
 }
 
-
 impl ProduceRequest3<'_> {
     pub(crate) fn serialize(&self, buf: &mut BytesMut) {
-
         serialize_string_opt(&self.transactional_id, buf);
 
         buf.reserve(2 + 4);
@@ -94,7 +95,7 @@ impl ProduceRequest3<'_> {
                     + 8 // producer id
                     + 2 // producer epoch
                     + 4 // base sequence
-                    + 4,// recordset size
+                    + 4, // recordset size
                 );
 
                 let recordset_bookmark = buf.len();
@@ -111,14 +112,17 @@ impl ProduceRequest3<'_> {
                     CompressionType::None as u16    // TODO
                     | TimestampType::Create as u16,
                 );
-                buf.put_u32_be((recordset1.len() + recordset2.len()) as u32 -1); // last offset delta
+                buf.put_u32_be((recordset1.len() + recordset2.len()) as u32 - 1); // last offset delta
 
                 // TODO: timestamp messages and get timestamp from the first one
                 // TODO: if timestamp is client generated, it is possible it will be negative.
                 //  Should we find min or encode signed i64?
                 // TODO: take into account, is timestamp client or log type.
-                let first_timestamp = recordset1.first().or_else(|| recordset2.first()).
-                    expect("Empty recordset").timestamp;
+                let first_timestamp = recordset1
+                    .first()
+                    .or_else(|| recordset2.first())
+                    .expect("Empty recordset")
+                    .timestamp;
                 buf.put_u64_be(first_timestamp);
                 // TODO: max timestamp
                 buf.put_u64_be(first_timestamp);
@@ -144,7 +148,7 @@ impl ProduceRequest3<'_> {
                 BigEndian::write_u32(&mut buf[batch_len_bookmark..], batch_len as u32);
 
                 // Calculate Crc after all length are set
-                let  crc = crc32c(&buf[crc_bookmark + 4..]);
+                let crc = crc32c(&buf[crc_bookmark + 4..]);
                 BigEndian::write_u32(&mut buf[crc_bookmark..], crc);
             }
         }

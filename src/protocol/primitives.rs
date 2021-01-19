@@ -1,10 +1,10 @@
 use super::api::*;
-use bytes::{Buf, BytesMut, BufMut};
-use std::fmt::Debug;
-use crate::protocol::ErrorCode;
 use crate::error::KafkaError;
+use crate::protocol::ErrorCode;
 use crate::zigzag::*;
 use anyhow::Result;
+use bytes::{Buf, BufMut, BytesMut};
+use std::fmt::Debug;
 
 //
 // Primitive types serializtion
@@ -96,42 +96,54 @@ impl FromKafka for String {
 
 impl FromKafka for u32 {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
-        if buff.remaining() < 4 { return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into()); }
+        if buff.remaining() < 4 {
+            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+        }
         Ok(buff.get_u32_be())
     }
 }
 
 impl FromKafka for i32 {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
-        if buff.remaining() < 4 { return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into()); }
+        if buff.remaining() < 4 {
+            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+        }
         Ok(buff.get_i32_be())
     }
 }
 
 impl FromKafka for u64 {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
-        if buff.remaining() < 8 { return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into()); }
+        if buff.remaining() < 8 {
+            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+        }
         Ok(buff.get_u64_be())
     }
 }
 
 impl FromKafka for i64 {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
-        if buff.remaining() < 8 { return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into()); }
+        if buff.remaining() < 8 {
+            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+        }
         Ok(buff.get_i64_be())
     }
 }
 
 impl FromKafka for u16 {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
-        if buff.remaining() < 2 { return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into()); }
+        if buff.remaining() < 2 {
+            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+        }
         Ok(buff.get_u16_be())
     }
 }
 
 impl FromKafka for i16 {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
-        if buff.remaining() < 2 { return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into()); }
+        if buff.remaining() < 2 {
+            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+        }
         Ok(buff.get_i16_be())
     }
 }
@@ -141,13 +153,17 @@ where
     T: FromKafka + Debug,
 {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
-        if buff.remaining() < 4 { return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into()); }
+        if buff.remaining() < 4 {
+            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+        }
         let len = buff.get_i32_be();
         if len == -1 || len == 0 {
             return Ok(vec![]);
         }
 
-        if buff.remaining() < len as usize { return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into()); }
+        if buff.remaining() < len as usize {
+            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+        }
         let mut res = Vec::with_capacity(len as usize);
         for _ in 0..len {
             let t = T::from_kafka(buff)?;
@@ -159,7 +175,9 @@ where
 
 impl FromKafka for ErrorCode {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
-        if buff.remaining() < 2 { return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into()); }
+        if buff.remaining() < 2 {
+            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+        }
         let code = buff.get_i16_be();
         if code >= -1 && code <= 87 {
             Ok(unsafe { std::mem::transmute(code) })
@@ -178,7 +196,9 @@ pub struct Recordset {
 }
 
 impl Recordset {
-    pub fn last_offset(&self) -> u64 { self.base_offset + self.last_offset_delta as u64 }
+    pub fn last_offset(&self) -> u64 {
+        self.base_offset + self.last_offset_delta as u64
+    }
 }
 
 impl FromKafka for Recordset {
@@ -195,24 +215,28 @@ impl FromKafka for Recordset {
             return Ok(Recordset {
                 base_offset: 0,
                 last_offset_delta: 0,
-                messages: vec![]
+                messages: vec![],
             });
         }
 
         // TODO: assert buff size
-        let magic = buff.bytes().get(8+4+4);
+        let magic = buff.bytes().get(8 + 4 + 4);
         match magic {
-            Option::None => { return Err(KafkaError::CorruptMessage("EOF reading magic").into()); },
-            Some(2) => {},
-            Some(magic) => { return Err(KafkaError::UnexpectedRecordsetMagic(*magic).into()); }
+            Option::None => {
+                return Err(KafkaError::CorruptMessage("EOF reading magic").into());
+            }
+            Some(2) => {}
+            Some(magic) => {
+                return Err(KafkaError::UnexpectedRecordsetMagic(*magic).into());
+            }
         };
-        
+
         let base_offset = buff.get_i64_be() as u64;
         // TODO: should I apply additional len-restricted view?
         let _batch_len = buff.get_u32_be();
         let _partition_leader_epoch = buff.get_u32_be();
-        buff.get_u8();  // skip magic, we've checked it already
-        // TODO: check crc
+        buff.get_u8(); // skip magic, we've checked it already
+                       // TODO: check crc
         let _crc = buff.get_u32_be();
         let _attributes = buff.get_u16_be();
         let last_offset_delta = buff.get_u32_be();
@@ -223,10 +247,10 @@ impl FromKafka for Recordset {
         let _base_sequence = buff.get_u32_be();
 
         let records_len = buff.get_u32_be();
-        let mut recordset = Recordset{
+        let mut recordset = Recordset {
             base_offset,
             last_offset_delta,
-            messages: vec![]
+            messages: vec![],
         };
         for _ in 0..records_len {
             let len = get_zigzag64(buff);

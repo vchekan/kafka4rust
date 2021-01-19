@@ -1,13 +1,14 @@
 use anyhow::Result;
-use std::process;
-use opentelemetry_jaeger;
 use opentelemetry::{global, sdk};
+use opentelemetry_jaeger;
+use std::process;
 
 pub fn docker_down() -> Result<()> {
     assert!(process::Command::new("docker-compose")
         .current_dir("docker")
         .arg("down")
-        .status()?.success());
+        .status()?
+        .success());
     Ok(())
 }
 
@@ -31,8 +32,8 @@ impl Drop for DockerGuard {
 
 pub fn init_tracer() -> thrift::Result<()> {
     let exporter = opentelemetry_jaeger::Exporter::builder()
-         .with_agent_endpoint("localhost:6831".parse().unwrap())
-         .with_process(opentelemetry_jaeger::Process {
+        .with_agent_endpoint("localhost:6831".parse().unwrap())
+        .with_process(opentelemetry_jaeger::Process {
             service_name: "kafka4rust".to_string(),
             tags: vec![
                 //Key::new("exporter").string("jaeger"),
