@@ -26,45 +26,19 @@ pub enum StartOffset {
     Latest,
 }
 
+//#[derive(Builder)]
 pub struct ConsumerConfig {
-    bootstrap: Option<String>,
-    topic: Option<String>,
+    //#[builder(default = "\"localhost:9092\"")]
+    bootstrap: String,
+    topic: String,
 }
 
 impl ConsumerConfig {
-    fn new() -> ConsumerConfig {
+    pub fn new(topic: &str) -> Self {
         ConsumerConfig {
-            bootstrap: None,
-            topic: None,
-        }
-    }
-
-    pub fn bootstrap(mut self, bootstrap: &str) -> Self {
-        self.bootstrap = Some(bootstrap.to_string());
-        self
-    }
-    pub fn topic(mut self, topic: String) -> Self {
-        self.topic = Some(topic);
-        self
-    }
-
-    fn get_bootstrap(&self) -> &str {
-        match &self.bootstrap {
-            Some(b) => b.as_str(),
-            None => "localhost",
-        }
-    }
-
-    fn get_topic(&self) -> Result<&str, KafkaError> {
-        match &self.topic {
-            Some(t) => Ok(t.as_str()),
-            None => Err(KafkaError::Config("Consumer topic is not set".to_string())),
-        }
-    }
-
-    pub async fn build(self) -> Result<Receiver<Batch>, KafkaError> {
-        Consumer::new(self).await
-    }
+        bootstrap: "localhost:9092".to_string(),
+        topic: topic.to_string()
+    }}
 }
 
 pub struct Batch {
@@ -102,23 +76,19 @@ pub struct Consumer {
 }
 
 impl Consumer {
-    pub fn builder() -> ConsumerConfig {
-        ConsumerConfig::new()
-    }
-
     #[instrument(skip(config))]
-    pub async fn new(config: ConsumerConfig) -> Result<Receiver<Batch>, KafkaError> {
-        let seed_list = utils::resolve_addr(&config.get_bootstrap());
+    pub async fn new(config: ConsumerConfig) -> Result<Receiver<Batch>> {
+        let seed_list = utils::resolve_addr(&config.bootstrap);
         debug!("Resolved bootstrap list: {:?}", seed_list);
         if seed_list.is_empty() {
             return Err(KafkaError::NoBrokerAvailable(format!(
                 "Failed to resolve any address in bootstrap: {:?}",
                 config.bootstrap
-            )));
+            )).into());
         }
 
         let mut cluster = Cluster::new(seed_list);
-        let topic_meta = cluster.fetch_topic_meta(&[config.get_topic()?]).await?;
+        let topic_meta = cluster.fetch_topic_meta(&[&config.topic]).await?;
         debug!("Resolved topic: {:?}", topic_meta);
         assert_eq!(1, topic_meta.topics.len());
 
@@ -164,7 +134,7 @@ async fn fetch_loop(
                 topics: vec![
                     protocol::FetchTopic {
                         // TODO: use ref
-                        topic: config.topic.as_ref().expect("Topic is missing").clone(),
+                        topic: config.topic.clone(),
                         // TODO: all partitions for now, make configurable in the future
                         // TODO: track position
                         partitions: partition_meta_group.into_iter().map(|(partition, _leader)| {

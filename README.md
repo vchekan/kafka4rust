@@ -1,9 +1,4 @@
-## Goals
-* High quality, high performance and reliability kafka client
-* Implement modern async paradigm for best performance and low resource usage
-* Real life oriented implementation: instrumentation and troubleshooting friendly, good failure handling by design
-  and not afterthought
-* Easy way to integrate with other languages
+# Kafka client (personal project, work in progress) 
 
 ## Features
 * IPv6 support
@@ -11,16 +6,22 @@
 
 - [x] Tokio
 - [x] Serde
+- [ ] Recovery
+  - [ ] Producer
+  - [ ] Consumer
+  - [ ] Timeout
 - [ ] Client API
   - [x] Producer
   - [x] Consumer
+  - [ ] Compression
+  - [ ] Headers
   - [ ] Admin
   - [ ] Transactions
+  - [ ] SSL
 - [ ] Integration testing
     - [ ] Test with different executors (std-async, tokio)
 - [x] Open Tracing
     - [x] Use crate::tracing
-- [x] Decide on error strategy. Use dynamic error?
 * Wrappers
     - [x] C#
     - [x] Java
@@ -28,6 +29,7 @@
     - [ ] F#
     - [ ] Python
 * Enforce protocol response errors checks
+- [x] Decide on error strategy. Use dynamic error?
 - [x] Migrate off `failure` crate
     * enum + impl Error manually (in library)
     - [x] anyhow (recommended by withoutboats)
@@ -51,9 +53,13 @@
 * Failure model: fail up to connection reset instead of panic.
 * Use hashmap's raw_entry
 * Validate that BytesMut has always enough reserve bytes. Or switch to Vec?
+* Consider Slotmap https://docs.rs/slotmap/1.0.1/slotmap/
 
 ## Projects
 * CLI tools
+  - [ ] Read CLI guideline: https://github.com/cli-guidelines/cli-guidelines/blob/main/content/_index.md
+  - [ ] Consider cafkacat compatible command line
+  - [ ] Support avro, protobuf, thrift
 * Kafka mock: replay from file
 - [x] Wireshark decoder
 * Compaction and record batch analyzer
