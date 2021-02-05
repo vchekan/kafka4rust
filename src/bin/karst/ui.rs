@@ -24,6 +24,7 @@ use tui::{
     widgets::{Block, Borders, List, Paragraph, Row, Table},
     Frame,
 };
+use std::time::Duration;
 
 enum Page {
     Brokers,
@@ -124,7 +125,7 @@ pub async fn main_ui(bootstrap: &str) -> Result<()> {
         async move {
             tracing::event!(tracing::Level::DEBUG, %bootstrap, "Connecting");
             tx.send(Cmd::ConnState(ConnState::Connecting)).await?;
-            let mut cluster = Cluster::with_bootstrap(&bootstrap)?;
+            let mut cluster = Cluster::with_bootstrap(&bootstrap, Some(Duration::from_secs(20)))?;
             let topics_meta = cluster.fetch_topic_meta(&[]).await?;
             tracing::debug_span!("Connected");
             tx.send(Cmd::ConnState(ConnState::Connected)).await?;

@@ -26,9 +26,7 @@ pub enum StartOffset {
     Latest,
 }
 
-//#[derive(Builder)]
 pub struct ConsumerConfig {
-    //#[builder(default = "\"localhost:9092\"")]
     bootstrap: String,
     topic: String,
 }
@@ -87,7 +85,7 @@ impl Consumer {
             )).into());
         }
 
-        let mut cluster = Cluster::new(seed_list);
+        let mut cluster = Cluster::new(seed_list, None);
         let topic_meta = cluster.fetch_topic_meta(&[&config.topic]).await?;
         debug!("Resolved topic: {:?}", topic_meta);
         assert_eq!(1, topic_meta.topics.len());

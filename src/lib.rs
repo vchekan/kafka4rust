@@ -1,3 +1,6 @@
+#![feature(default_free_fn)]
+#![feature(duration_constants)]
+
 mod broker;
 mod cluster;
 mod connection;
@@ -19,4 +22,4 @@ extern crate log;
 pub use self::cluster::Cluster;
 pub use self::consumer::{Consumer, ConsumerConfig};
 pub use self::error::KafkaError;
-pub use self::producer::{BinMessage, FixedPartitioner, Producer, Response, StringMessage};
+pub use self::producer::{BinMessage, FixedPartitioner, ProducerBuilder, Response, StringMessage};

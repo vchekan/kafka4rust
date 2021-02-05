@@ -4,27 +4,41 @@ mod ui;
 
 use anyhow::Result;
 use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
-use kafka4rust::{protocol, Cluster, Producer};
+use kafka4rust::{protocol, Cluster, ProducerBuilder};
 use opentelemetry::api::trace::provider::Provider;
 use opentelemetry::{global, sdk};
 use std::process::exit;
 use tracing::dispatcher;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
+use tracing_attributes::instrument;
+use simple_logger;
+use log::LevelFilter;
+use std::time::Duration;
 
 #[tokio::main]
+#[instrument(level="debug")]
 async fn main() -> Result<()> {
     init_tracer()?;
-    let span = tracing::info_span!("test");
-    let _guard = span.enter();
+    // let span = tracing::info_span!("main");
+    // let _guard = span.enter();
 
     let cli = parse_cli();
-    let brokers = cli.value_of("brokers");
+
+    let level = match cli.value_of("log").unwrap() {
+        "trace" => LevelFilter::Trace,
+        "debug" => LevelFilter::Debug,
+        "info" => LevelFilter::Info,
+        "error" => LevelFilter::Error,
+        "off" => LevelFilter::Off,
+        _ => panic!("Unknown log level")
+    };
+    simple_logger::SimpleLogger::new().with_level(level).init().unwrap();
 
     match cli.subcommand() {
         ("list", Some(list)) => {
             let brokers = list.value_of("brokers").unwrap();
-            let mut cluster = Cluster::with_bootstrap(brokers)?;
+            let mut cluster = Cluster::with_bootstrap(brokers, Some(Duration::from_secs(20)))?;
             // TODO: check for errors
             let meta = cluster.fetch_topic_meta(&[]).await?;
             match list.subcommand() {
@@ -46,14 +60,21 @@ async fn main() -> Result<()> {
             }
         }
         ("publish", Some(args)) => {
+            let brokers = args.value_of("brokers").unwrap();
             let key = args.value_of("key");
             let topic = args.value_of("topic").unwrap();
             let _single_message = args.value_of("single-message");
+            let send_timeout: Option<u64> = args.value_of("send-timeout").map(|t| t.parse().expect("Timeout must be integer in seconds"));
             let val = args
                 .value_of("MSG-VALUE")
                 .expect("Message value is not provided");
+            let mut producer = ProducerBuilder::new(brokers);
+            if let Some(send_timeout) = send_timeout {
+                producer = producer.send_timeout(Duration::from_secs(send_timeout));
+            }
+
             let (mut producer, _acks) =
-                Producer::new(brokers.unwrap()).expect("Failed to create publisher");
+                producer.start().expect("Failed to create publisher");
             if let Some(key) = key {
                 let msg = (key.to_string(), val.to_string());
                 producer.send(msg, topic).await?;
@@ -62,8 +83,9 @@ async fn main() -> Result<()> {
             }
             producer.close().await?;
         }
-        ("ui", Some(_)) => {
-            ui::main_ui(brokers.unwrap()).await?;
+        ("ui", Some(args)) => {
+            let brokers = args.value_of("brokers").unwrap();
+            ui::main_ui(brokers).await?;
         }
         _ => {}
     }
@@ -84,6 +106,13 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
         .settings(&[AppSettings::ArgRequiredElseHelp, AppSettings::ColoredHelp])
         .version(env!("CARGO_PKG_VERSION"))
         .about("Kafka command line and UI tool")
+        .arg(Arg::with_name("log")
+            .short("l")
+            .long("log")
+            .takes_value(true)
+            .default_value("info")
+            .possible_values(&["trace", "debug", "info", "error", "off"])
+        )
     .subcommand(SubCommand::with_name("ui")
         .about("start terminal UI")
         .setting(AppSettings::ColoredHelp)
@@ -116,6 +145,7 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
             .about("Publish message")
             .setting(AppSettings::ColoredHelp)
             // .arg_from_usage("-k --key=<KEY> 'publish message with given key'")
+            .arg(brokers_arg())
             .arg(Arg::with_name("key")
                 .takes_value(true)
                 .short("k")
@@ -137,6 +167,10 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
                 .short("f")
                 .long("file")
                 .help("Read values from file. By default, one message per line, but can change with --single-message")
+                .takes_value(true)
+            ).arg(Arg::with_name("send-timeout")
+                .long("send-timeout")
+                .help("Sending a batch timeout in seconds")
                 .takes_value(true)
             ).arg(
                 Arg::with_name("MSG-VALUE")

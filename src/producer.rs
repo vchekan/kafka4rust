@@ -16,9 +16,11 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::time::timeout;
 use tracing::{self, event, Level};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
+use std::default::default;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -162,6 +164,21 @@ enum BuffCmd {
     FlushAndClose,
 }
 
+#[derive(Debug)]
+pub struct ProducerBuilder<'a> {
+    brokers: &'a str,
+    hasher: Box<dyn Partitioner>,
+    send_timeout: Option<Duration>,
+}
+
+impl<'a> ProducerBuilder<'a> {
+    pub fn new(brokers: &'a str) -> Self {
+        ProducerBuilder { brokers, hasher: Box::new(Murmur2Partitioner{}), send_timeout: None}
+    }
+    pub fn send_timeout(self, timeout: Duration) -> Self { ProducerBuilder {send_timeout: Some(timeout), ..self} }
+    pub fn start(self) -> Result<(Producer,Receiver<Response>)> { Producer::new(self) }
+}
+
 pub struct Producer {
     bootstrap: String,
     buffer: Arc<Mutex<Buffer>>,
@@ -172,6 +189,7 @@ pub struct Producer {
     acks: Sender<Response>,
     buffer_commands: Sender<BuffCmd>,
     flush_loop_handle: tokio::task::JoinHandle<()>,
+    send_timeout: Option<Duration>,
 }
 
 impl Debug for Producer {
@@ -184,43 +202,31 @@ impl Debug for Producer {
     }
 }
 
+/*
 impl Producer {
     /// Synchronously resolve bootstrap servers DNS addresses and start background worker process
     /// to connect and flush data buffer periodically.
     /// Note, that actual connection to the broker is not happenings until first message is sent.
     /// Default MURMUR2 hasher is used (the same as Java).
     #[instrument(level = "debug")]
-    pub fn new(seed: &str) -> Result<(Self, Receiver<Response>), KafkaError> {
+    fn new(seed: &str, ) -> Result<(Self, Receiver<Response>), KafkaError> {
         Producer::with_hasher(seed, Box::new(Murmur2Partitioner {}))
     }
-
-    // pub async fn connect(&mut self, topics: &[&str]) -> Result<()> {
-    //
-    //     let missing: Vec<_> = topics.iter().filter(|t| !self.topics_meta.contains_key(t)).collect();
-    //     if missing.is_empty() {
-    //         return Ok(());
-    //     }
-    //
-    //     self.cluster.
-    //
-    //     Ok(())
-    // }
 }
+*/
 
 impl Producer {
-    #[instrument(level = "debug", skip(partitioner))]
-    pub fn with_hasher(
-        seed: &str,
-        partitioner: Box<dyn Partitioner>,
-    ) -> Result<(Self, Receiver<Response>), KafkaError> {
-        let seed_list = utils::resolve_addr(seed);
+    #[instrument(level = "debug", err)]
+    pub fn new(builder: ProducerBuilder) -> Result<(Self, Receiver<Response>)> {
+        // TODO: resolve names async and account for connect timeout
+        let seed_list = utils::resolve_addr(builder.brokers);
         if seed_list.is_empty() {
             return Err(KafkaError::NoBrokerAvailable(format!(
                 "No address can be resolved: {}",
-                seed
-            )));
+                builder.brokers
+            )).into());
         }
-        let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::new(seed_list)));
+        let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::new(seed_list, builder.send_timeout)));
         let cluster2 = cluster.clone();
         let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(1000);
         let mut ack_tx2 = ack_tx.clone();
@@ -228,6 +234,7 @@ impl Producer {
 
         let buffer = Arc::new(Mutex::new(Buffer::new(cluster.clone())));
         let buffer2 = buffer.clone();
+        let send_timeout = builder.send_timeout;
 
         // TODO: wait in `close` for loop to end
         let flush_loop_handle = tokio::spawn(async move {
@@ -255,33 +262,40 @@ impl Producer {
                     }
                 }
 
+                debug!("Waiting for buffer locks");
                 let mut buffer2 = buffer.lock().await;
-                //let mut cluster = buffer.cluster.write().await;
                 let mut cluster = cluster.write().await;
                 // TODO: handle result
-                if let Err(e) = buffer2.flush(&mut ack_tx2, &mut cluster).await {
-                    error!("Failed to flush buffer. {}", e);
+                debug!("Flushing with {:?} send_timeout", send_timeout);
+                match timeout(send_timeout.unwrap_or(Duration::MAX), buffer2.flush(&mut ack_tx2, &mut cluster)).await {
+                    Err(_) => {
+                        tracing::warn!("Flushing timeout");
+                        break;
+                    },
+                    Ok(Err(e)) => error!("Failed to flush buffer. {}", e),
+                    Ok(Ok(_)) => {tracing::trace!("Flush Ok")}
                 }
             }
 
             debug!("Buffer flush loop quit");
-        });
+        }.instrument(tracing::info_span!("flush_loop")));
 
         let producer = Producer {
-            bootstrap: seed.to_string(),
+            bootstrap: builder.brokers.to_string(),
             buffer: buffer2,
             cluster: cluster2,
-            partitioner,
+            partitioner: builder.hasher,
             topics_meta: HashMap::new(),
             acks: ack_tx,
             buffer_commands: buff_tx,
             flush_loop_handle,
+            send_timeout: builder.send_timeout
         };
 
         Ok((producer, ack_rx))
     }
 
-    #[instrument(level = "debug", skip(msg, self))]
+    #[instrument(level = "debug", err, skip(msg, self))]
     pub async fn send<M: ToMessage + 'static>(&mut self, msg: M, topic: &str) -> Result<()> {
         let mut buffer = self.buffer.lock().await;
         // TODO: share metadata cache between self and Buffer
@@ -328,7 +342,7 @@ impl Producer {
         }
     }
 
-    #[instrument(level = "debug", skip(self))]
+    #[instrument(level="debug", err, skip(self))]
     pub async fn flush(&mut self) -> Result<()> {
         let mut buffer = self.buffer.lock().await;
         let mut cluster = self.cluster.write().await;
@@ -340,7 +354,7 @@ impl Producer {
     /// `self` is not passed as a prarameter because it causes lifetime conflict in `send`.
     /// TODO: what is retry policy?
     /// TODO: what to do if failed for extended period of time?
-    #[instrument(level = "debug", skip(cluster, topics_meta, buffer_meta))]
+    #[instrument(level = "debug", err, skip(cluster, topics_meta, buffer_meta))]
     async fn get_or_request_meta<'a>(
         cluster: &tokio::sync::RwLock<Cluster>,
         topics_meta: &'a mut HashMap<String, ProducerTopicMetadata>,
@@ -414,6 +428,7 @@ impl Producer {
         }
     }
 
+    #[instrument(level="debug", err, skip(self))]
     pub async fn close(self) -> Result<()> {
         debug!("Closing producer...");
         self.buffer_commands.send(BuffCmd::FlushAndClose).await?;
@@ -501,7 +516,7 @@ impl Buffer {
 
     /// TODO: rust BC to become smarter. Parameter `cluster` is member of `self` but I have to pass it separately because borrow checker
     /// complains about `self` being borrowed 2 times mutably.
-    #[instrument(level = "debug", skip(self, acks, cluster))]
+    #[instrument(level = "debug", err, skip(self, acks, cluster))]
     async fn flush(&mut self, acks: &mut Sender<Response>, cluster: &mut Cluster) -> Result<()> {
         let broker_partitioned = self.group_queue_by_leader();
         // Container to keep sucessful topic/partitions after the call loop. We can ot modify queue

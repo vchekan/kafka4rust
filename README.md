@@ -9,7 +9,7 @@
 - [ ] Recovery
   - [ ] Producer
   - [ ] Consumer
-  - [ ] Timeout
+  - [X] Timeout
 - [ ] Client API
   - [x] Producer
   - [x] Consumer
