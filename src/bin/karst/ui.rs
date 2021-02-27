@@ -41,6 +41,7 @@ enum Cmd {
     TopicMeta(protocol::MetadataResponse0),
     Offsets(protocol::ListOffsetsResponse0),
     ConnState(ConnState),
+    Err(anyhow::Error)
 }
 
 impl Display for Cmd {
@@ -49,6 +50,7 @@ impl Display for Cmd {
             Cmd::TopicMeta(_) => f.write_str("TopicMeta"),
             Cmd::Offsets(_) => f.write_str("Offsets"),
             Cmd::ConnState(s) => f.write_fmt(format_args!("ConnState({:?})", s)),
+            Cmd::Err(e) => f.write_fmt(format_args!("Error: {:#?}", e))
         }
     }
 }
@@ -58,6 +60,7 @@ enum ConnState {
     Connecting,
     Connected,
     Disconnected,
+    Error(anyhow::Error),
 }
 
 struct State {
@@ -121,30 +124,34 @@ pub async fn main_ui(bootstrap: &str) -> Result<()> {
     let bootstrap = bootstrap.to_string();
     // kafka client runs in tokio future and communicates with UI main thread via channel
     let (tx, rx) = tokio::sync::mpsc::channel(2);
-    tokio::spawn(
+    let res = tokio::spawn(
         async move {
-            tracing::event!(tracing::Level::DEBUG, %bootstrap, "Connecting");
-            tx.send(Cmd::ConnState(ConnState::Connecting)).await?;
-            let mut cluster = Cluster::with_bootstrap(&bootstrap, Some(Duration::from_secs(20)))?;
-            let topics_meta = cluster.fetch_topic_meta(&[]).await?;
-            tracing::debug_span!("Connected");
-            tx.send(Cmd::ConnState(ConnState::Connected)).await?;
-            let topics: Vec<_> = topics_meta
-                .topics
-                .iter()
-                .map(|t| (t.topic.as_str(), t.partition_metadata.len() as u32))
-                .collect();
-            let offsets = crate::get_offsets(&cluster, &topics).await.unwrap();
-            tracing::debug_span!("Sending topic meta");
-            tx.send(Cmd::TopicMeta(topics_meta)).await?;
-            tx.send(Cmd::Offsets(offsets)).await?;
+            let res = async {
+                tracing::event!(tracing::Level::DEBUG, %bootstrap, "Connecting");
+                tx.send(Cmd::ConnState(ConnState::Connecting)).await?;
+                let mut cluster = Cluster::with_bootstrap(&bootstrap, Some(Duration::from_secs(20)))?;
+                let topics_meta = cluster.fetch_topic_meta(&[]).await?;
+                tracing::debug_span!("Connected");
+                tx.send(Cmd::ConnState(ConnState::Connected)).await?;
+                let topics: Vec<_> = topics_meta
+                    .topics
+                    .iter()
+                    .map(|t| (t.topic.as_str(), t.partition_metadata.len() as u32))
+                    .collect();
+                let offsets = crate::get_offsets(&cluster, &topics).await.unwrap();
+                tracing::debug_span!("Sending topic meta");
+                tx.send(Cmd::TopicMeta(topics_meta)).await?;
+                tx.send(Cmd::Offsets(offsets)).await?;
 
-            Ok::<_, anyhow::Error>(())
+                Ok::<_, anyhow::Error>(())
+            }.await;
+
+            if let Err(e) = res {
+                tracing::error!("Error in kafka loop: {:#?}", e);
+                tx.send(Cmd::Err(e)).await;
+            }
         }
         .instrument(tracing::debug_span!("kafka client loop"))
-        .inspect_err(|e| {
-            panic!("Error in kafka loop: {}", e);
-        }),
     );
 
     // Start eval loop
@@ -166,10 +173,11 @@ fn draw(terminal: &mut Terminal, state: &State) -> Result<()> {
             .split(frame.size());
         let (main_area, status_area) = (main_and_status[0], main_and_status[1]);
 
-        let status_text = match state.conn_state {
+        let status_text = match &state.conn_state {
             ConnState::Disconnected => Span::styled("X", Style::default().fg(Color::Red)),
             ConnState::Connecting => Span::styled("-", Style::default().fg(Color::LightYellow)),
             ConnState::Connected => Span::styled("|", Style::default().fg(Color::LightGreen)),
+            ConnState::Error(e) => Span::styled(format!("{:#?}", e).replace("\n", "    "), Style::default().fg(Color::Red)),
         };
 
         // status line
@@ -310,6 +318,9 @@ async fn eval_loop(
                     }
                     Some(Cmd::ConnState(conn_state)) => {
                         state.conn_state = conn_state;
+                    }
+                    Some(Cmd::Err(e)) => {
+                        state.conn_state = ConnState::Error(e)
                     }
                     None => {
                         //break

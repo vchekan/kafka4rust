@@ -20,7 +20,6 @@ use tokio::time::timeout;
 use tracing::{self, event, Level};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
-use std::default::default;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -267,7 +266,7 @@ impl Producer {
                 let mut cluster = cluster.write().await;
                 // TODO: handle result
                 debug!("Flushing with {:?} send_timeout", send_timeout);
-                match timeout(send_timeout.unwrap_or(Duration::MAX), buffer2.flush(&mut ack_tx2, &mut cluster)).await {
+                match timeout(send_timeout.unwrap_or(Duration::from_secs(u64::MAX)), buffer2.flush(&mut ack_tx2, &mut cluster)).await {
                     Err(_) => {
                         tracing::warn!("Flushing timeout");
                         break;

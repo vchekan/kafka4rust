@@ -1,6 +1,3 @@
-#![feature(default_free_fn)]
-#![feature(duration_constants)]
-
 mod broker;
 mod cluster;
 mod connection;

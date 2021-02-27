@@ -82,7 +82,7 @@ impl Cluster {
             bootstrap,
             broker_id_map: HashMap::new(),
             broker_addr_map: HashMap::new(),
-            operation_timeout,
+            operation_timeout: operation_timeout.unwrap_or(Duration::from_secs(5)),
         }
     }
 
@@ -92,7 +92,7 @@ impl Cluster {
     pub async fn fetch_topic_meta(
         &mut self,
         topics: &[&str],
-    ) -> Result<protocol::MetadataResponse0, KafkaError> {
+    ) -> Result<protocol::MetadataResponse0> {
 
         debug!("fetch_topic_meta_and_retry({:?})", topics);
         // TODO: wait with timeout
@@ -110,34 +110,57 @@ impl Cluster {
             }
         }
 
-        for addr in &self.bootstrap {
-            debug!("Trying to fetch meta from bootstrap broker {:?}", addr);
-            let operation_timeout = self.operation_timeout;
-            repeat_with_timeout(async {
-                match Broker::connect(*addr).await {
+        let operation_timeout = self.operation_timeout;
+        let meta = repeat_with_timeout(|| async {
+            for addr in &self.bootstrap {
+                debug!("Trying to fetch meta from bootstrap broker {:?}", addr);
+                let broker = Broker::connect(*addr).await;
+                match broker {
                     Ok(broker) => {
-                        match fetch_topic_with_broker(&broker, topics, operation_timeout).await {
+                        let meta = fetch_topic_with_broker(&broker, topics, operation_timeout).await;
+                        match meta {
                             Ok(meta) => {
-                                self.update_brokers_map(&meta);
                                 return Ok(meta);
                             }
                             Err(e) => {
                                 debug!("Failed to fetch meta from bootstrap broker {:?}", broker);
-                                Err(e)
+                                return Err(e)
                             }
                         }
                     }
                     Err(e) => {
                         info!("Failed to connect to bootstrap broker {:?}", addr);
-                        Err(e)
+                        return Err(e)
                     }
                 }
-            },  Duration::from_secs(1), operation_timeout).await;
-        }
+            //     match Broker::connect(*addr).await {
+            //         Ok(broker) => {
+            //             match fetch_topic_with_broker(&broker, topics, operation_timeout).await {
+            //                 Ok(meta) => {
+            //                     self.update_brokers_map(&meta);
+            //                     return Ok(meta);
+            //                 }
+            //                 Err(e) => {
+            //                     debug!("Failed to fetch meta from bootstrap broker {:?}", broker);
+            //                     return Err(e)
+            //                 }
+            //             }
+            //         }
+            //         Err(e) => {
+            //             info!("Failed to connect to bootstrap broker {:?}", addr);
+            //             return Err(e)
+            //         }
+            //     }
+            }
+            Err(anyhow!("Could not connect to any broker in bootstrap"))
+        },  Duration::from_secs(1), operation_timeout).await;
+
+        let meta = meta?;
+        self.update_brokers_map(&meta);
 
         Err(KafkaError::NoBrokerAvailable(
             "Failed to find broker to fetch topics metadata".to_owned(),
-        ))
+        ).into())
 
         /*
 

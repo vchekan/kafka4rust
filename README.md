@@ -28,6 +28,7 @@
         - [ ] Learn Netty buffers and async
     - [ ] F#
     - [ ] Python
+    - [ ] Rust https://willcrichton.net/rust-api-type-patterns/
 * Enforce protocol response errors checks
 - [x] Decide on error strategy. Use dynamic error?
 - [x] Migrate off `failure` crate
@@ -69,3 +70,4 @@
 
 ## Resources:
 https://matklad.github.io/2020/10/15/study-of-std-io-error.html
+https://willcrichton.net/rust-api-type-patterns/

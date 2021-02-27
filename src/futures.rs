@@ -5,8 +5,9 @@ use tracing_futures::Instrument;
 use tracing_attributes::instrument;
 use tokio;
 
-pub async fn repeat_with_timeout<F, T>(f: F, delay: Duration, timeout: Duration) -> F::Output
-where F: Future<Output = Result<T>>,
+pub async fn repeat_with_timeout<FF, F, T>(f: FF, delay: Duration, timeout: Duration) -> F::Output
+    where FF: Fn() -> F,
+        F: Future<Output = Result<T>>,
 {
     let timeout = tokio::time::sleep(timeout);
     tokio::pin!(timeout);

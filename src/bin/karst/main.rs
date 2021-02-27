@@ -1,5 +1,3 @@
-#![feature(iterator_fold_self)]
-
 mod ui;
 
 use anyhow::Result;
@@ -25,7 +23,7 @@ async fn main() -> Result<()> {
 
     let cli = parse_cli();
 
-    let level = match cli.value_of("log").unwrap() {
+    let level = match cli.value_of("log").unwrap_or("info") {
         "trace" => LevelFilter::Trace,
         "debug" => LevelFilter::Debug,
         "info" => LevelFilter::Info,
@@ -33,7 +31,8 @@ async fn main() -> Result<()> {
         "off" => LevelFilter::Off,
         _ => panic!("Unknown log level")
     };
-    simple_logger::SimpleLogger::new().with_level(level).init().unwrap();
+    // TODO: logging messes up UI. Think how to redirect into a window in UI?
+    // simple_logger::SimpleLogger::new().with_level(level).init().unwrap();
 
     match cli.subcommand() {
         ("list", Some(list)) => {
@@ -110,12 +109,12 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
             .short("l")
             .long("log")
             .takes_value(true)
-            .default_value("info")
             .possible_values(&["trace", "debug", "info", "error", "off"])
         )
     .subcommand(SubCommand::with_name("ui")
         .about("start terminal UI")
         .setting(AppSettings::ColoredHelp)
+        .arg(brokers_arg())
     ).subcommand(
         SubCommand::with_name("list")
         .about("list items (topics, brokers, partitions)")
