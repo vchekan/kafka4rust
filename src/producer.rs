@@ -166,14 +166,15 @@ enum BuffCmd {
 #[derive(Debug)]
 pub struct ProducerBuilder<'a> {
     brokers: &'a str,
-    hasher: Box<dyn Partitioner>,
+    hasher: Option<Box<dyn Partitioner>>,
     send_timeout: Option<Duration>,
 }
 
 impl<'a> ProducerBuilder<'a> {
     pub fn new(brokers: &'a str) -> Self {
-        ProducerBuilder { brokers, hasher: Box::new(Murmur2Partitioner{}), send_timeout: None}
+        ProducerBuilder { brokers, hasher: None, send_timeout: None}
     }
+    pub fn hasher(mut self, hasher: Box<dyn Partitioner>) -> Self { self.hasher = Some(hasher); self }
     pub fn send_timeout(self, timeout: Duration) -> Self { ProducerBuilder {send_timeout: Some(timeout), ..self} }
     pub fn start(self) -> Result<(Producer,Receiver<Response>)> { Producer::new(self) }
 }
@@ -266,7 +267,8 @@ impl Producer {
                 let mut cluster = cluster.write().await;
                 // TODO: handle result
                 debug!("Flushing with {:?} send_timeout", send_timeout);
-                match timeout(send_timeout.unwrap_or(Duration::from_secs(u64::MAX)), buffer2.flush(&mut ack_tx2, &mut cluster)).await {
+                // TODO: use Duration::MAX when stabilized
+                match timeout(send_timeout.unwrap_or(Duration::new(u64::MAX, 1_000_000_000 - 1)), buffer2.flush(&mut ack_tx2, &mut cluster)).await {
                     Err(_) => {
                         tracing::warn!("Flushing timeout");
                         break;
@@ -283,7 +285,7 @@ impl Producer {
             bootstrap: builder.brokers.to_string(),
             buffer: buffer2,
             cluster: cluster2,
-            partitioner: builder.hasher,
+            partitioner: builder.hasher.unwrap_or_else(|| Box::new(Murmur2Partitioner{})),
             topics_meta: HashMap::new(),
             acks: ack_tx,
             buffer_commands: buff_tx,

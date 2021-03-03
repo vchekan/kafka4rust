@@ -39,17 +39,3 @@ pub(crate) fn resolve_addr(addr: &str) -> Vec<SocketAddr> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use anyhow::Result;
-
-    pub(crate) fn init_test() -> Result<tokio::runtime::Runtime> {
-        simple_logger::init_with_level(log::Level::Debug)?;
-        let runtime = tokio::runtime::Builder::new()
-            .basic_scheduler()
-            .core_threads(2)
-            .thread_name("test_k4rs")
-            .build()?;
-        Ok(runtime)
-    }
-}

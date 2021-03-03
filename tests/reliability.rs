@@ -1,7 +1,9 @@
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
-use kafka4rust::admin;
-use kafka4rust::{Consumer, FixedPartitioner, KafkaError, Producer};
+// use tokio_stream::{self as stream, StreamExt};
+use tokio_stream::wrappers::ReceiverStream;
+use kafka4rust::{admin, ProducerBuilder};
+use kafka4rust::{ConsumerBuilder, FixedPartitioner, KafkaError};
 use log::{debug, info, LevelFilter};
 use rand;
 use rand::seq::IteratorRandom;
@@ -23,46 +25,44 @@ fn random_string(len: u16) -> String {
 #[tokio::test]
 async fn no_broker_resolve() {
     // Invalid host name
-    let res = Producer::new("nosuchhost.94726.nhfrt");
-    assert!(matches!(res, Err(KafkaError::NoBrokerAvailable(_))));
+    let res = ProducerBuilder::new("nosuchhost.94726.nhfrt").start();
+    assert!(matches!(res.err().unwrap().downcast::<KafkaError>().unwrap(), KafkaError::NoBrokerAvailable(_)));
 }
 
 /// Valid dns address exist, but broker is not listening
 #[tokio::test]
 async fn no_broker_connect() {
-    let res = Producer::new("localhost");
+    let res = ProducerBuilder::new("localhost").start();
     assert!(matches!(res, Ok(_)));
 }
 
 /// There is one valid address among invalid ones
 #[tokio::test]
 async fn one_valid_address_connect() {
-    let res = Producer::new("nosuchhost.94726.nhfrt, nosuchhost.23456.nhfrt:9092, localhost");
+    let res = ProducerBuilder::new("nosuchhost.94726.nhfrt, nosuchhost.23456.nhfrt:9092, localhost").start();
     assert!(matches!(res, Ok(_)));
 }
 
 // if topic does not exists, it is created when producer connects
 #[tokio::test]
-async fn producer_creates_topic() {
+async fn producer_creates_topic() -> Result<()> {
     init_log();
     info!("Starting test");
     let _d = docker::up();
     let topic = format!("test_topic_{}", random_string(5));
-    let (mut p, rx) = Producer::new("localhost").unwrap();
+    let (mut p, rx) = ProducerBuilder::new("localhost").start()?;
     for i in &[1, 2, 3, 4, 5] {
         let msg = format!("msg-{}", i);
         p.send(msg, &topic).await;
     }
     p.close().await;
 
-    let mut consumer = Consumer::builder()
+    let mut consumer = ConsumerBuilder::new(topic)
         .bootstrap("localhost")
-        .topic(topic)
         .build()
-        .await
-        .unwrap();
-    let res: Vec<_> = consumer
-        .flat_map(|batch| stream::iter(batch.messages))
+        .await?;
+    let res: Vec<_> = ReceiverStream::new(consumer)
+        .flat_map(|batch| tokio_stream::iter(batch.messages))
         .map(|msg| String::from_utf8(msg.value).unwrap())
         .take(5)
         .collect()
@@ -75,6 +75,8 @@ async fn producer_creates_topic() {
             .collect::<HashSet<_>>(),
         HashSet::from_iter(res.into_iter())
     );
+
+    Ok(())
 }
 
 /*
@@ -85,19 +87,16 @@ Mutithreading save
 // and are committed (can be read) within (5sec?)
 // Also, order of messages is preserved
 #[tokio::test]
-async fn leader_down_producer_and_consumer_recovery() {
+async fn leader_down_producer_and_consumer_recovery() -> Result<()> {
     init_log();
     info!("Starting leader_down_producer_and_consumer_recovery()");
     let _d = docker::up();
     let topic = format!("test_topic_{}", random_string(5));
     let (mut p, rx) =
-        Producer::with_hasher("localhost", Box::new(FixedPartitioner { 0: 0_u32 })).unwrap();
+        ProducerBuilder::new("localhost").hasher(Box::new(FixedPartitioner { 0: 0_u32 })).start()?;
     for i in 1..10 {
         if i == 5 {
-            let meta = admin::get_topic_metadata("localhost", &topic)
-                .await
-                .unwrap();
-            //debug!("Got metadata: {:#?}", meta);
+            let meta = admin::get_topic_metadata("localhost", &topic).await?;
             let leader = meta.topics[0].partition_metadata[0].leader;
             let leader = &meta.brokers.iter().find(|b| b.node_id == leader).unwrap();
             debug!("Sending {}", i);
@@ -114,6 +113,8 @@ async fn leader_down_producer_and_consumer_recovery() {
     //     .take(50).collect().await;
 
     p.close().await;
+
+    Ok(())
 }
 
 // Timeout if no service

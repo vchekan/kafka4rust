@@ -5,7 +5,6 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use futures::{StreamExt, TryFutureExt};
 use kafka4rust::protocol::Broker;
 use kafka4rust::{protocol, Cluster};
 use std::collections::HashMap;
@@ -25,6 +24,7 @@ use tui::{
     Frame,
 };
 use std::time::Duration;
+use tokio_stream::StreamExt;
 
 enum Page {
     Brokers,
@@ -124,7 +124,7 @@ pub async fn main_ui(bootstrap: &str) -> Result<()> {
     let bootstrap = bootstrap.to_string();
     // kafka client runs in tokio future and communicates with UI main thread via channel
     let (tx, rx) = tokio::sync::mpsc::channel(2);
-    let res = tokio::spawn(
+    tokio::spawn(
         async move {
             let res = async {
                 tracing::event!(tracing::Level::DEBUG, %bootstrap, "Connecting");
@@ -148,7 +148,8 @@ pub async fn main_ui(bootstrap: &str) -> Result<()> {
 
             if let Err(e) = res {
                 tracing::error!("Error in kafka loop: {:#?}", e);
-                tx.send(Cmd::Err(e)).await;
+                tx.send(Cmd::Err(e)).await
+                    .unwrap_or_else(|e| tracing::error!("Failed to send error from eval loop to UI loop: {:#?}", e));
             }
         }
         .instrument(tracing::debug_span!("kafka client loop"))

@@ -2,8 +2,6 @@ use anyhow::Result;
 use std::future::Future;
 use tokio::time::Duration;
 use tracing_futures::Instrument;
-use tracing_attributes::instrument;
-use tokio;
 
 pub async fn repeat_with_timeout<FF, F, T>(f: FF, delay: Duration, timeout: Duration) -> F::Output
     where FF: Fn() -> F,
@@ -32,24 +30,6 @@ pub async fn repeat_with_timeout<FF, F, T>(f: FF, delay: Duration, timeout: Dura
                 }
             }
         }
-        // match f().await {
-        //     Ok(r) => {
-        //         return {
-        //             trace!("repeat() succeeded");
-        //             Ok(r)
-        //         }
-        //     }
-        //     Err(e) => {
-        //         if retries == 0 {
-        //             return Err(e);
-        //         }
-        //         retries -= 0;
-        //         trace!("Function failed, will retry: {:#}", e);
-        //         tokio::time::sleep(delay)
-        //             .instrument(tracing::trace_span!("Retry sleep"))
-        //             .await;
-        //     }
-        // }
     }
 }
 

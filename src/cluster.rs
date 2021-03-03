@@ -36,9 +36,8 @@ use anyhow::{anyhow, Result, Context};
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
-use tokio::time::{timeout, Duration};
+use tokio::time::Duration;
 use tracing_attributes::instrument;
-use async_std::stream::Delay;
 
 #[derive(Debug)]
 pub struct Cluster {
@@ -123,44 +122,21 @@ impl Cluster {
                                 return Ok(meta);
                             }
                             Err(e) => {
-                                debug!("Failed to fetch meta from bootstrap broker {:?}", broker);
-                                return Err(e)
+                                debug!("Failed to fetch meta from bootstrap broker {:?}. {:#?}", broker, e);
                             }
                         }
                     }
                     Err(e) => {
-                        info!("Failed to connect to bootstrap broker {:?}", addr);
-                        return Err(e)
+                        info!("Failed to connect to bootstrap broker {:?}. {:#?}", addr, e);
                     }
                 }
-            //     match Broker::connect(*addr).await {
-            //         Ok(broker) => {
-            //             match fetch_topic_with_broker(&broker, topics, operation_timeout).await {
-            //                 Ok(meta) => {
-            //                     self.update_brokers_map(&meta);
-            //                     return Ok(meta);
-            //                 }
-            //                 Err(e) => {
-            //                     debug!("Failed to fetch meta from bootstrap broker {:?}", broker);
-            //                     return Err(e)
-            //                 }
-            //             }
-            //         }
-            //         Err(e) => {
-            //             info!("Failed to connect to bootstrap broker {:?}", addr);
-            //             return Err(e)
-            //         }
-            //     }
             }
             Err(anyhow!("Could not connect to any broker in bootstrap"))
-        },  Duration::from_secs(1), operation_timeout).await;
+        },  Duration::from_secs(1), operation_timeout).await?;
 
-        let meta = meta?;
         self.update_brokers_map(&meta);
 
-        Err(KafkaError::NoBrokerAvailable(
-            "Failed to find broker to fetch topics metadata".to_owned(),
-        ).into())
+        Ok(meta)
 
         /*
 
@@ -276,7 +252,7 @@ async fn fetch_topic_with_broker(
         topics: topics.iter().map(|t| t.to_string()).collect(),
     };
     tokio::time::timeout(timeout, broker.send_request(&req)).await
-        .map_err(|e| anyhow!("fetch_topic_with_broker() has timed out"))?
+        .with_context(|| "fetch_topic_with_broker")?
 }
 
 /*

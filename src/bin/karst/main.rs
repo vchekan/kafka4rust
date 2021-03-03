@@ -10,8 +10,6 @@ use tracing::dispatcher;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 use tracing_attributes::instrument;
-use simple_logger;
-use log::LevelFilter;
 use std::time::Duration;
 
 #[tokio::main]
@@ -23,14 +21,14 @@ async fn main() -> Result<()> {
 
     let cli = parse_cli();
 
-    let level = match cli.value_of("log").unwrap_or("info") {
+    /*let level = match cli.value_of("log").unwrap_or("info") {
         "trace" => LevelFilter::Trace,
         "debug" => LevelFilter::Debug,
         "info" => LevelFilter::Info,
         "error" => LevelFilter::Error,
         "off" => LevelFilter::Off,
         _ => panic!("Unknown log level")
-    };
+    };*/
     // TODO: logging messes up UI. Think how to redirect into a window in UI?
     // simple_logger::SimpleLogger::new().with_level(level).init().unwrap();
 

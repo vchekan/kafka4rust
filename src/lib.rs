@@ -17,6 +17,6 @@ pub mod admin;
 extern crate log;
 
 pub use self::cluster::Cluster;
-pub use self::consumer::{Consumer, ConsumerConfig};
+pub use self::consumer::{ConsumerBuilder};
 pub use self::error::KafkaError;
 pub use self::producer::{BinMessage, FixedPartitioner, ProducerBuilder, Response, StringMessage};

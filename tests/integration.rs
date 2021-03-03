@@ -3,8 +3,8 @@ mod utils;
 
 use crate::utils::*;
 use anyhow::Result;
-use kafka4rust::{Consumer, Producer, Response};
-use log::debug;
+use kafka4rust::{ConsumerBuilder, ProducerBuilder, Response};
+use log::{debug, LevelFilter};
 use opentelemetry::{api::Provider, global};
 use rand;
 use rand::distributions::Alphanumeric;
@@ -26,7 +26,7 @@ fn random_topic() -> String {
 
 #[tokio::test]
 async fn topic_is_autocreated_by_producer() -> Result<()> {
-    simple_logger::init_with_level(log::Level::Debug)?;
+    simple_logger::SimpleLogger::from_env().with_level(LevelFilter::Debug);
     init_tracer()?;
     let tracer = global::trace_provider().get_tracer("component1");
     let otl = tracing_opentelemetry::layer().with_tracer(tracer);
@@ -41,7 +41,7 @@ async fn topic_is_autocreated_by_producer() -> Result<()> {
     let topic = random_topic();
     let count = 200;
     let mut sent = HashSet::new();
-    let (mut producer, mut responses) = Producer::new(bootstrap)?;
+    let (mut producer, mut responses) = ProducerBuilder::new(bootstrap).start()?;
 
     let acks = tokio::spawn(async move {
         while let Some(ack) = responses.recv().await {
@@ -74,10 +74,9 @@ async fn topic_is_autocreated_by_producer() -> Result<()> {
     {
         let span = tracing::span!(tracing::Level::ERROR, "receive");
         let _guard = span.enter();
-        let mut consumer = Consumer::builder().
-            topic(topic).
+        let mut consumer = ConsumerBuilder::new(topic)
             //span(&receive_span).
-            bootstrap("localhost").build().await?;
+            .build().await?;
         let mut i = 0;
         loop {
             let batch = consumer.recv().await.expect("Consumer closed");

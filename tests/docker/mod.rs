@@ -4,17 +4,28 @@ use std::process::{Command, Output};
 pub struct DockerGuard {}
 
 pub fn up() -> DockerGuard {
-    docker_cmd(&["--log-level", "ERROR", "up", "-d"]);
+    info!("Docker is starting...");
+    compose_cmd(&["--log-level", "INFO", "up", "-d"]);
+    info!("Docker is started");
     DockerGuard {}
 }
 
+pub fn up_no_close() {
+    info!("Docker is starting...");
+    compose_cmd(&["--log-level", "INFO", "up", "-d"]);
+    info!("Docker is started");
+}
+
+
 impl Drop for DockerGuard {
     fn drop(&mut self) {
-        docker_cmd(&["down"]);
+        info!("Docker is shutting down...");
+        compose_cmd(&["down"]);
+        info!("Docker is down");
     }
 }
 
-fn docker_cmd(cmd: &[&str]) -> Output {
+fn compose_cmd(cmd: &[&str]) -> Output {
     Command::new("docker-compose")
         .current_dir("docker")
         .args(cmd)
@@ -32,7 +43,7 @@ pub fn hard_kill_kafka(port: i32) {
         _ => panic!("Unknown port: {}", port),
     };
     info!("Killing broker '{}'", service);
-    let out = docker_cmd(&["exec", service, "kill", "-9", "6"]);
+    let out = compose_cmd(&["kill", service]);
     if !out.status.success() {
         error!(">{:?}", out);
         panic!("Failed to kill broker");

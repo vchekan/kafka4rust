@@ -19,6 +19,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tracing::{debug_span, event, Level};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
+use std::future::Future;
 
 // TODO: offset start: -2, end: -1
 pub enum StartOffset {
@@ -26,17 +27,25 @@ pub enum StartOffset {
     Latest,
 }
 
-pub struct ConsumerConfig {
-    bootstrap: String,
+#[derive(Debug)]
+pub struct ConsumerBuilder {
+    bootstrap: Option<String>,
     topic: String,
 }
 
-impl ConsumerConfig {
-    pub fn new(topic: &str) -> Self {
-        ConsumerConfig {
-        bootstrap: "localhost:9092".to_string(),
-        topic: topic.to_string()
-    }}
+impl ConsumerBuilder {
+    pub fn new(topic: impl AsRef<str>) -> Self {
+        ConsumerBuilder {
+            bootstrap: None,
+            topic: topic.as_ref().to_string()
+        }}
+
+    pub fn bootstrap(mut self, bootstrap: &str) -> Self {
+        self.bootstrap = Some(bootstrap.into());
+        self
+    }
+
+    pub fn build(self) -> impl Future<Output = Result<Receiver<Batch>>> { Consumer::new(self) }
 }
 
 pub struct Batch {
@@ -66,34 +75,35 @@ impl Batch {
 }
 
 // TODO: remove this struct
-pub struct Consumer {
-    config: ConsumerConfig,
+pub(crate) struct Consumer {
+    config: ConsumerBuilder,
     cluster: Cluster,
     topic_meta: protocol::MetadataResponse0,
     partition_routing: HashMap<BrokerId, Vec<Partition>>,
 }
 
 impl Consumer {
-    #[instrument(skip(config))]
-    pub async fn new(config: ConsumerConfig) -> Result<Receiver<Batch>> {
-        let seed_list = utils::resolve_addr(&config.bootstrap);
+    #[instrument]
+    pub async fn new(builder: ConsumerBuilder) -> Result<Receiver<Batch>> {
+        let bootstrap = builder.bootstrap.as_ref().map(|s| s.clone()).unwrap_or("localhost:9092".to_string());
+        let seed_list = utils::resolve_addr(&bootstrap);
         debug!("Resolved bootstrap list: {:?}", seed_list);
         if seed_list.is_empty() {
             return Err(KafkaError::NoBrokerAvailable(format!(
                 "Failed to resolve any address in bootstrap: {:?}",
-                config.bootstrap
+                bootstrap
             )).into());
         }
 
         let mut cluster = Cluster::new(seed_list, None);
-        let topic_meta = cluster.fetch_topic_meta(&[&config.topic]).await?;
+        let topic_meta = cluster.fetch_topic_meta(&[&builder.topic]).await?;
         debug!("Resolved topic: {:?}", topic_meta);
         assert_eq!(1, topic_meta.topics.len());
 
         let (tx, rx) = channel(1);
 
         tokio::spawn(async move {
-            if let Err(error) = fetch_loop(cluster, tx, topic_meta, config).await {
+            if let Err(error) = fetch_loop(cluster, tx, topic_meta, builder).await {
                 error!("Fetch loop failed. Error: {}", error);
                 event!(tracing::Level::ERROR, %error, "Fetch loop failed")
             }
@@ -107,7 +117,7 @@ async fn fetch_loop(
     mut cluster: Cluster,
     tx: Sender<Batch>,
     topic_meta: protocol::MetadataResponse0,
-    config: ConsumerConfig,
+    config: ConsumerBuilder,
 ) -> Result<()> {
     let mut offsets = vec![0_u64; topic_meta.topics[0].partition_metadata.len()];
     loop {
