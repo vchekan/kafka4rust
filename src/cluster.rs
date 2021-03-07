@@ -27,12 +27,11 @@
 //! A: ???
 
 use crate::broker::Broker;
-use crate::error::KafkaError;
-use crate::futures::repeat_with_timeout;
+use crate::error::{Result, InternalError, BrokerFailureSource};
+use crate::futures::{repeat_with_timeout, RepeatResult};
 use crate::protocol;
 use crate::types::*;
 use crate::utils::resolve_addr;
-use anyhow::{anyhow, Result, Context};
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -87,13 +86,14 @@ impl Cluster {
 
     /// Connect to known or seed broker and get topic metadata.
     /// If `topics` is empty, then fetch metadata for all topics.
+    /// Update internal broker maps according to the response.
     #[instrument(skip(self), err)]
-    pub async fn fetch_topic_meta(
+    pub async fn fetch_topic_meta_and_update(
         &mut self,
         topics: &[&str],
     ) -> Result<protocol::MetadataResponse0> {
 
-        debug!("fetch_topic_meta_and_retry({:?})", topics);
+        /*debug!("fetch_topic_meta_and_retry({:?})", topics);
         // TODO: wait with timeout
         for broker in self.broker_id_map.values() {
             debug!("Trying to fetch meta from known broker {:?}", broker);
@@ -127,54 +127,66 @@ impl Cluster {
                         }
                     }
                     Err(e) => {
-                        info!("Failed to connect to bootstrap broker {:?}. {:#?}", addr, e);
+                        debug!("Failed to connect to bootstrap broker {:?}. {:#?}", addr, e);
                     }
                 }
             }
             Err(anyhow!("Could not connect to any broker in bootstrap"))
         },  Duration::from_secs(1), operation_timeout).await?;
+         */
 
+        let meta = self.fetch_topic_meta_no_update(topics).await?;
         self.update_brokers_map(&meta);
-
         Ok(meta)
+    }
 
-        /*
+    #[instrument(skip(self), err)]
+    async fn fetch_topic_meta_no_update(
+        &self,
+        topics: &[&str],
+    ) -> Result<protocol::MetadataResponse0> {
 
-        // TODO: if failed, try other connected brokers
-        let meta_response = fetch_topic_with_broker_and_retry(&self.seed_broker, &vec![topic]).await?;
-
-        // TODO: connect in parallel
-        // update known brokers
-        for broker in &meta_response.brokers {
-            // Looks like std::net do not support IpAddr resolution, resolve with 0 port and set port later
-            let addr = (broker.host.as_str(), 0).to_socket_addrs().context(format!("Cluster: resolve host: '{}'", broker.host))?.collect::<Vec<_>>();
-            if addr.len() == 0 {
-                return Err(Error::DnsFailed(format!("{}:{}", broker.host, broker.port)))
+        // fetch from known brokers
+        for broker in self.broker_id_map.values() {
+            debug!("Trying to fetch meta from known broker {:?}", broker);
+            match fetch_topic_with_broker(broker, topics, self.operation_timeout).await {
+                Ok(meta) => return Ok(meta),
+                Err(e) => {
+                    tracing::event!(tracing::Level::ERROR, "Error fetching topic meta: {}", e);
+                    info!("Error fetching topic meta1: {}", e)
+                }
             }
-            let mut addr = addr[0];
-            addr.set_port(broker.port as u16);
-            let connected_broker = Broker::connect(addr).await.context("Cluster: resolve topic")?;
-            self.broker_id_map.insert(broker.node_id, connected_broker);
-
-            return Ok(meta_response);
         }
 
-        // TODO: start recovery?
-        Err(Error::NoBrokerAvailable)
-        */
+        // if failed to fetch from known brokers, give it a try for bootstrap ones
+        let operation_timeout = self.operation_timeout;
+        let meta = repeat_with_timeout(|| async {
+            for addr in &self.bootstrap {
+                debug!("Trying to fetch meta from bootstrap broker {:?}", addr);
+                let broker = Broker::connect(*addr).await;
+                match broker {
+                    Ok(broker) => {
+                        let meta = fetch_topic_with_broker(&broker, topics, operation_timeout).await;
+                        match meta {
+                            Ok(meta) => return Ok(meta),
+                            Err(e) => debug!("Failed to fetch meta from bootstrap broker {:?}. {:#?}", broker, e),
+                        }
+                    }
+                    Err(e) => debug!("Failed to connect to bootstrap broker {:?}. {:#?}", addr, e),
+                }
+            }
+            Err(InternalError::BrokerFailure(BrokerFailureSource::NoBrokerAvailable))
+        },  Duration::from_secs(1), operation_timeout).await;
 
-        /*
-        // TODO: how to implement recovery policy?
-        self.connections.iter_mut().map(|conn| {
-            let req = protocol::MetadataRequest0 {topics: vec![topic]};
-            let resp = conn.request(req).await?;
-        })
-        */
+        match meta {
+            RepeatResult::Timeout => Err(InternalError::BrokerFailure(BrokerFailureSource::Timeout)),
+            RepeatResult::Ok(res) => res
+        }
     }
 
     #[instrument(level="debug", skip(broker_id, self))]
     pub(crate) async fn broker_get_or_connect(&mut self, broker_id: BrokerId) -> Result<&Broker> {
-        let x: Result<&Broker> = match self.broker_id_map.entry(broker_id) {
+        let x: Result<&Broker,_> = match self.broker_id_map.entry(broker_id) {
             Occupied(entry) => Ok(entry.into_mut()),
             Vacant(entry) => {
                 if let Some(addr) = self.broker_addr_map.get(&broker_id) {
@@ -185,11 +197,7 @@ impl Cluster {
                     );
                     Ok(entry.insert(broker))
                 } else {
-                    Err(KafkaError::NoBrokerAvailable(format!(
-                        "Failed to find broker for broker_id: {}",
-                        broker_id
-                    ))
-                    .into())
+                    Err(InternalError::BrokerFailure(BrokerFailureSource::UnknownBrokerId(broker_id)))
                 }
             }
         };
@@ -210,15 +218,20 @@ impl Cluster {
         }
     }
 
+    pub(crate) fn reset_broker(&mut self, broker_id: BrokerId) {
+        self.broker_id_map.remove(&broker_id);
+        self.broker_addr_map.remove(&broker_id);
+    }
+
+    // TODO: what is the list of all known brokers?
+    // TODO: retry policy
     /// Execute request on every broker until success
-    /// TODO: what is the list of all known brokers?
-    /// TODO: retry policy
     pub async fn request<R: protocol::Request>(&self, request: R) -> Result<R::Response> {
         for broker in self.broker_id_map.values() {
             match broker.send_request(&request).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => {
-                    info!("Error {}", e)
+                    info!("Error {:?}", e)
                 }
             }
         }
@@ -237,11 +250,13 @@ impl Cluster {
             }
         }
 
-        Err(KafkaError::NoBrokerAvailable("Can not find broker to send request".to_owned()).into())
+        Err(InternalError::BrokerFailure(BrokerFailureSource::NoBrokerAvailable))
     }
 }
 
-/// Fetch metadata from broker. If retryable error happen, sleep and try again.
+pub struct ClusterApi {
+}
+
 #[instrument(level="debug")]
 async fn fetch_topic_with_broker(
     broker: &Broker,
@@ -251,8 +266,10 @@ async fn fetch_topic_with_broker(
     let req = protocol::MetadataRequest0 {
         topics: topics.iter().map(|t| t.to_string()).collect(),
     };
-    tokio::time::timeout(timeout, broker.send_request(&req)).await
-        .with_context(|| "fetch_topic_with_broker")?
+    match tokio::time::timeout(timeout, broker.send_request(&req)).await {
+        Err(_) => Err(InternalError::BrokerFailure(BrokerFailureSource::Timeout)),
+        Ok(res) => res,
+    }
 }
 
 /*

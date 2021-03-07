@@ -84,7 +84,7 @@ pub(crate) struct Consumer {
 
 impl Consumer {
     #[instrument]
-    pub async fn new(builder: ConsumerBuilder) -> Result<Receiver<Batch>> {
+    async fn new(builder: ConsumerBuilder) -> Result<Receiver<Batch>> {
         let bootstrap = builder.bootstrap.as_ref().map(|s| s.clone()).unwrap_or("localhost:9092".to_string());
         let seed_list = utils::resolve_addr(&bootstrap);
         debug!("Resolved bootstrap list: {:?}", seed_list);
@@ -96,7 +96,7 @@ impl Consumer {
         }
 
         let mut cluster = Cluster::new(seed_list, None);
-        let topic_meta = cluster.fetch_topic_meta(&[&builder.topic]).await?;
+        let topic_meta = cluster.fetch_topic_meta_and_update(&[&builder.topic]).await?;
         debug!("Resolved topic: {:?}", topic_meta);
         assert_eq!(1, topic_meta.topics.len());
 
@@ -163,8 +163,8 @@ async fn fetch_loop(
         for (leader, request) in fetch_requests.into_iter() {
             event!(Level::DEBUG, %leader, "sending");
 
-            let broker: Result<&Broker> = cluster.broker_get_or_connect(leader).await;
-            let broker: &Broker = broker?;
+            let broker = cluster.broker_get_or_connect(leader).await?;
+            // let broker: &Broker = broker?;
             event!(Level::DEBUG, %leader, "got_broker");
 
             let response = broker.send_request(&request).await;

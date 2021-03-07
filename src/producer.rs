@@ -5,10 +5,10 @@ use crate::protocol;
 use crate::protocol::ErrorCode;
 use crate::types::*;
 use crate::utils;
-use anyhow::Result;
+use anyhow::{Result, Context};
 use async_std::sync::Mutex;
 use rand::random;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 use std::fmt::Debug;
@@ -234,10 +234,12 @@ impl Producer {
 
         let buffer = Arc::new(Mutex::new(Buffer::new(cluster.clone())));
         let buffer2 = buffer.clone();
-        let send_timeout = builder.send_timeout;
+        // TODO: default flush timeout is not very scientific. Think either whole flush should have timeout or its internal parts
+        let send_timeout = builder.send_timeout.unwrap_or(Duration::from_secs(30));
 
         // TODO: wait in `close` for loop to end
         let flush_loop_handle = tokio::spawn(async move {
+            let mut topics_in_resolution = HashSet::<String>::new();
             let mut buff_rx = buff_rx;
             let mut complete = false;
             while !complete {
@@ -263,12 +265,14 @@ impl Producer {
                 }
 
                 debug!("Waiting for buffer locks");
+                // TODO: is buffer locked worst-case until flush timeout? Does it mean no append can happen?
                 let mut buffer2 = buffer.lock().await;
                 let mut cluster = cluster.write().await;
                 // TODO: handle result
                 debug!("Flushing with {:?} send_timeout", send_timeout);
                 // TODO: use Duration::MAX when stabilized
-                match timeout(send_timeout.unwrap_or(Duration::new(u64::MAX, 1_000_000_000 - 1)), buffer2.flush(&mut ack_tx2, &mut cluster)).await {
+
+                match timeout(send_timeout, buffer2.flush(&mut ack_tx2, &mut cluster)).await {
                     Err(_) => {
                         tracing::warn!("Flushing timeout");
                         break;
@@ -376,7 +380,7 @@ impl Producer {
         // and await only for failed ones?
         loop {
             debug!("Fetching topic meta from server");
-            let meta = cluster.write().await.fetch_topic_meta(&[topic]).await?;
+            let meta = cluster.write().await.fetch_topic_meta_and_update(&[topic]).await?;
             let meta = ProducerTopicMetadata {
                 protocol_metadata: meta,
                 null_key_partition_counter: random(),
@@ -520,9 +524,10 @@ impl Buffer {
     #[instrument(level = "debug", err, skip(self, acks, cluster))]
     async fn flush(&mut self, acks: &mut Sender<Response>, cluster: &mut Cluster) -> Result<()> {
         let broker_partitioned = self.group_queue_by_leader();
-        // Container to keep sucessful topic/partitions after the call loop. We can ot modify queue
+        // Container to keep successful topic/partitions after the call loop. We can ot modify queue
         // in the loop because loop keeps immutable reference to `self`.
         let mut messages_to_discard = HashMap::<String, Vec<u32>>::new();
+        // TODO: send to all leaders in parallel
         for (&leader, data) in &broker_partitioned {
             let request = protocol::ProduceRequest3 {
                 transactional_id: None,
@@ -531,15 +536,26 @@ impl Buffer {
                 topic_data: &data,
             };
 
-            let broker = Cluster::broker_get_or_connect(cluster, leader)
+            // TODO: upon failure to connect to broker, reset connection and refresh metadata
+            let broker = cluster.broker_get_or_connect(leader)
                 .await
-                .unwrap_or_else(|_| panic!(format!("Can not find broker_id {}", leader)));
+                .with_context(|| format!("Can not find broker_id {}", leader))?;
             let cmd_buf = broker.mk_request(request);
             debug!("Sending Produce");
+            // Any failure to
             let res = broker
                 .send_request2::<protocol::ProduceResponse3>(cmd_buf)
-                .await?;
+                .await;
             // TODO: throttle_time
+
+            // Send was not successful.
+            // Reset broker. This will cause fresh metadata fetch in the next round
+            if res.is_err() {
+               cluster.reset_broker(leader);
+            }
+
+            let res = res?;
+
             debug!("Got Produce response: {:?}", res);
             for topic_resp in &res.responses {
                 for partition_resp in &topic_resp.partition_responses {

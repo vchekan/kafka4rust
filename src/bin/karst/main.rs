@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
             let brokers = list.value_of("brokers").unwrap();
             let mut cluster = Cluster::with_bootstrap(brokers, Some(Duration::from_secs(20)))?;
             // TODO: check for errors
-            let meta = cluster.fetch_topic_meta(&[]).await?;
+            let meta = cluster.fetch_topic_meta_and_update(&[]).await?;
             match list.subcommand() {
                 ("topics", Some(_matches)) => {
                     let topics = meta.topics.iter().map(|t| t.topic.to_string());
@@ -179,7 +179,7 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
     ).get_matches()
 }
 
-async fn get_offsets(
+pub(crate) async fn get_offsets(
     cluster: &Cluster,
     topics_partition_count: &[(&str, u32)],
 ) -> Result<protocol::ListOffsetsResponse0> {

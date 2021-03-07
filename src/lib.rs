@@ -10,6 +10,7 @@ pub mod protocol;
 mod types;
 mod utils;
 mod zigzag;
+mod resolver;
 
 pub mod admin;
 

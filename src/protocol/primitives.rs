@@ -1,8 +1,8 @@
 use super::api::*;
-use crate::error::KafkaError;
+use crate::error::InternalError;
 use crate::protocol::ErrorCode;
 use crate::zigzag::*;
-use anyhow::Result;
+use crate::error::Result;
 use bytes::{Buf, BufMut, BytesMut};
 use std::fmt::Debug;
 
@@ -82,13 +82,14 @@ where
 impl FromKafka for String {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
         if buff.remaining() < 4 {
-            return Err(KafkaError::CorruptMessage("EOF while reading a string len").into());
+            return Err(InternalError::CorruptMessage("EOF while reading a string len"));
         }
         let size = buff.get_u16_be() as usize;
         if buff.remaining() < size {
-            return Err(KafkaError::CorruptMessage("EOF while reading string").into());
+            return Err(InternalError::CorruptMessage("EOF while reading string"));
         }
-        let str = String::from_utf8(buff.bytes()[..size].to_vec())?;
+        let str = String::from_utf8(buff.bytes()[..size].to_vec())
+            .map_err(|e| InternalError::Serialization(e.into()))?;
         buff.advance(size);
         Ok(str)
     }
@@ -97,7 +98,7 @@ impl FromKafka for String {
 impl FromKafka for u32 {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
         if buff.remaining() < 4 {
-            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
         }
         Ok(buff.get_u32_be())
     }
@@ -106,7 +107,7 @@ impl FromKafka for u32 {
 impl FromKafka for i32 {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
         if buff.remaining() < 4 {
-            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
         }
         Ok(buff.get_i32_be())
     }
@@ -115,7 +116,7 @@ impl FromKafka for i32 {
 impl FromKafka for u64 {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
         if buff.remaining() < 8 {
-            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
         }
         Ok(buff.get_u64_be())
     }
@@ -124,7 +125,7 @@ impl FromKafka for u64 {
 impl FromKafka for i64 {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
         if buff.remaining() < 8 {
-            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
         }
         Ok(buff.get_i64_be())
     }
@@ -133,7 +134,7 @@ impl FromKafka for i64 {
 impl FromKafka for u16 {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
         if buff.remaining() < 2 {
-            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
         }
         Ok(buff.get_u16_be())
     }
@@ -142,7 +143,7 @@ impl FromKafka for u16 {
 impl FromKafka for i16 {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
         if buff.remaining() < 2 {
-            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
         }
         Ok(buff.get_i16_be())
     }
@@ -154,7 +155,7 @@ where
 {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
         if buff.remaining() < 4 {
-            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
         }
         let len = buff.get_i32_be();
         if len == -1 || len == 0 {
@@ -162,7 +163,7 @@ where
         }
 
         if buff.remaining() < len as usize {
-            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
         }
         let mut res = Vec::with_capacity(len as usize);
         for _ in 0..len {
@@ -176,13 +177,13 @@ where
 impl FromKafka for ErrorCode {
     fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
         if buff.remaining() < 2 {
-            return Err(KafkaError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
         }
         let code = buff.get_i16_be();
         if code >= -1 && code <= 87 {
             Ok(unsafe { std::mem::transmute(code) })
         } else {
-            Err(KafkaError::CorruptMessage("Invalid error code").into())
+            Err(InternalError::CorruptMessage("Invalid error code").into())
         }
     }
 }
@@ -206,7 +207,7 @@ impl FromKafka for Recordset {
         // TODO: skip control batches
 
         if buff.remaining() < 4 {
-            return Err(KafkaError::CorruptMessage("EOF while reading segment size").into());
+            return Err(InternalError::CorruptMessage("EOF while reading segment size").into());
         }
 
         let segment_size = buff.get_u32_be();
@@ -223,11 +224,11 @@ impl FromKafka for Recordset {
         let magic = buff.bytes().get(8 + 4 + 4);
         match magic {
             Option::None => {
-                return Err(KafkaError::CorruptMessage("EOF reading magic").into());
+                return Err(InternalError::CorruptMessage("EOF reading magic"));
             }
             Some(2) => {}
             Some(magic) => {
-                return Err(KafkaError::UnexpectedRecordsetMagic(*magic).into());
+                return Err(InternalError::UnexpectedRecordsetMagic(*magic));
             }
         };
 
@@ -255,7 +256,7 @@ impl FromKafka for Recordset {
         for _ in 0..records_len {
             let len = get_zigzag64(buff);
             if buff.remaining() < len as usize {
-                return Err(KafkaError::CorruptMessage("Recordset deserialization").into());
+                return Err(InternalError::CorruptMessage("Recordset deserialization").into());
             }
             let _attributes = buff.get_u8();
             let _timestamp_delta = get_zigzag64(buff);

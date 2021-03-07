@@ -1,6 +1,6 @@
 use super::api::*;
 use crate::protocol::primitives::Recordset;
-use anyhow::Result;
+use crate::error::Result;
 use bytes::Buf;
 
 // 0

@@ -1,3 +1,6 @@
+extern crate kafka4rust;
+mod utils;
+
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 // use tokio_stream::{self as stream, StreamExt};
@@ -13,6 +16,7 @@ use std::iter::FromIterator;
 use std::matches;
 use std::thread::sleep;
 use std::time::Duration;
+use crate::utils::*;
 
 mod docker;
 
@@ -53,9 +57,9 @@ async fn producer_creates_topic() -> Result<()> {
     let (mut p, rx) = ProducerBuilder::new("localhost").start()?;
     for i in &[1, 2, 3, 4, 5] {
         let msg = format!("msg-{}", i);
-        p.send(msg, &topic).await;
+        p.send(msg, &topic).await?;
     }
-    p.close().await;
+    p.close().await?;
 
     let mut consumer = ConsumerBuilder::new(topic)
         .bootstrap("localhost")
@@ -89,6 +93,7 @@ Mutithreading save
 #[tokio::test]
 async fn leader_down_producer_and_consumer_recovery() -> Result<()> {
     init_log();
+    init_tracer()?;
     info!("Starting leader_down_producer_and_consumer_recovery()");
     let _d = docker::up();
     let topic = format!("test_topic_{}", random_string(5));
@@ -103,7 +108,7 @@ async fn leader_down_producer_and_consumer_recovery() -> Result<()> {
             docker::hard_kill_kafka(leader.port);
         }
         let msg = format!("msg-{}", i);
-        p.send(msg, &topic).await;
+        p.send(msg, &topic).await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
@@ -112,7 +117,7 @@ async fn leader_down_producer_and_consumer_recovery() -> Result<()> {
     //     .map(|msg| String::from_utf8(msg.value).unwrap())
     //     .take(50).collect().await;
 
-    p.close().await;
+    p.close().await?;
 
     Ok(())
 }
@@ -312,5 +317,5 @@ JavaCanReadCompressedMessages
 fn init_log() {
     simple_logger::SimpleLogger::default()
         .with_level(LevelFilter::Debug)
-        .init();
+        .init().unwrap();
 }

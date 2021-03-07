@@ -1,9 +1,10 @@
-use anyhow::Result;
+use crate::error::{Result, BrokerFailureSource};
 use byteorder::BigEndian;
 use bytes::BytesMut;
 use bytes::{Buf, BufMut, ByteOrder};
 use std::fmt::Debug;
 use std::marker::Sized;
+use crate::error::InternalError;
 
 #[repr(u16)]
 pub enum ApiKey {
@@ -62,11 +63,20 @@ pub(crate) fn write_request<T>(
     BigEndian::write_u32(&mut buff[0..4], size as u32);
 }
 
-pub fn read_response<T>(buff: &mut impl Buf) -> (u32, Result<T>)
+fn test (e: BrokerFailureSource, ei: InternalError) {
+    let e: anyhow::Error = anyhow::Error::new(e);
+    let e = anyhow::Error::new(ei);
+}
+
+pub(crate) fn read_response<T>(buff: &mut impl Buf) -> (u32, Result<T,InternalError>)
 where
     T: FromKafka,
 {
     let corr_id = buff.get_u32_be();
-    let response = T::from_kafka(buff);
+    let response = T::from_kafka(buff).map_err(|e| {
+
+        let e: anyhow::Error = anyhow::Error::new(e);
+        InternalError::Serialization(e)
+    });
     (corr_id, response)
 }

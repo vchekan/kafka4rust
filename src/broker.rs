@@ -1,8 +1,7 @@
 use crate::connection::BrokerConnection;
 use crate::protocol;
 use crate::protocol::*;
-use anyhow::anyhow;
-use anyhow::{Context, Result};
+use crate::error::{Result, BrokerFailureSource, InternalError};
 use bytes::BytesMut;
 use log::{debug, trace};
 use std::fmt::Debug;
@@ -10,6 +9,7 @@ use std::io::Cursor;
 use std::net::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing_attributes::instrument;
+use futures::TryFutureExt;
 
 // TODO: if move negotiated api and correlation to broker connection, this struct degenerates.
 // Is it redundant?
@@ -28,8 +28,8 @@ impl Broker {
     /// Keys
     pub async fn connect(addr: SocketAddr) -> Result<Self> {
         let conn = BrokerConnection::connect(addr)
-            .await
-            .context("Broker:connect")?;
+            .map_err(|e| InternalError::BrokerFailure(e))
+            .await?;
         let req = protocol::ApiVersionsRequest0 {};
         //let mut buf = Vec::with_capacity(1024);
         let mut buf = BytesMut::with_capacity(1024);
@@ -38,14 +38,11 @@ impl Broker {
 
         write_request(&req, correlation_id, None, &mut buf);
         trace!("Requesting Api versions");
-        conn.request(&mut buf)
-            .await
-            .context(anyhow!("Broker:connect({}) failed", addr))?;
+        conn.request(&mut buf).await.map_err(|e| InternalError::BrokerFailure(e))?;
 
         let mut cursor = Cursor::new(buf);
-        let (_corr_id, response): (u32, Result<protocol::ApiVersionsResponse0>) =
-            read_response(&mut cursor);
-        let response = response.context("Broker::connect requesting Api versions")?;
+        let (_corr_id, response): (u32, Result<protocol::ApiVersionsResponse0>) = read_response(&mut cursor);
+        let response = response?;
         trace!("Got ApiVersionResponse {:?}", response);
         response.error_code.as_result()?;
         let negotiated_api_version = Broker::build_api_compatibility(&response);
@@ -70,7 +67,7 @@ impl Broker {
         self.conn
             .request(&mut buff)
             .await
-            .context("Broker: sending request")?;
+            .map_err(|e| InternalError::BrokerFailure(e))?;
         let mut cursor = Cursor::new(buff);
         let (_corr_id, response): (_, Result<R::Response>) = read_response(&mut cursor);
         let response = response?;
@@ -85,7 +82,7 @@ impl Broker {
         self.conn
             .request(&mut request)
             .await
-            .context("Broker: sending request")?;
+            .map_err(|e| InternalError::BrokerFailure(e))?;
         debug!("Sent conn.request(). Result buff len: {}", request.len());
         let mut cursor = Cursor::new(request);
         let (_corr_id, response): (_, Result<R>) = read_response(&mut cursor);
