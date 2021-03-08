@@ -174,11 +174,9 @@ fn write_record(buf: &mut BytesMut, offset_delta: u64, timestamp_delta: u64, msg
     buf.put_slice(put_zigzag64(timestamp_delta, &mut varint_buf));
     buf.put_slice(put_zigzag64(offset_delta, &mut varint_buf));
     match &msg.key {
-        Some(_key) => {
-            //buf.put_slice(zigzag64(key_len as u64, &mut varint_buf));
-            //buf.put_slice(key);
-            // TODO: fix key
-            buf.put_u8(VARINT_MINUS_ONE);
+        Some(key) => {
+            buf.put_slice(put_zigzag64(key_len as u64, &mut varint_buf));
+            buf.put_slice(key);
         }
         None => buf.put_u8(VARINT_MINUS_ONE),
     }
