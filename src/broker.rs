@@ -4,7 +4,7 @@ use crate::protocol::*;
 use crate::error::{Result, BrokerFailureSource, InternalError};
 use bytes::BytesMut;
 use log::{debug, trace};
-use std::fmt::Debug;
+use std::fmt::{Debug, Display, Formatter};
 use std::io::Cursor;
 use std::net::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,7 +13,6 @@ use futures::TryFutureExt;
 
 // TODO: if move negotiated api and correlation to broker connection, this struct degenerates.
 // Is it redundant?
-#[derive(Debug)]
 pub(crate) struct Broker {
     /// (api_key, agreed_version)
     negotiated_api_version: Vec<(i16, i16)>, // TODO: just in case, make it property of
@@ -21,6 +20,15 @@ pub(crate) struct Broker {
     //correlation_id: u32,    // TODO: is correlation property of broker or rather connection?
     correlation_id: AtomicUsize,
     conn: BrokerConnection,
+}
+
+impl Debug for Broker {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Broker")
+            .field("correlation_id", &self.correlation_id)
+            .field("conn", &self.conn)
+            .finish()
+    }
 }
 
 impl Broker {

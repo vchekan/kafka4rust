@@ -1,11 +1,12 @@
 use crate::cluster::Cluster;
-use crate::error::KafkaError;
+use crate::error::{KafkaError, InternalError};
 use crate::murmur2a;
 use crate::protocol;
 use crate::protocol::ErrorCode;
 use crate::types::*;
 use crate::utils;
-use anyhow::{Result, Context};
+// use anyhow::{Result, Context};
+use crate::error::Result;
 use async_std::sync::Mutex;
 use rand::random;
 use std::collections::{HashMap, VecDeque, HashSet};
@@ -20,6 +21,9 @@ use tokio::time::timeout;
 use tracing::{self, event, Level};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
+use tracing_subscriber::fmt::format::debug_fn;
+use tokio::task::JoinHandle;
+use anyhow::Context;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -126,6 +130,7 @@ use tracing_futures::Instrument;
 ///
 
 // TODO: is `Send` needed? Can we convert to QueuedMessage before crossing thread boundaries?
+// TODO: maybe can replace with &[u8] also?
 pub trait ToMessage: Send {
     fn key(&self) -> Option<Vec<u8>>;
     fn value(&self) -> Vec<u8>;
@@ -176,7 +181,7 @@ impl<'a> ProducerBuilder<'a> {
     }
     pub fn hasher(mut self, hasher: Box<dyn Partitioner>) -> Self { self.hasher = Some(hasher); self }
     pub fn send_timeout(self, timeout: Duration) -> Self { ProducerBuilder {send_timeout: Some(timeout), ..self} }
-    pub fn start(self) -> Result<(Producer,Receiver<Response>)> { Producer::new(self) }
+    pub fn start(self) -> anyhow::Result<(Producer,Receiver<Response>)> { Ok(Producer::new(self)?) }
 }
 
 pub struct Producer {
@@ -188,7 +193,7 @@ pub struct Producer {
     topics_meta: HashMap<String, ProducerTopicMetadata>,
     acks: Sender<Response>,
     buffer_commands: Sender<BuffCmd>,
-    flush_loop_handle: tokio::task::JoinHandle<()>,
+    flush_loop_handle: tokio::task::JoinHandle<Result<()>>,
     send_timeout: Option<Duration>,
 }
 
@@ -217,7 +222,7 @@ impl Producer {
 
 impl Producer {
     #[instrument(level = "debug", err)]
-    pub fn new(builder: ProducerBuilder) -> Result<(Self, Receiver<Response>)> {
+    pub fn new(builder: ProducerBuilder) -> anyhow::Result<(Self, Receiver<Response>)> {
         // TODO: resolve names async and account for connect timeout
         let seed_list = utils::resolve_addr(builder.brokers);
         if seed_list.is_empty() {
@@ -238,11 +243,11 @@ impl Producer {
         let send_timeout = builder.send_timeout.unwrap_or(Duration::from_secs(30));
 
         // TODO: wait in `close` for loop to end
-        let flush_loop_handle = tokio::spawn(async move {
+        let flush_loop_handle: JoinHandle<Result<()>> = tokio::spawn(async move {
             let mut topics_in_resolution = HashSet::<String>::new();
             let mut buff_rx = buff_rx;
             let mut complete = false;
-            while !complete {
+            loop {
                 // TODO: check time since last flush
                 // TODO: configure flush time
                 tokio::select! {
@@ -272,17 +277,25 @@ impl Producer {
                 debug!("Flushing with {:?} send_timeout", send_timeout);
                 // TODO: use Duration::MAX when stabilized
 
-                match timeout(send_timeout, buffer2.flush(&mut ack_tx2, &mut cluster)).await {
+                let res = match timeout(send_timeout, buffer2.flush(&mut ack_tx2, &mut cluster)).await {
                     Err(_) => {
                         tracing::warn!("Flushing timeout");
-                        break;
+                        Err(InternalError::Timeout)
                     },
-                    Ok(Err(e)) => error!("Failed to flush buffer. {}", e),
-                    Ok(Ok(_)) => {tracing::trace!("Flush Ok")}
+                    Ok(Err(e)) => {
+                        error!("Failed to flush buffer. {:?}", e);
+                        Err(e)
+                    },
+                    Ok(Ok(_)) => {
+                        tracing::trace!("Flush Ok");
+                        Ok(())
+                    }
+                };
+                if complete {
+                    debug!("Buffer flush loop quit");
+                    return  res;
                 }
-            }
-
-            debug!("Buffer flush loop quit");
+            };
         }.instrument(tracing::info_span!("flush_loop")));
 
         let producer = Producer {
@@ -301,7 +314,7 @@ impl Producer {
     }
 
     #[instrument(level = "debug", err, skip(msg, self))]
-    pub async fn send<M: ToMessage + 'static>(&mut self, msg: M, topic: &str) -> Result<()> {
+    pub async fn send<M: ToMessage + 'static>(&mut self, msg: M, topic: &str) -> Result<(),InternalError> {
         let mut buffer = self.buffer.lock().await;
         // TODO: share metadata cache between self and Buffer
         let meta = Self::get_or_request_meta(
@@ -348,10 +361,13 @@ impl Producer {
     }
 
     #[instrument(level="debug", err, skip(self))]
-    pub async fn flush(&mut self) -> Result<()> {
+    pub async fn flush(&mut self) -> Result<(),InternalError> {
+        debug!("Flushing buffer before close");
         let mut buffer = self.buffer.lock().await;
         let mut cluster = self.cluster.write().await;
-        buffer.flush(&mut self.acks, &mut cluster).await
+        let res = buffer.flush(&mut self.acks, &mut cluster).await;
+        debug!("Flushing result: {:#?}", res);
+        res
     }
 
     /// Get topic's meta from cache or request from broker.
@@ -365,7 +381,7 @@ impl Producer {
         topics_meta: &'a mut HashMap<String, ProducerTopicMetadata>,
         buffer_meta: &mut HashMap<String, Vec<BrokerId>>,
         topic: &str,
-    ) -> Result<&'a mut ProducerTopicMetadata> {
+    ) -> Result<&'a mut ProducerTopicMetadata,InternalError> {
         // `if let Some(meta) = self.topics_meta.get(topic)` does not work because of lifetimes,
         // so have to do 2 lookups :(
         if topics_meta.contains_key(topic) {
@@ -434,11 +450,11 @@ impl Producer {
     }
 
     #[instrument(level="debug", err, skip(self))]
-    pub async fn close(self) -> Result<()> {
+    pub async fn close(self) -> anyhow::Result<()> {
         debug!("Closing producer...");
         self.buffer_commands.send(BuffCmd::FlushAndClose).await?;
         debug!("Sent BuffCmd::FlushAndClose, waiting for loop exit");
-        self.flush_loop_handle.await?;
+        self.flush_loop_handle.await.context("producer closing")??;
         debug!("Producer closed");
         Ok(())
     }
@@ -537,9 +553,7 @@ impl Buffer {
             };
 
             // TODO: upon failure to connect to broker, reset connection and refresh metadata
-            let broker = cluster.broker_get_or_connect(leader)
-                .await
-                .with_context(|| format!("Can not find broker_id {}", leader))?;
+            let broker = cluster.broker_get_or_connect(leader).await?;
             let cmd_buf = broker.mk_request(request);
             debug!("Sending Produce");
             // Any failure to
@@ -548,19 +562,22 @@ impl Buffer {
                 .await;
             // TODO: throttle_time
 
-            // Send was not successful.
-            // Reset broker. This will cause fresh metadata fetch in the next round
-            if res.is_err() {
-               cluster.reset_broker(leader);
-            }
-
-            let res = res?;
+            let res = match res {
+                Err(e) => {
+                    // Send was not successful.
+                    // Reset broker. This will cause fresh metadata fetch in the next round
+                    cluster.reset_broker(leader);
+                    // TODO: `continue` with other partitions instead of `return`
+                    return Err(e);
+                }
+                Ok(res) => res
+            };
 
             debug!("Got Produce response: {:?}", res);
             for topic_resp in &res.responses {
                 for partition_resp in &topic_resp.partition_responses {
                     let ack = if partition_resp.error_code.is_ok() {
-                        debug!("Ok sent partition {}", partition_resp.partition);
+                        debug!("Ok sent partition {} to broker {:?}", partition_resp.partition, broker);
                         messages_to_discard
                             .entry(topic_resp.topic.clone())
                             .or_default()
@@ -732,68 +749,56 @@ pub enum TimestampType {
     LogAppend = 1,
 }
 
-pub struct BinMessage {
-    pub key: Vec<u8>,
-    pub value: Vec<u8>,
+// TODO: research rust `impl specialization` and create a single-value impl for `T: AsRef<[u8]>`
+// default impl<T> ToMessage for T
+//     where T: AsRef<[u8]> + Send
+// {
+//     fn key(&self) -> Option<Vec<u8>> {
+//         None
+//     }
+//     fn value(&self) -> Vec<u8> {
+//         Vec::from(self.as_ref().as_bytes())
+//     }
+// }
+
+// TODO: see if Send can be eliminated by serializing in the caller's thread
+impl<K, V> ToMessage for (Option<K>, V)
+where
+    K: Send + AsRef<[u8]>,
+    V: Send + AsRef<[u8]>,
+{
+    fn key(&self) -> Option<Vec<u8>> { self.0.as_ref().map(|k| k.as_ref().to_vec()) }
+    fn value(&self) -> Vec<u8> { self.1.as_ref().to_vec() }
 }
 
-impl ToMessage for BinMessage {
-    fn key(&self) -> Option<Vec<u8>> {
-        Some(self.key.clone())
-    }
-    fn value(&self) -> Vec<u8> {
-        self.value.clone()
-    }
-}
-
-#[derive(Debug)]
-pub struct StringMessage {
-    pub key: String,
-    pub value: String,
-}
-
-impl ToMessage for StringMessage {
-    fn key(&self) -> Option<Vec<u8>> {
-        Some(self.key.as_bytes().to_vec())
-    }
-    fn value(&self) -> Vec<u8> {
-        self.value.as_bytes().to_vec()
-    }
-}
+// impl<K, V> ToMessage for (K, V)
+//     where
+//         K: Send + AsRef<str>,
+//         V: Send + AsRef<str>,
+// {
+//     fn key(&self) -> Option<Vec<u8>> { Some(Vec::from(self.0.as_ref().as_bytes())) }
+//     fn value(&self) -> Vec<u8> { Vec::from(self.1.as_ref().as_bytes()) }
+// }
 
 impl ToMessage for &str {
-    fn key(&self) -> Option<Vec<u8>> {
-        None
-    }
-
-    fn value(&self) -> Vec<u8> {
-        Vec::from(self.as_bytes())
-    }
+    fn key(&self) -> Option<Vec<u8>> { None }
+    fn value(&self) -> Vec<u8> { Vec::from(self.as_bytes()) }
 }
 
 impl ToMessage for String {
-    fn key(&self) -> Option<Vec<u8>> {
-        None
-    }
-    fn value(&self) -> Vec<u8> {
-        Vec::from(self.as_bytes())
-    }
+    fn key(&self) -> Option<Vec<u8>> { None }
+    fn value(&self) -> Vec<u8> { Vec::from(self.as_bytes()) }
 }
 
-// TODO: see if Send can be eliminated
-impl<K, V> ToMessage for (K, V)
-where
-    K: Send,
-    V: Send,
-{
-    fn key(&self) -> Option<Vec<u8>> {
-        unimplemented!()
-    }
-
-    fn value(&self) -> Vec<u8> {
-        unimplemented!()
-    }
+impl ToMessage for &[u8] {
+    fn key(&self) -> Option<Vec<u8>> { None }
+    fn value(&self) -> Vec<u8> { Vec::from(*self) }
 }
+
+// impl ToMessage for (&str, String) {
+//     fn key(&self) -> Option<Vec<u8>> { None }
+//     fn value(&self) -> Vec<u8> { Vec::from(self) }
+// }
 
 #[cfg(test)]
 mod test {

@@ -73,10 +73,10 @@ async fn main() -> Result<()> {
             let (mut producer, _acks) =
                 producer.start().expect("Failed to create publisher");
             if let Some(key) = key {
-                let msg = (key.to_string(), val.to_string());
+                let msg = (Some(key.to_string()), val.to_string());
                 producer.send(msg, topic).await?;
             } else {
-                producer.send(val.to_string(), topic).await?;
+                producer.send((Option::<&[u8]>::None,val.to_string()), topic).await?;
             }
             producer.close().await?;
         }

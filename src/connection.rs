@@ -31,15 +31,24 @@ use std::sync::Arc;
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use tracing;
+use std::fmt::{Debug, Formatter};
 
 type Result<T> = crate::error::Result<T, BrokerFailureSource>;
 pub(crate) const CLIENT_ID: &str = "k4rs";
 
-#[derive(Debug, Clone)]
 pub(crate) struct BrokerConnection {
     addr: SocketAddr,
     // TODO: is this decision sound? Could we write 2 messages from 2 threads and read them out of order?
     inner: Arc<Mutex<Inner>>,
+}
+
+// TODO: try to show local socket info too
+impl Debug for BrokerConnection {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrokerConnection")
+            .field("addr", &self.addr)
+            .finish()
+    }
 }
 
 #[derive(Debug)]

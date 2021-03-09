@@ -57,7 +57,7 @@ async fn producer_creates_topic() -> Result<()> {
     let (mut p, rx) = ProducerBuilder::new("localhost").start()?;
     for i in &[1, 2, 3, 4, 5] {
         let msg = format!("msg-{}", i);
-        p.send(msg, &topic).await?;
+        p.send((Option::<&str>::None,msg), &topic).await?;
     }
     p.close().await?;
 
@@ -99,16 +99,19 @@ async fn leader_down_producer_and_consumer_recovery() -> Result<()> {
     let topic = format!("test_topic_{}", random_string(5));
     let (mut p, rx) =
         ProducerBuilder::new("localhost").hasher(Box::new(FixedPartitioner { 0: 0_u32 })).start()?;
-    for i in 1..10 {
+    debug!("Created producer: {:?}", p);
+    for i in 1..=10 {
+        debug!("Sending {}", i);
         if i == 5 {
+            p.flush().await?;
+
             let meta = admin::get_topic_metadata("localhost", &topic).await?;
             let leader = meta.topics[0].partition_metadata[0].leader;
             let leader = &meta.brokers.iter().find(|b| b.node_id == leader).unwrap();
-            debug!("Sending {}", i);
             docker::hard_kill_kafka(leader.port);
         }
         let msg = format!("msg-{}", i);
-        p.send(msg, &topic).await?;
+        p.send((Some("key-const"), msg), &topic).await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
@@ -121,6 +124,14 @@ async fn leader_down_producer_and_consumer_recovery() -> Result<()> {
 
     Ok(())
 }
+
+/*
+Keyed message can be sent
+ */
+
+/*
+Failure to flush is propagated to the client
+*/
 
 // Timeout if no service
 
