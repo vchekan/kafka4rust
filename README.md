@@ -38,13 +38,21 @@
     * eyre
     * snafu
 
+## TODO
+- [ ] Validate that BytesMut has always enough reserve bytes. Or switch to Vec?
+- [ ] Make sure that command send anr response are corresponding even in parallel scenario.
+- [ ] Producer sent message size limit
+- [ ] Evaluate `select!` usage for cancellation safety: https://tomaka.medium.com/a-look-back-at-asynchronous-rust-d54d63934a1c 
+
 ## Techniques
 * Try parallel-streams
-* Consider Cow<> when deserializing.
+* Consider `Cow<>` when deserializing.
 * Consider `flume` for channels
 * Considr `dashmap` for mutithreading access.
+* Consider `slotmap` https://docs.rs/slotmap/1.0.1/slotmap/
 * Consider `parking_lot` for non-poisoning locks.
 * Consider `tinyvec` and `smolstr` for stack-optimized strings/arrays
+* Consider using arena: https://manishearth.github.io/blog/2021/03/15/arenas-in-rust/  
 * Audit that `copy` is used whenever possible, instead of `clone`
 * Tcp: nodelay, experiment with tx,rx buffer size
 * Adaptive buffer size
@@ -53,8 +61,6 @@
 * CI: do `cargo audit`
 * Failure model: fail up to connection reset instead of panic.
 * Use hashmap's raw_entry
-* Validate that BytesMut has always enough reserve bytes. Or switch to Vec?
-* Consider Slotmap https://docs.rs/slotmap/1.0.1/slotmap/
 
 ## Projects
 * CLI tools

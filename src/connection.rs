@@ -74,6 +74,7 @@ impl BrokerConnection {
         Ok(conn)
     }
 
+    /// Write request from buffer into tcp and reuse the buffer to read response
     #[instrument(level = "debug", err, skip(self, buf))]
     pub async fn request(&self, buf: &mut BytesMut) -> Result<()> {
         let mut inner = self.inner.lock().await;

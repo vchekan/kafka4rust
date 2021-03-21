@@ -5,7 +5,6 @@ use crate::protocol;
 use crate::protocol::ErrorCode;
 use crate::types::*;
 use crate::utils;
-// use anyhow::{Result, Context};
 use crate::error::Result;
 use async_std::sync::Mutex;
 use rand::random;
@@ -18,12 +17,14 @@ use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
+use async_stream;
 use tracing::{self, event, Level};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use tracing_subscriber::fmt::format::debug_fn;
 use tokio::task::JoinHandle;
 use anyhow::Context;
+use futures::stream::{self, StreamExt};
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -291,6 +292,7 @@ impl Producer {
                         Ok(())
                     }
                 };
+
                 if complete {
                     debug!("Buffer flush loop quit");
                     return  res;
@@ -379,7 +381,7 @@ impl Producer {
     async fn get_or_request_meta<'a>(
         cluster: &tokio::sync::RwLock<Cluster>,
         topics_meta: &'a mut HashMap<String, ProducerTopicMetadata>,
-        buffer_meta: &mut HashMap<String, Vec<BrokerId>>,
+        buffer_meta: &mut HashMap<String, Vec<Option<BrokerId>>>,
         topic: &str,
     ) -> Result<&'a mut ProducerTopicMetadata,InternalError> {
         // `if let Some(meta) = self.topics_meta.get(topic)` does not work because of lifetimes,
@@ -420,13 +422,13 @@ impl Producer {
                 .iter()
                 .all(|m| m.error_code == ErrorCode::None)
             {
-                let mut partition_leader_map: Vec<i32> =
-                    vec![-1; topic_metadata.partition_metadata.len()];
+                let mut partition_leader_map: Vec<Option<i32>> =
+                    vec![None; topic_metadata.partition_metadata.len()];
                 for partition_meta in &topic_metadata.partition_metadata {
                     // TODO: got exception once: index 5 is out of range of 5. How come? Switch to map?
-                    partition_leader_map[partition_meta.partition as usize] = partition_meta.leader;
+                    partition_leader_map[partition_meta.partition as usize] = Some(partition_meta.leader);
                 }
-                assert!(partition_leader_map.iter().all(|l| *l != -1));
+                assert!(partition_leader_map.iter().all(|l| l.is_some()));
                 buffer_meta.insert(topic.to_string(), partition_leader_map);
                 topics_meta.insert(topic.to_string(), meta);
 
@@ -478,8 +480,8 @@ struct ProducerTopicMetadata {
 ///
 ///
 ///
-///                                | topic 1 --|partition 0; recordset
-/// ProduceMessage --| broker_id 1 |           |partition 1; recordset
+/// ProduceMessage --| broker_id 1 | topic 1 --|partition 0; recordset
+///                  |                         |partition 1; recordset
 ///                  |
 ///                  | broker_id 2 | topic 2 --| partition 0; recordset
 ///                                |
@@ -490,8 +492,8 @@ struct Buffer {
     topic_queues: HashMap<String, Vec<PartitionQueue>>,
     bytes: u32,
     size_limit: u32,
-    /// Vector of partitions
-    meta_cache: HashMap<String, Vec<BrokerId>>,
+    /// topic -> partition[] -> leader (if known). Leader is None if it is down and requires re-discovery
+    meta_cache: HashMap<String, Vec<Option<BrokerId>>>,
     cluster: Arc<RwLock<Cluster>>,
 }
 
@@ -538,13 +540,15 @@ impl Buffer {
     /// TODO: rust BC to become smarter. Parameter `cluster` is member of `self` but I have to pass it separately because borrow checker
     /// complains about `self` being borrowed 2 times mutably.
     #[instrument(level = "debug", err, skip(self, acks, cluster))]
-    async fn flush(&mut self, acks: &mut Sender<Response>, cluster: &mut Cluster) -> Result<()> {
+    async fn flush(&mut self, acks: &mut Sender<Response>, cluster: &Cluster) -> Result<()> {
         let broker_partitioned = self.group_queue_by_leader();
-        // Container to keep successful topic/partitions after the call loop. We can ot modify queue
-        // in the loop because loop keeps immutable reference to `self`.
-        let mut messages_to_discard = HashMap::<String, Vec<u32>>::new();
-        // TODO: send to all leaders in parallel
-        for (&leader, data) in &broker_partitioned {
+
+        // TODO: send to all leaders in parallel. Use `Stream`?
+        // for (&leader, data) in &broker_partitioned {
+        // let res: Vec<_> = broker_partitioned.into_iter().map(|(leader, data)| tokio::spawn(async move {
+        // let responses = async_stream::stream! {
+        // for (&leader, data) in &broker_partitioned {
+        let mut responses = stream::iter(broker_partitioned).map(|(leader, data)| async move {
             let request = protocol::ProduceRequest3 {
                 transactional_id: None,
                 acks: 1,
@@ -553,77 +557,120 @@ impl Buffer {
             };
 
             // TODO: upon failure to connect to broker, reset connection and refresh metadata
-            let broker = cluster.broker_get_or_connect(leader).await?;
+            let broker = match cluster.broker_get_no_connect(leader).await {
+                Ok(broker) => broker,
+                Err(e) => /*return*/ {
+                    // cluster.start_resolving_topics(data.keys().map(|t| *t)).await?;
+                    //yield (leader, Err(e));
+                    return Err(e);
+                    // self.mark_leader_down(leader);
+                    // continue;
+                }
+            };
+
             let cmd_buf = broker.mk_request(request);
             debug!("Sending Produce");
             // Any failure to
-            let res = broker
+            let response = broker
                 .send_request2::<protocol::ProduceResponse3>(cmd_buf)
                 .await;
             // TODO: throttle_time
 
-            let res = match res {
+            let response = match response {
                 Err(e) => {
                     // Send was not successful.
                     // Reset broker. This will cause fresh metadata fetch in the next round
-                    cluster.reset_broker(leader);
+                    // cluster.reset_broker(leader);
                     // TODO: `continue` with other partitions instead of `return`
+                    /*return*/
+                    // yield (leader, Err(e));
                     return Err(e);
+                    // self.mark_leader_down(leader);
+                    // continue;
                 }
-                Ok(res) => res
+                Ok(response) => response
             };
 
-            debug!("Got Produce response: {:?}", res);
-            for topic_resp in &res.responses {
-                for partition_resp in &topic_resp.partition_responses {
-                    let ack = if partition_resp.error_code.is_ok() {
-                        debug!("Ok sent partition {} to broker {:?}", partition_resp.partition, broker);
-                        messages_to_discard
-                            .entry(topic_resp.topic.clone())
-                            .or_default()
-                            .push(partition_resp.partition as u32);
-                        // Notify caller
-                        Response::Ack {
-                            partition: partition_resp.partition as u32,
-                            offset: partition_resp.base_offset as u64,
-                            error: partition_resp.error_code,
-                        }
-                    } else {
-                        error!(
-                            "Produce error. Topic {} partition {} error {:?}",
-                            topic_resp.topic, partition_resp.partition, partition_resp.error_code
-                        );
-                        tracing::event!(tracing::Level::ERROR, ?leader, ?topic_resp.topic, partition = ?partition_resp.partition, error_code = ?partition_resp.error_code, "Produce error");
-                        Response::Nack {
-                            partition: partition_resp.partition as u32,
-                            error: partition_resp.error_code,
-                        }
-                    };
-                    if acks.send(ack).await.is_err() {
-                        info!("Application closed channel. Exiting receiving loop");
-                        break;
-                    }
-                }
-            }
+            // Container to keep successful topic/partitions after the call loop. We can not modify queue
+            // in the loop because loop keeps immutable reference to `self`.
+            // Topic -> partition
+            // let mut messages_to_discard = HashMap::<String, Vec<u32>>::new();
+
+            debug!("Got Produce response: {:?}", response);
+            // for topic_resp in &response.responses {
+            //     for partition_resp in &topic_resp.partition_responses {
+            //         let ack = if partition_resp.error_code.is_ok() {
+            //             debug!("Ok sent partition {} to broker {:?}", partition_resp.partition, broker);
+            //
+            //             // messages_to_discard
+            //             //     .entry(topic_resp.topic.clone())
+            //             //     .or_default()
+            //             //     .push(partition_resp.partition as u32);
+            //             // Notify caller
+            //             Response::Ack {
+            //                 partition: partition_resp.partition as u32,
+            //                 offset: partition_resp.base_offset as u64,
+            //                 error: partition_resp.error_code,
+            //             }
+            //         } else {
+            //             error!(
+            //                 "Produce error. Topic {} partition {} error {:?}",
+            //                 topic_resp.topic, partition_resp.partition, partition_resp.error_code
+            //             );
+            //             tracing::event!(tracing::Level::ERROR, ?leader, ?topic_resp.topic, partition = ?partition_resp.partition, error_code = ?partition_resp.error_code, "Produce error");
+            //             Response::Nack {
+            //                 partition: partition_resp.partition as u32,
+            //                 error: partition_resp.error_code,
+            //             }
+            //         };
+            //     }
+            // }
+            // yield (leader, Ok(()));
+            Ok(response)
+        }).buffer_unordered(100);
+
+        // let mut successes = vec![];
+        // let mut failures = vec![];
+        while let Some(response) = responses.next().await {
+            // self.mark_leader_down(leader);
+            // match response {
+            //     (leader, Err(e)) => {
+            //         info!("Failed to send produce message to broker_id {}. Marking it as failed", leader);
+            //         failures.push(leader);
+            //     }
+            //     (leader, Ok(_)) => {
+            //         successes.push(leader);
+            //     }
+            // }
         }
 
+
+
         // Discard messages which were sent successfully
-        for (topic, partitions) in messages_to_discard {
-            let queues = self.topic_queues.get_mut(&topic).expect("Topic not found");
-            for partition in partitions {
-                let queue = &mut queues[partition as usize];
-                queue.queue.drain(..queue.sending as usize);
-                queue.sending = 0;
-                let remaining = queue.queue.len();
-                event!(
-                    Level::DEBUG,
-                    ?topic,
-                    ?partition,
-                    ?remaining,
-                    "Truncated queue"
-                );
-            }
-        }
+        // unimplemented!();
+        // for (topic, partitions) in failures {
+        //     let queues = self.topic_queues.get_mut(&topic).expect("Topic not found");
+        //     for partition in partitions {
+        //         let queue = &mut queues[partition as usize];
+        //         queue.queue.drain(..queue.sending as usize);
+        //         queue.sending = 0;
+        //         let remaining = queue.queue.len();
+        //         event!(
+        //             Level::DEBUG,
+        //             ?topic,
+        //             ?partition,
+        //             ?remaining,
+        //             "Truncated queue"
+        //         );
+        //     }
+        // }
+
+        // TODO:
+        // if acks.send(ack).await.is_err() {
+        //     info!("Application closed channel. Exiting receiving loop");
+        //     break;
+        // }
+
 
         Ok(())
     }
@@ -656,7 +703,16 @@ impl Buffer {
                     .get(topic)
                     .expect("Topic metadata is expected")
                     .get(partition as usize)
-                    .expect("Corrupt topic metadata partition info");
+                    .expect("Corrupt topic metadata partition info: can not find leader for partition");
+
+                let leader = match leader {
+                    Some(leader) => leader,
+                    None => {
+                        trace!("Leader for partition {} is not known yet, skipping", partition);
+                        continue;
+                    }
+                };
+
                 // TODO: limit message size
                 queue.sending = queue.queue.len().try_into().unwrap();
 
@@ -701,6 +757,14 @@ impl Buffer {
         }*/
 
         broker_partitioned
+    }
+
+    fn mark_leader_down(&mut self, leader: BrokerId) {
+        for (_topic, partitions) in &mut self.meta_cache {
+            for leader in partitions {
+                *leader = None
+            }
+        }
     }
 }
 

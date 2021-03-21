@@ -37,6 +37,9 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use tokio::time::Duration;
 use tracing_attributes::instrument;
+use crate::resolver::{self, start_resolver};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::{Sender, Receiver};
 
 #[derive(Debug)]
 pub struct Cluster {
@@ -44,6 +47,8 @@ pub struct Cluster {
     broker_id_map: HashMap<BrokerId, Broker>,
     broker_addr_map: HashMap<BrokerId, SocketAddr>,
     operation_timeout: Duration,
+    resolver_tx: Sender<crate::resolver::Cmd>,
+    resolver_rx: Receiver<Vec<String>>,
 }
 
 impl Cluster {
@@ -76,12 +81,20 @@ impl Cluster {
         debug!("Connected to {:?}", broker);
         */
 
-        Cluster {
+
+        let (req_tx, req_rx) = mpsc::channel(1);
+        let (resp_tx, resp_rx) = mpsc::channel(1);
+        let cluster = Cluster {
             bootstrap,
             broker_id_map: HashMap::new(),
             broker_addr_map: HashMap::new(),
             operation_timeout: operation_timeout.unwrap_or(Duration::from_secs(5)),
-        }
+            resolver_tx: req_tx,
+            resolver_rx: resp_rx,
+        };
+        start_resolver(req_rx, resp_tx);
+
+        cluster
     }
 
     /// Connect to known or seed broker and get topic metadata.
@@ -141,7 +154,7 @@ impl Cluster {
     }
 
     #[instrument(skip(self), err)]
-    async fn fetch_topic_meta_no_update(
+    pub async fn fetch_topic_meta_no_update(
         &self,
         topics: &[&str],
     ) -> Result<protocol::MetadataResponse0> {
@@ -204,6 +217,11 @@ impl Cluster {
         x
     }
 
+    #[instrument(level="debug", skip(broker_id, self))]
+    pub(crate) async fn broker_get_no_connect(&self, broker_id: BrokerId) -> Result<&Broker> {
+        unimplemented!()
+    }
+
     fn update_brokers_map(&mut self, meta: &protocol::MetadataResponse0) {
         for broker in &meta.brokers {
             match (broker.host.as_str(), broker.port as u16).to_socket_addrs() {
@@ -251,6 +269,13 @@ impl Cluster {
         }
 
         Err(InternalError::BrokerFailure(BrokerFailureSource::NoBrokerAvailable))
+    }
+
+    pub async fn start_resolving_topics(&self, topics: impl Iterator<Item=&String>) -> Result<()> {
+        for topic in topics {
+            self.resolver_tx.send(resolver::Cmd::ResolveTopic(topic.clone())).await.map_err(|e| InternalError::Critical("Failed to send topic to topic resolver".into()))?;
+        }
+        Ok(())
     }
 }
 

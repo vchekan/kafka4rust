@@ -50,7 +50,13 @@ pub enum InternalError {
     Serialization(#[source] anyhow::Error),
 
     #[error("broker failed {0}")]
-    BrokerFailure(BrokerFailureSource)
+    BrokerFailure(BrokerFailureSource),
+
+    // TODO: handle critical properly in strategic points
+    /// Means to indicate that continuation is not possible due to severity of error.
+    /// Driver should exit gracefully.
+    #[error("critical: {0}")]
+    Critical(String),
 }
 
 /// Special error indicating that broker failure requires metadata to be re-fetched because
