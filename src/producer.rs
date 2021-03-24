@@ -236,7 +236,7 @@ impl Producer {
         let cluster2 = cluster.clone();
         let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(1000);
         let mut ack_tx2 = ack_tx.clone();
-        let (buff_tx, buff_rx) = channel::<BuffCmd>(2);
+        let (buff_tx, mut buff_rx) = channel::<BuffCmd>(2);
 
         let buffer = Arc::new(Mutex::new(Buffer::new(cluster.clone())));
         let buffer2 = buffer.clone();
@@ -245,8 +245,8 @@ impl Producer {
 
         // TODO: wait in `close` for loop to end
         let flush_loop_handle: JoinHandle<Result<()>> = tokio::spawn(async move {
-            let mut topics_in_resolution = HashSet::<String>::new();
-            let mut buff_rx = buff_rx;
+            // let mut topics_in_resolution = HashSet::<String>::new();
+            // let mut buff_rx = buff_rx;
             let mut complete = false;
             loop {
                 // TODO: check time since last flush
@@ -278,24 +278,26 @@ impl Producer {
                 debug!("Flushing with {:?} send_timeout", send_timeout);
                 // TODO: use Duration::MAX when stabilized
 
-                let res = match timeout(send_timeout, buffer2.flush(&mut ack_tx2, &mut cluster)).await {
-                    Err(_) => {
-                        tracing::warn!("Flushing timeout");
-                        Err(InternalError::Timeout)
-                    },
-                    Ok(Err(e)) => {
-                        error!("Failed to flush buffer. {:?}", e);
-                        Err(e)
-                    },
-                    Ok(Ok(_)) => {
-                        tracing::trace!("Flush Ok");
-                        Ok(())
-                    }
-                };
+                buffer2.flush(&mut ack_tx2, &mut cluster).await;
+                // let res: Result<()> = match timeout(send_timeout, buffer2.flush(&mut ack_tx2, &mut cluster)).await {
+                //     Err(_) => {
+                //         tracing::warn!("Flushing timeout");
+                //         Err(InternalError::Timeout)
+                //     },
+                //     Ok(Err(e)) => {
+                //         error!("Failed to flush buffer. {:?}", e);
+                //         Err(e)
+                //     },
+                //     Ok(Ok(_)) => {
+                //         tracing::trace!("Flush Ok");
+                //         Ok(())
+                //     }
+                // };
 
                 if complete {
                     debug!("Buffer flush loop quit");
-                    return  res;
+                    // return  res;
+                    return Ok(())
                 }
             };
         }.instrument(tracing::info_span!("flush_loop")));
