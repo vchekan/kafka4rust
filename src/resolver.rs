@@ -22,7 +22,7 @@ pub(crate) fn start_resolver(mut requests: Receiver<Cmd>, result_tx: Sender<Vec<
             select! {
                 // Listen to new topic resolve inquiry
                 topic = requests.recv() => {
-                    match(topic) {
+                    match topic {
                         Some(Cmd::ResolveTopic(topic)) => {
                             topics.insert(topic); //{
                                 // debug!("Added {} topic to resolving list", topic);

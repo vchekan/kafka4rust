@@ -233,26 +233,98 @@ impl Producer {
             )).into());
         }
         let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::new(seed_list, builder.send_timeout)));
-        let cluster2 = cluster.clone();
+        // let cluster2 = cluster.clone();
         let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(1000);
-        let mut ack_tx2 = ack_tx.clone();
+        // let mut ack_tx2 = ack_tx.clone();
         let (buff_tx, mut buff_rx) = channel::<BuffCmd>(2);
 
         let buffer = Arc::new(Mutex::new(Buffer::new(cluster.clone())));
-        let buffer2 = buffer.clone();
+        // let buffer2 = buffer.clone();
         // TODO: default flush timeout is not very scientific. Think either whole flush should have timeout or its internal parts
         let send_timeout = builder.send_timeout.unwrap_or(Duration::from_secs(30));
 
         // TODO: wait in `close` for loop to end
-        let flush_loop_handle: JoinHandle<Result<()>> = tokio::spawn(async move {
-            // let mut topics_in_resolution = HashSet::<String>::new();
-            // let mut buff_rx = buff_rx;
-            let mut complete = false;
-            loop {
-                // TODO: check time since last flush
-                // TODO: configure flush time
-                tokio::select! {
-                    _ = async_std::task::sleep(Duration::from_secs(5)) => { debug!("Buffer timer"); }
+        let flush_loop_handle: JoinHandle<Result<()>> = tokio::spawn(Self::flushing_loop(buff_rx, buffer.clone(), ack_tx.clone(), cluster.clone(), send_timeout));
+        // let flush_loop_handle: JoinHandle<Result<()>> = tokio::spawn(async move {
+        //     // let mut topics_in_resolution = HashSet::<String>::new();
+        //     // let mut buff_rx = buff_rx;
+        //     let mut complete = false;
+        //     loop {
+        //         // TODO: check time since last flush
+        //         // TODO: configure flush time
+        //         tokio::select! {
+        //             _ = tokio::time::sleep(Duration::from_secs(5)) => { debug!("Buffer timer"); }
+        //             cmd = buff_rx.recv() => {
+        //                 match cmd {
+        //                     Some(BuffCmd::Flush) => {
+        //                         debug!("Flushing buffer");
+        //                     }
+        //                     Some(BuffCmd::FlushAndClose) => {
+        //                         debug!("Buffer flush before closing");
+        //                         complete = true;
+        //                     }
+        //                     None => {
+        //                         debug!("Producer closed. Exiting buffer flush loop");
+        //                         complete = true;
+        //                     }
+        //                 }
+        //             }
+        //         }
+        //
+        //         debug!("Waiting for buffer locks");
+        //         // TODO: is buffer locked worst-case until flush timeout? Does it mean no append can happen?
+        //         let mut buffer2 = buffer.lock().await;
+        //         // TODO: handle result
+        //         debug!("Flushing with {:?} send_timeout", send_timeout);
+        //         // TODO: use Duration::MAX when stabilized
+        //
+        //         let res = buffer2.flush(&ack_tx2, &cluster).await;
+        //         // let res: Result<()> = match timeout(send_timeout, buffer2.flush(&mut ack_tx2, &mut cluster)).await {
+        //         //     Err(_) => {
+        //         //         tracing::warn!("Flushing timeout");
+        //         //         Err(InternalError::Timeout)
+        //         //     },
+        //         //     Ok(Err(e)) => {
+        //         //         error!("Failed to flush buffer. {:?}", e);
+        //         //         Err(e)
+        //         //     },
+        //         //     Ok(Ok(_)) => {
+        //         //         tracing::trace!("Flush Ok");
+        //         //         Ok(())
+        //         //     }
+        //         // };
+        //
+        //         if complete {
+        //             debug!("Buffer flush loop quit");
+        //             // return  res;
+        //             return Ok(())
+        //         }
+        //     };
+        // }.instrument(tracing::info_span!("flush_loop")));
+
+        let producer = Producer {
+            bootstrap: builder.brokers.to_string(),
+            buffer,
+            cluster,
+            partitioner: builder.hasher.unwrap_or_else(|| Box::new(Murmur2Partitioner{})),
+            topics_meta: HashMap::new(),
+            acks: ack_tx,
+            buffer_commands: buff_tx,
+            flush_loop_handle,
+            send_timeout: builder.send_timeout
+        };
+
+        Ok((producer, ack_rx))
+    }
+
+    #[instrument(level = "debug")]
+    async fn flushing_loop(mut buff_rx: Receiver<BuffCmd>, buffer: Arc<Mutex<Buffer>>, ack_tx2: Sender<Response>, cluster: Arc<RwLock<Cluster>>, send_timeout: Duration) -> Result<()> {
+        let mut complete = false;
+        loop {
+        //     // TODO: check time since last flush
+        //     // TODO: configure flush time
+            tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => { debug!("Buffer timer"); }
                     cmd = buff_rx.recv() => {
                         match cmd {
                             Some(BuffCmd::Flush) => {
@@ -270,51 +342,35 @@ impl Producer {
                     }
                 }
 
-                debug!("Waiting for buffer locks");
-                // TODO: is buffer locked worst-case until flush timeout? Does it mean no append can happen?
-                let mut buffer2 = buffer.lock().await;
-                let mut cluster = cluster.write().await;
-                // TODO: handle result
-                debug!("Flushing with {:?} send_timeout", send_timeout);
-                // TODO: use Duration::MAX when stabilized
+            debug!("Waiting for buffer locks");
+            // TODO: is buffer locked worst-case until flush timeout? Does it mean no append can happen?
+            let mut buffer2 = buffer.lock().await;
+            // TODO: handle result
+            debug!("Flushing with {:?} send_timeout", send_timeout);
+            // TODO: use Duration::MAX when stabilized
 
-                buffer2.flush(&mut ack_tx2, &mut cluster).await;
-                // let res: Result<()> = match timeout(send_timeout, buffer2.flush(&mut ack_tx2, &mut cluster)).await {
-                //     Err(_) => {
-                //         tracing::warn!("Flushing timeout");
-                //         Err(InternalError::Timeout)
-                //     },
-                //     Ok(Err(e)) => {
-                //         error!("Failed to flush buffer. {:?}", e);
-                //         Err(e)
-                //     },
-                //     Ok(Ok(_)) => {
-                //         tracing::trace!("Flush Ok");
-                //         Ok(())
-                //     }
-                // };
-
-                if complete {
-                    debug!("Buffer flush loop quit");
-                    // return  res;
-                    return Ok(())
-                }
-            };
-        }.instrument(tracing::info_span!("flush_loop")));
-
-        let producer = Producer {
-            bootstrap: builder.brokers.to_string(),
-            buffer: buffer2,
-            cluster: cluster2,
-            partitioner: builder.hasher.unwrap_or_else(|| Box::new(Murmur2Partitioner{})),
-            topics_meta: HashMap::new(),
-            acks: ack_tx,
-            buffer_commands: buff_tx,
-            flush_loop_handle,
-            send_timeout: builder.send_timeout
+            let res = buffer2.flush(&ack_tx2, &cluster).await;
+        //     // let res: Result<()> = match timeout(send_timeout, buffer2.flush(&mut ack_tx2, &mut cluster)).await {
+        //     //     Err(_) => {
+        //     //         tracing::warn!("Flushing timeout");
+        //     //         Err(InternalError::Timeout)
+        //     //     },
+        //     //     Ok(Err(e)) => {
+        //     //         error!("Failed to flush buffer. {:?}", e);
+        //     //         Err(e)
+        //     //     },
+        //     //     Ok(Ok(_)) => {
+        //     //         tracing::trace!("Flush Ok");
+        //     //         Ok(())
+        //     //     }
+        //     // };
+        //
+            if complete {
+                debug!("Buffer flush loop quit");
+                // return  res;
+                return Ok(())
+            }
         };
-
-        Ok((producer, ack_rx))
     }
 
     #[instrument(level = "debug", err, skip(msg, self))]
@@ -368,8 +424,8 @@ impl Producer {
     pub async fn flush(&mut self) -> Result<(),InternalError> {
         debug!("Flushing buffer before close");
         let mut buffer = self.buffer.lock().await;
-        let mut cluster = self.cluster.write().await;
-        let res = buffer.flush(&mut self.acks, &mut cluster).await;
+        // let mut cluster = self.cluster.write().await;
+        let res = buffer.flush(&mut self.acks, &self.cluster).await;
         debug!("Flushing result: {:#?}", res);
         res
     }
@@ -539,10 +595,14 @@ impl Buffer {
         BufferingResult::Ok
     }
 
+    async fn flush2(&mut self, acks: &Sender<Response>, cluster: &Arc<RwLock<Cluster>>) -> Result<()> {
+        unimplemented!()
+    }
+
     /// TODO: rust BC to become smarter. Parameter `cluster` is member of `self` but I have to pass it separately because borrow checker
     /// complains about `self` being borrowed 2 times mutably.
-    #[instrument(level = "debug", err, skip(self, acks, cluster))]
-    async fn flush(&mut self, acks: &mut Sender<Response>, cluster: &Cluster) -> Result<()> {
+    //#[instrument(level = "debug", err, skip(self, acks, cluster))]
+    async fn flush(&mut self, acks: &Sender<Response>, cluster: &Arc<RwLock<Cluster>>) -> Result<()> {
         let broker_partitioned = self.group_queue_by_leader();
 
         // TODO: send to all leaders in parallel. Use `Stream`?
@@ -559,6 +619,8 @@ impl Buffer {
             };
 
             // TODO: upon failure to connect to broker, reset connection and refresh metadata
+            // TODO: check locks scope to be minimal possible
+            let cluster = cluster.read().await;
             let broker = match cluster.broker_get_no_connect(leader).await {
                 Ok(broker) => broker,
                 Err(e) => /*return*/ {
