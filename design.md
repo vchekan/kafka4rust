@@ -30,6 +30,14 @@ Cluster is mutable because `Cluster::broker_get_or_connect` mutates cluster in c
 During `flush` execution, which can be quite long (seconds) no adding to buffer is possible nor connection to a new 
 broker. In order to minimize locking time, we will switch to RwLock,  
 
+
+## Topic Resolver, try 2
+Parts: 
+* Consumer/Producer
+* Cluster
+* fetch loop
+
+
 ## Send Buffer mutability design
 Send buffer should be accessible for write to be able to accept new messages without delay and at the same time, it 
 should be able 

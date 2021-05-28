@@ -5,6 +5,8 @@ use bytes::{Buf, BufMut, ByteOrder};
 use std::fmt::Debug;
 use std::marker::Sized;
 use crate::error::InternalError;
+use crate::broker::CORRELATION_ID;
+use std::sync::atomic::Ordering;
 
 #[repr(u16)]
 pub enum ApiKey {
@@ -42,12 +44,13 @@ pub trait Request: ToKafka + HasApiKey + HasApiVersion {
 
 pub(crate) fn write_request<T>(
     request: &T,
-    correlation_id: u32,
+    //correlation_id: u32,
     client_id: Option<&str>,
     buff: &mut BytesMut,
 ) where
     T: Request,
 {
+    let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
     buff.clear();
     buff.put_u32_be(0); // Size: will fix after message is serialized
     buff.put_u16_be(T::api_key() as u16);

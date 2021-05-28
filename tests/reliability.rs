@@ -94,13 +94,15 @@ Mutithreading save
 async fn leader_down_producer_and_consumer_recovery() -> Result<()> {
     init_log();
     init_tracer()?;
+    let seeds = "localhost:9092,localhost:9093";
+    let count = 50;
     info!("Starting leader_down_producer_and_consumer_recovery()");
     let _d = docker::up();
     let topic = format!("test_topic_{}", random_string(5));
     let (mut p, rx) =
-        ProducerBuilder::new("localhost").hasher(Box::new(FixedPartitioner { 0: 0_u32 })).start()?;
+        ProducerBuilder::new(seeds).hasher(Box::new(FixedPartitioner { 0: 0_u32 })).start()?;
     debug!("Created producer: {:?}", p);
-    for i in 1..=10 {
+    for i in 1..=count {
         debug!("Sending {}", i);
         if i == 5 {
             p.flush().await?;
@@ -114,13 +116,15 @@ async fn leader_down_producer_and_consumer_recovery() -> Result<()> {
         p.send((Some("key-const"), msg), &topic).await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-
-    // let mut consumer = Consumer::builder().bootstrap("localhost").topic(topic).build().await.unwrap();
-    // let res: Vec<_> = consumer.flat_map(|batch| stream::iter(batch.messages))
-    //     .map(|msg| String::from_utf8(msg.value).unwrap())
-    //     .take(50).collect().await;
-
     p.close().await?;
+
+    let mut consumer = ReceiverStream::new(ConsumerBuilder::new(topic).bootstrap(seeds).build().await.unwrap());
+    let res: Vec<_> = consumer.flat_map(|batch| stream::iter(batch.messages))
+        .map(|msg| String::from_utf8(msg.value).unwrap())
+        .take(count).collect().await;
+
+    assert_eq!(count, res.len());
+
 
     Ok(())
 }

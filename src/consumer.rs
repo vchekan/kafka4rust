@@ -20,6 +20,9 @@ use tracing::{debug_span, event, Level};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use std::future::Future;
+use tokio::sync::RwLock;
+use std::sync::Arc;
+use crossbeam::epoch;
 
 // TODO: offset start: -2, end: -1
 pub enum StartOffset {
@@ -78,7 +81,6 @@ impl Batch {
 pub(crate) struct Consumer {
     config: ConsumerBuilder,
     cluster: Cluster,
-    topic_meta: protocol::MetadataResponse0,
     partition_routing: HashMap<BrokerId, Vec<Partition>>,
 }
 
@@ -96,14 +98,13 @@ impl Consumer {
         }
 
         let mut cluster = Cluster::new(seed_list, None);
-        let topic_meta = cluster.fetch_topic_meta_and_update(&[&builder.topic]).await?;
-        debug!("Resolved topic: {:?}", topic_meta);
-        assert_eq!(1, topic_meta.topics.len());
+        // let topic_meta = cluster.fetch_topic_meta_and_update(&[&builder.topic]).await?;
+        // debug!("Resolved topic: {:?}", topic_meta);
+        // assert_eq!(1, topic_meta.topics.len());
 
         let (tx, rx) = channel(1);
-
         tokio::spawn(async move {
-            if let Err(error) = fetch_loop(cluster, tx, topic_meta, builder).await {
+            if let Err(error) = fetch_loop(cluster, tx, builder).await {
                 error!("Fetch loop failed. Error: {}", error);
                 event!(tracing::Level::ERROR, %error, "Fetch loop failed")
             }
@@ -112,15 +113,28 @@ impl Consumer {
     }
 }
 
-#[instrument(level = "debug", err, skip(cluster, tx, topic_meta, config))]
+#[instrument(level = "debug", err, skip(cluster, tx, config))]
 async fn fetch_loop(
-    mut cluster: Cluster,
+    cluster: Cluster,
     tx: Sender<Batch>,
-    topic_meta: protocol::MetadataResponse0,
     config: ConsumerBuilder,
 ) -> Result<()> {
+
+    // Need to resolve topic before setting start positions
+    let topic_meta = cluster.fetch_topic_meta_and_update(&[&config.topic]).await?;
+
     let mut offsets = vec![0_u64; topic_meta.topics[0].partition_metadata.len()];
+    // let mut topic_meta: Option<protocol::MetadataResponse0> = None;
+
     loop {
+
+        // TODO: if only 1 partition is down, continue consuming from other partitions
+        // if topic_meta.is_none() {
+        //     //let cluster = cluster.await;
+        //     cluster.start_resolving_topic(config.topic.clone())?;
+        //     let t = cluster.fetch_topic_meta_no_update(&[&config.topic]).await?;
+        // }
+
         // group partitions by leader broker
         let mut grouped_partitions: Vec<(u32, i32)> = topic_meta.topics[0]
             .partition_metadata
@@ -162,8 +176,8 @@ async fn fetch_loop(
 
         for (leader, request) in fetch_requests.into_iter() {
             event!(Level::DEBUG, %leader, "sending");
-
-            let broker = cluster.broker_get_or_connect(leader).await?;
+            let guard = epoch::pin();
+            let broker = cluster.broker_get_or_connect(leader, &guard).await?;
             // let broker: &Broker = broker?;
             event!(Level::DEBUG, %leader, "got_broker");
 

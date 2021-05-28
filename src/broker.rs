@@ -11,14 +11,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing_attributes::instrument;
 use futures::TryFutureExt;
 
+// TODO: deal with u32 overflow
+pub static CORRELATION_ID: AtomicUsize = AtomicUsize::new(0);
+
 // TODO: if move negotiated api and correlation to broker connection, this struct degenerates.
 // Is it redundant?
+#[derive(Clone)]
 pub(crate) struct Broker {
     /// (api_key, agreed_version)
     negotiated_api_version: Vec<(i16, i16)>, // TODO: just in case, make it property of
     // connection, to renegotiate every time we connect.
     //correlation_id: u32,    // TODO: is correlation property of broker or rather connection?
-    correlation_id: AtomicUsize,
+    //correlation_id: AtomicUsize,
     conn: BrokerConnection,
 }
 
@@ -42,9 +46,9 @@ impl Broker {
         //let mut buf = Vec::with_capacity(1024);
         let mut buf = BytesMut::with_capacity(1024);
         // TODO: This is special case, we need correlationId and clientId before broker is created...
-        let correlation_id = 0;
+        //let correlation_id = 0;
 
-        write_request(&req, correlation_id, None, &mut buf);
+        write_request(&req, None, &mut buf);
         trace!("Requesting Api versions");
         conn.request(&mut buf).await.map_err(|e| InternalError::BrokerFailure(e))?;
 
@@ -56,7 +60,7 @@ impl Broker {
         let negotiated_api_version = Broker::build_api_compatibility(&response);
         Ok(Broker {
             negotiated_api_version,
-            correlation_id: AtomicUsize::new(1),
+            //correlation_id: AtomicUsize::new(1),
             conn,
         })
     }
@@ -69,8 +73,9 @@ impl Broker {
         // TODO: buffer management
         // TODO: ensure capacity (BytesMut will panic if out of range)
         let mut buff = BytesMut::with_capacity(20 * 1024); //Vec::with_capacity(1024);
-        let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
-        protocol::write_request(request, correlation_id, None, &mut buff);
+        //let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
+        // let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
+        protocol::write_request(request, None, &mut buff);
 
         self.conn
             .request(&mut buff)

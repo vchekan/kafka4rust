@@ -38,17 +38,32 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use tokio::time::Duration;
 use tracing_attributes::instrument;
 use crate::resolver::{self, start_resolver};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tokio::sync::mpsc::{Sender, Receiver};
+use std::sync::{Mutex, Arc};
+use im;
+use crossbeam::epoch::{self, Owned, Shared, Atomic, Collector};
+use std::sync::atomic::Ordering;
 
 #[derive(Debug)]
 pub struct Cluster {
     bootstrap: Vec<SocketAddr>,
-    broker_id_map: HashMap<BrokerId, Broker>,
-    broker_addr_map: HashMap<BrokerId, SocketAddr>,
     operation_timeout: Duration,
     resolver_tx: Sender<crate::resolver::Cmd>,
     resolver_rx: Receiver<Vec<String>>,
+
+    // brokers_maps: RwLock<BrokersMaps>,
+    // broker_id_map: HashMap<BrokerId, Broker>,
+    // broker_addr_map: HashMap<BrokerId, SocketAddr>,
+    // broker_id_map: im::HashMap<BrokerId, Broker>,
+    // broker_addr_map: im::HashMap<BrokerId, SocketAddr>,
+
+    brokers_maps: Atomic<BrokersMaps>,
+}
+
+struct BrokersMaps {
+    pub broker_id_map: im::HashMap<BrokerId, Broker>,
+    pub broker_addr_map: im::HashMap<BrokerId, SocketAddr>,
 }
 
 impl Cluster {
@@ -102,7 +117,7 @@ impl Cluster {
     /// Update internal broker maps according to the response.
     #[instrument(skip(self), err)]
     pub async fn fetch_topic_meta_and_update(
-        &mut self,
+        &self,
         topics: &[&str],
     ) -> Result<protocol::MetadataResponse0> {
 
@@ -158,9 +173,11 @@ impl Cluster {
         &self,
         topics: &[&str],
     ) -> Result<protocol::MetadataResponse0> {
+        let guard = epoch::pin();
+        let maps = self.brokers_maps.load_consume(&guard);
 
         // fetch from known brokers
-        for broker in self.broker_id_map.values() {
+        for broker in unsafe { maps.deref() }.broker_id_map.values() {
             debug!("Trying to fetch meta from known broker {:?}", broker);
             match fetch_topic_with_broker(broker, topics, self.operation_timeout).await {
                 Ok(meta) => return Ok(meta),
@@ -176,6 +193,7 @@ impl Cluster {
         let meta = repeat_with_timeout(|| async {
             for addr in &self.bootstrap {
                 debug!("Trying to fetch meta from bootstrap broker {:?}", addr);
+                // TODO: timeout for single broker wait
                 let broker = Broker::connect(*addr).await;
                 match broker {
                     Ok(broker) => {
@@ -198,31 +216,67 @@ impl Cluster {
     }
 
     #[instrument(level="debug", skip(broker_id, self))]
-    pub(crate) async fn broker_get_or_connect(&mut self, broker_id: BrokerId) -> Result<&Broker> {
-        let x: Result<&Broker,_> = match self.broker_id_map.entry(broker_id) {
-            Occupied(entry) => Ok(entry.into_mut()),
-            Vacant(entry) => {
-                if let Some(addr) = self.broker_addr_map.get(&broker_id) {
-                    let broker = Broker::connect(*addr).await?;
-                    debug!(
-                        "broker_get_or_connect: broker_id={}, connected to {}",
-                        broker_id, addr
-                    );
-                    Ok(entry.insert(broker))
-                } else {
-                    Err(InternalError::BrokerFailure(BrokerFailureSource::UnknownBrokerId(broker_id)))
-                }
+    pub(crate) async fn broker_get_or_connect<'g>(&self, broker_id: BrokerId, guard: &'g epoch::Guard) -> Result<&'g Broker> {
+        let maps_ptr = self.brokers_maps.load_consume(&guard);
+        let maps = unsafe { maps_ptr.deref() };
+        if let Some(broker) = maps.broker_id_map.get(&broker_id) {
+            return Ok(broker);
+        }
+
+        // Cache miss, have to fetch broker metadata.
+        if let Some(addr) = maps.broker_addr_map.get(&broker_id) {
+            let broker = Broker::connect(*addr).await?;
+            debug!(
+                "broker_get_or_connect: broker_id={}, connected to {}",
+                broker_id, addr
+            );
+            // Update map
+            let newmap = maps.broker_id_map.update(broker_id, broker);
+            let newmaps = Owned::new(BrokersMaps {broker_id_map: newmap, broker_addr_map: maps.broker_addr_map.clone()});
+            let oldmaps = self.brokers_maps.swap(newmaps, Ordering::AcqRel, &guard);
+            unsafe {
+                guard.defer_destroy(oldmaps);
+                guard.flush();
             }
-        };
-        x
+            // load broker from new map
+            let broker = unsafe { self.brokers_maps.load_consume(&guard).deref() }.broker_id_map.get(&broker_id);
+            broker
+                // Can this even happen?
+                .ok_or(InternalError::BrokerFailure(BrokerFailureSource::UnknownBrokerId(broker_id)))
+        } else {
+            Err(InternalError::BrokerFailure(BrokerFailureSource::UnknownBrokerId(broker_id)))
+        }
+
+        // let x: Result<&Broker,_> = match self.broker_id_map.entry(broker_id) {
+        //     im::hashmap::Entry::Occupied(entry) => Ok(entry.into_mut()),
+        //     im::hashmap::Entry::Vacant(entry) => {
+        //         debug!("broker_get_or_connect:self.broker_addr_map:{:?}", self.broker_addr_map);
+        //         if let Some(addr) = self.broker_addr_map.get(&broker_id) {
+        //             let broker = Broker::connect(*addr).await?;
+        //             debug!(
+        //                 "broker_get_or_connect: broker_id={}, connected to {}",
+        //                 broker_id, addr
+        //             );
+        //             Ok(entry.insert(broker))
+        //         } else {
+        //             Err(InternalError::BrokerFailure(BrokerFailureSource::UnknownBrokerId(broker_id)))
+        //         }
+        //     }
+        // };
+        // x
     }
 
     #[instrument(level="debug", skip(broker_id, self))]
-    pub(crate) async fn broker_get_no_connect(&self, broker_id: BrokerId) -> Result<&Broker> {
-        unimplemented!()
+    pub(crate) async fn broker_get_no_connect<'a>(&self, broker_id: BrokerId, guard: &'a epoch::Guard) -> Result<&'a Broker> {
+        let maps = self.brokers_maps.load_consume(guard);
+        let maps = unsafe {maps.deref()};
+        match maps.broker_id_map.get(&broker_id) {
+            Some(broker) => Ok(broker),
+            None => Err(InternalError::BrokerFailure(BrokerFailureSource::NoBrokerAvailable))
+        }
     }
 
-    fn update_brokers_map(&mut self, meta: &protocol::MetadataResponse0) {
+    fn update_brokers_map(&self, meta: &protocol::MetadataResponse0) {
         for broker in &meta.brokers {
             match (broker.host.as_str(), broker.port as u16).to_socket_addrs() {
                 Ok(addr) => {
@@ -244,8 +298,18 @@ impl Cluster {
     // TODO: what is the list of all known brokers?
     // TODO: retry policy
     /// Execute request on every broker until success
-    pub async fn request<R: protocol::Request>(&self, request: R) -> Result<R::Response> {
-        for broker in self.broker_id_map.values() {
+    pub async fn request_any<R: protocol::Request>(&self, request: R) -> Result<R::Response> {
+        // TODO:
+        // Do not block broker list for the duration of the walk along all brokers.
+        // Instead walk by the index, until index is out of size.
+        // It is possible that some other process have modified the broker list while walk is
+        // performed, but this is ok for "from any broker" query.
+
+        // TODO: verify ordering
+        let guard = epoch::pin();
+        let maps = self.brokers_maps.load_consume(&guard);
+
+        for broker in unsafe { maps.deref() }.broker_id_map.values() {
             match broker.send_request(&request).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => {
@@ -271,15 +335,19 @@ impl Cluster {
         Err(InternalError::BrokerFailure(BrokerFailureSource::NoBrokerAvailable))
     }
 
-    pub async fn start_resolving_topics(&self, topics: impl Iterator<Item=&String>) -> Result<()> {
+    pub async fn start_resolving_topics(&self, topics: impl IntoIterator<Item=String>) -> Result<()> {
         for topic in topics {
-            self.resolver_tx.send(resolver::Cmd::ResolveTopic(topic.clone())).await.map_err(|e| InternalError::Critical("Failed to send topic to topic resolver".into()))?;
+            self.resolver_tx.send(resolver::Cmd::ResolveTopic(topic)).await
+                .map_err(|e| InternalError::Critical("Failed to send topic to topic resolver".into()))?;
         }
         Ok(())
     }
-}
 
-pub struct ClusterApi {
+    pub async fn start_resolving_topic(&self, topic: String) -> Result<()> {
+        self.resolver_tx.send(resolver::Cmd::ResolveTopic(topic)).await
+            .map_err(|e| InternalError::Critical("Failed to send topic to topic resolver".into()))
+    }
+
 }
 
 #[instrument(level="debug")]

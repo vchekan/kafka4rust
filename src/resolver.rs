@@ -38,7 +38,7 @@ pub(crate) fn start_resolver(mut requests: Receiver<Cmd>, result_tx: Sender<Vec<
                             }
                         }
                         None => {
-                            debug!("resolver channel closed, exiting the loop");
+                            debug!("resolver channel closed, exiting resolver loop");
                             return;
                         }
                     }

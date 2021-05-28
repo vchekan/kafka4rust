@@ -199,7 +199,7 @@ pub(crate) async fn get_offsets(
             })
             .collect(),
     };
-    Ok(cluster.request(req).await?)
+    Ok(cluster.request_any(req).await?)
 }
 
 pub fn init_tracer() -> Result<()> {

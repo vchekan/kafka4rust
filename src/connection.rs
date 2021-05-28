@@ -36,6 +36,7 @@ use std::fmt::{Debug, Formatter};
 type Result<T> = crate::error::Result<T, BrokerFailureSource>;
 pub(crate) const CLIENT_ID: &str = "k4rs";
 
+#[derive(Clone)]
 pub(crate) struct BrokerConnection {
     addr: SocketAddr,
     // TODO: is this decision sound? Could we write 2 messages from 2 threads and read them out of order?
@@ -51,9 +52,10 @@ impl Debug for BrokerConnection {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Inner {
     // TODO: move correlation here
+    // TODO: TcpStream internally is Arc, no moint to wrap it into yet another one
     //correlation_id: u32,
     tcp: TcpStream,
 }

@@ -42,7 +42,8 @@
 - [ ] Validate that BytesMut has always enough reserve bytes. Or switch to Vec?
 - [ ] Make sure that command send anr response are corresponding even in parallel scenario.
 - [ ] Producer sent message size limit
-- [ ] Evaluate `select!` usage for cancellation safety: https://tomaka.medium.com/a-look-back-at-asynchronous-rust-d54d63934a1c 
+- [ ] Evaluate `select!` usage for cancellation safety: https://tomaka.medium.com/a-look-back-at-asynchronous-rust-d54d63934a1c
+- [ ] Use crossbeam::epoch::Pointable to store list of known brokers and metadata. Allows for lock-free walks over brokers.
 
 ## Techniques
 * Try parallel-streams
@@ -77,3 +78,4 @@
 ## Resources:
 https://matklad.github.io/2020/10/15/study-of-std-io-error.html
 https://willcrichton.net/rust-api-type-patterns/
+https://aturon.github.io/blog/2015/08/27/epoch/
