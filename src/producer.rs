@@ -1,11 +1,10 @@
 use crate::cluster::Cluster;
-use crate::error::{KafkaError, InternalError};
+use crate::error::{KafkaError, InternalError, BrokerResult, BrokerFailureSource};
 use crate::murmur2a;
 use crate::protocol;
 use crate::protocol::{ErrorCode, ProduceResponse3, PartitionResponse, ProduceResponse};
 use crate::types::*;
 use crate::utils;
-use crate::error::Result;
 use async_std::sync::Mutex;
 use rand::random;
 use std::collections::{HashMap, VecDeque, HashSet};
@@ -25,6 +24,8 @@ use tracing_subscriber::fmt::format::debug_fn;
 use tokio::task::JoinHandle;
 use anyhow::Context;
 use futures::stream::{self, StreamExt};
+use crate::retry_policy::WithRetryFn;
+use tracing::field::debug;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -130,6 +131,14 @@ use futures::stream::{self, StreamExt};
 /// A: ???
 ///
 
+/*
+/// When message key is null, a counter is needed for round-robin partitioning.
+pub struct ProducerTopicMetadata {
+    protocol_metadata: protocol::MetadataResponse0,
+    null_key_partition_counter: u32,
+}
+*/
+
 // TODO: is `Send` needed? Can we convert to QueuedMessage before crossing thread boundaries?
 // TODO: maybe can replace with &[u8] also?
 pub trait ToMessage: Send {
@@ -188,14 +197,15 @@ impl<'a> ProducerBuilder<'a> {
 pub struct Producer {
     bootstrap: String,
     buffer: Arc<Mutex<Buffer>>,
-    cluster: Arc<tokio::sync::RwLock<Cluster>>,
+    cluster: Arc<Cluster>,
     partitioner: Box<dyn Partitioner>,
     // TODO: is kafka topic case-sensitive?
-    topics_meta: HashMap<String, ProducerTopicMetadata>,
+    //topics_meta: HashMap<String, ProducerTopicMetadata>,
     acks: Sender<Response>,
     buffer_commands: Sender<BuffCmd>,
-    flush_loop_handle: tokio::task::JoinHandle<Result<()>>,
+    flush_loop_handle: tokio::task::JoinHandle<BrokerResult<()>>,
     send_timeout: Option<Duration>,
+    null_key_partition_counter: u32,
 }
 
 impl Debug for Producer {
@@ -222,6 +232,8 @@ impl Producer {
 */
 
 impl Producer {
+    /// Resolves bootstrap addresses and creates producer.
+    /// Broker connection and topology resolution will be started upon first `send` request.
     #[instrument(level = "debug", err)]
     pub fn new(builder: ProducerBuilder) -> anyhow::Result<(Self, Receiver<Response>)> {
         // TODO: resolve names async and account for connect timeout
@@ -232,7 +244,7 @@ impl Producer {
                 builder.brokers
             )).into());
         }
-        let cluster = Arc::new(tokio::sync::RwLock::new(Cluster::new(seed_list, builder.send_timeout)));
+        let cluster = Arc::new(Cluster::new(seed_list, builder.send_timeout));
         // let cluster2 = cluster.clone();
         let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(1000);
         // let mut ack_tx2 = ack_tx.clone();
@@ -244,104 +256,37 @@ impl Producer {
         let send_timeout = builder.send_timeout.unwrap_or(Duration::from_secs(30));
 
         // TODO: wait in `close` for loop to end
-        let flush_loop_handle: JoinHandle<Result<()>> = tokio::spawn(flushing_loop(buff_rx, buffer.clone(), ack_tx.clone(), cluster.clone(), send_timeout));
-        // let flush_loop_handle: JoinHandle<Result<()>> = tokio::spawn(async move {
-        //     // let mut topics_in_resolution = HashSet::<String>::new();
-        //     // let mut buff_rx = buff_rx;
-        //     let mut complete = false;
-        //     loop {
-        //         // TODO: check time since last flush
-        //         // TODO: configure flush time
-        //         tokio::select! {
-        //             _ = tokio::time::sleep(Duration::from_secs(5)) => { debug!("Buffer timer"); }
-        //             cmd = buff_rx.recv() => {
-        //                 match cmd {
-        //                     Some(BuffCmd::Flush) => {
-        //                         debug!("Flushing buffer");
-        //                     }
-        //                     Some(BuffCmd::FlushAndClose) => {
-        //                         debug!("Buffer flush before closing");
-        //                         complete = true;
-        //                     }
-        //                     None => {
-        //                         debug!("Producer closed. Exiting buffer flush loop");
-        //                         complete = true;
-        //                     }
-        //                 }
-        //             }
-        //         }
-        //
-        //         debug!("Waiting for buffer locks");
-        //         // TODO: is buffer locked worst-case until flush timeout? Does it mean no append can happen?
-        //         let mut buffer2 = buffer.lock().await;
-        //         // TODO: handle result
-        //         debug!("Flushing with {:?} send_timeout", send_timeout);
-        //         // TODO: use Duration::MAX when stabilized
-        //
-        //         let res = buffer2.flush(&ack_tx2, &cluster).await;
-        //         // let res: Result<()> = match timeout(send_timeout, buffer2.flush(&mut ack_tx2, &mut cluster)).await {
-        //         //     Err(_) => {
-        //         //         tracing::warn!("Flushing timeout");
-        //         //         Err(InternalError::Timeout)
-        //         //     },
-        //         //     Ok(Err(e)) => {
-        //         //         error!("Failed to flush buffer. {:?}", e);
-        //         //         Err(e)
-        //         //     },
-        //         //     Ok(Ok(_)) => {
-        //         //         tracing::trace!("Flush Ok");
-        //         //         Ok(())
-        //         //     }
-        //         // };
-        //
-        //         if complete {
-        //             debug!("Buffer flush loop quit");
-        //             // return  res;
-        //             return Ok(())
-        //         }
-        //     };
-        // }.instrument(tracing::info_span!("flush_loop")));
+        let flush_loop_handle: JoinHandle<_> = tokio::spawn(flushing_loop(buff_rx, buffer.clone(), ack_tx.clone(), cluster.clone(), send_timeout));
 
         let producer = Producer {
             bootstrap: builder.brokers.to_string(),
             buffer,
             cluster,
             partitioner: builder.hasher.unwrap_or_else(|| Box::new(Murmur2Partitioner{})),
-            topics_meta: HashMap::new(),
+            // topics_meta: HashMap::new(),
             acks: ack_tx,
             buffer_commands: buff_tx,
             flush_loop_handle,
-            send_timeout: builder.send_timeout
+            send_timeout: builder.send_timeout,
+            null_key_partition_counter: 0,
         };
 
         Ok((producer, ack_rx))
     }
 
     #[instrument(level = "debug", err, skip(msg, self))]
-    pub async fn send<M: ToMessage + 'static>(&mut self, msg: M, topic: &str) -> Result<(),InternalError> {
+    pub async fn send<M: ToMessage + 'static>(&mut self, msg: M, topic: &str) -> Result<(),anyhow::Error> {
+        // TODO: potentially long time between lock acquisition and release because of topic resolution
         let mut buffer = self.buffer.lock().await;
-        // TODO: share metadata cache between self and Buffer
-        let meta = Self::get_or_request_meta(
-            &self.cluster,
-            &mut self.topics_meta,
-            &mut buffer.meta_cache,
-            topic,
-        )
-        .await?;
-        assert_eq!(1, meta.protocol_metadata.topics.len());
-        assert_eq!(topic, meta.protocol_metadata.topics[0].topic);
-        let topic_meta = meta
-            .protocol_metadata
-            .topics
-            .get(0)
-            .expect("Expect exacly 1 topic configured");
+        let partitions_count = (|| { self.cluster.get_topic_partition_count(topic)})
+            // TODO: add total time limit
+            .with_retry(Duration::from_secs(1)).await?;
 
-        let partitions_count = topic_meta.partition_metadata.len() as u32;
         let partition = match msg.key() {
             Some(key) if !key.is_empty() => self.partitioner.partition(&key),
-            _ => {
-                meta.null_key_partition_counter += 1;
-                meta.null_key_partition_counter
+            None => {
+                self.null_key_partition_counter += 1;
+                self.null_key_partition_counter
             }
         };
         let partition = partition % partitions_count;
@@ -355,7 +300,7 @@ impl Producer {
                 .expect("Failed to get timestamp")
                 .as_millis() as u64,
         };
-        match buffer.add(msg, topic.to_string(), partition, &topic_meta) {
+        match buffer.add(msg, topic.to_string(), partition, partitions_count) {
             BufferingResult::Ok => Ok(()),
             BufferingResult::Overflow => {
                 // TODO:
@@ -365,7 +310,7 @@ impl Producer {
     }
 
     #[instrument(level="debug", err, skip(self))]
-    pub async fn flush(&mut self) -> Result<(),InternalError> {
+    pub async fn flush(&mut self) -> BrokerResult<()> {
         debug!("Flushing buffer before close");
         let mut buffer = self.buffer.lock().await;
         // let mut cluster = self.cluster.write().await;
@@ -376,82 +321,87 @@ impl Producer {
 
     /// Get topic's meta from cache or request from broker.
     /// Result will be cached.
-    /// `self` is not passed as a prarameter because it causes lifetime conflict in `send`.
+    /// `self` is not passed as a parameter because it causes lifetime conflict in `send`.
     /// TODO: what is retry policy?
     /// TODO: what to do if failed for extended period of time?
-    #[instrument(level = "debug", err, skip(cluster, topics_meta, buffer_meta))]
-    async fn get_or_request_meta<'a>(
-        cluster: &tokio::sync::RwLock<Cluster>,
-        topics_meta: &'a mut HashMap<String, ProducerTopicMetadata>,
-        buffer_meta: &mut HashMap<String, Vec<Option<BrokerId>>>,
-        topic: &str,
-    ) -> Result<&'a mut ProducerTopicMetadata,InternalError> {
-        // `if let Some(meta) = self.topics_meta.get(topic)` does not work because of lifetimes,
-        // so have to do 2 lookups :(
-        if topics_meta.contains_key(topic) {
-            let topic_meta = topics_meta;
-            let meta = topic_meta.get_mut(topic).unwrap();
-            return Ok(meta);
-        }
-
-        // Did not have meta. Fetch and cache.
-        // TODO: unstead of loop use recovery policy
-        // TODO: will wait for *all* partitions to become available. Could progress on what's up for now
-        // and await only for failed ones?
-        loop {
-            debug!("Fetching topic meta from server");
-            let meta = cluster.write().await.fetch_topic_meta_and_update(&[topic]).await?;
-            let meta = ProducerTopicMetadata {
-                protocol_metadata: meta,
-                null_key_partition_counter: random(),
-            };
-            let topic_metadata = &meta.protocol_metadata.topics[0];
-
-            match meta.protocol_metadata.topics[0].error_code.as_result() {
-                Err(e) if e.is_retriable() => {
-                    info!("Retriable error {}", e);
-                    tokio::time::sleep(Duration::from_millis(300))
-                        .instrument(tracing::info_span!("Retry sleep"))
-                        .await;
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
-                _ => {}
-            }
-
-            if topic_metadata
-                .partition_metadata
-                .iter()
-                .all(|m| m.error_code == ErrorCode::None)
-            {
-                let mut partition_leader_map: Vec<Option<i32>> =
-                    vec![None; topic_metadata.partition_metadata.len()];
-                for partition_meta in &topic_metadata.partition_metadata {
-                    // TODO: got exception once: index 5 is out of range of 5. How come? Switch to map?
-                    partition_leader_map[partition_meta.partition as usize] = Some(partition_meta.leader);
-                }
-                assert!(partition_leader_map.iter().all(|l| l.is_some()));
-                buffer_meta.insert(topic.to_string(), partition_leader_map);
-                topics_meta.insert(topic.to_string(), meta);
-
-                let meta = topics_meta.get_mut(topic).unwrap();
-                return Ok(meta);
-            } else {
-                for partition_meta in topic_metadata
-                    .partition_metadata
-                    .iter()
-                    .filter(|m| m.error_code != ErrorCode::None)
-                {
-                    event!(target: "get_or_request_meta", tracing::Level::ERROR, error_code = ?partition_meta.error_code, partition = ?partition_meta.partition);
-                }
-                tokio::time::sleep(Duration::from_secs(3))
-                    .instrument(tracing::info_span!("Retry sleep"))
-                    .await;
-                // TODO: check either error is recoverable
-                continue;
-            }
-        }
-    }
+    /// TODO: should it be in Cluster?
+    // #[instrument(level = "debug", err, skip(cluster))]
+    // async fn get_or_request_meta<'a>(
+    //     cluster: &tokio::sync::RwLock<Cluster>,
+    //     //topics_meta: &'a mut HashMap<String, ProducerTopicMetadata>,
+    //     // buffer_meta: &mut HashMap<String, Vec<Option<BrokerId>>>,
+    //     topic: &str,
+    // ) -> Result<&'a mut ProducerTopicMetadata,BrokerFailureSource> {
+    //     // `if let Some(meta) = self.topics_meta.get(topic)` does not work because of lifetimes,
+    //     // so have to do 2 lookups :(
+    //     if topics_meta.contains_key(topic) {
+    //         let topic_meta = topics_meta;
+    //         let meta = topic_meta.get_mut(topic).unwrap();
+    //         return Ok(meta);
+    //     }
+    //
+    //     // Did not have meta. Fetch and cache.
+    //     // TODO: instead of loop use recovery policy
+    //     // TODO: will wait for *all* partitions to become available. Could progress on what's up for now
+    //     // and await only for failed ones?
+    //     // loop {
+    //         debug!("Fetching topic meta from server");
+    //         let meta = cluster.write().await.fetch_topic_meta_and_update(&[topic]).await?;
+    //         let meta = ProducerTopicMetadata {
+    //             protocol_metadata: meta,
+    //             null_key_partition_counter: random(),
+    //         };
+    //         let topic_metadata = &meta.protocol_metadata.topics[0];
+    //
+    //     meta.protocol_metadata.topics[0].error_code.as_result()?;
+    //
+    //         // match meta.protocol_metadata.topics[0].error_code.as_result() {
+    //         //     Err(e) if e.is_retriable() => {
+    //         //         info!("Retriable error {}", e);
+    //         //         tokio::time::sleep(Duration::from_millis(300))
+    //         //             .instrument(tracing::info_span!("Retry sleep"))
+    //         //             .await;
+    //         //         //continue;
+    //         //         return Err(BrokerFailureSource::KafkaErrorCode(e))
+    //         //     }
+    //         //     Err(e) => return Err(e.into()),
+    //         //     _ => {}
+    //         // }
+    //
+    //         if topic_metadata
+    //             .partition_metadata
+    //             .iter()
+    //             .all(|m| m.error_code == ErrorCode::None)
+    //         {
+    //             let mut partition_leader_map: Vec<Option<i32>> =
+    //                 vec![None; topic_metadata.partition_metadata.len()];
+    //             for partition_meta in &topic_metadata.partition_metadata {
+    //                 // TODO: got exception once: index 5 is out of range of 5. How come? Switch to map?
+    //                 partition_leader_map[partition_meta.partition as usize] = Some(partition_meta.leader);
+    //             }
+    //             assert!(partition_leader_map.iter().all(|l| l.is_some()));
+    //             buffer_meta.insert(topic.to_string(), partition_leader_map);
+    //             topics_meta.insert(topic.to_string(), meta);
+    //
+    //             let meta = topics_meta.get_mut(topic).unwrap();
+    //             return Ok(meta);
+    //         } else {
+    //             for partition_meta in topic_metadata
+    //                 .partition_metadata
+    //                 .iter()
+    //                 .filter(|m| m.error_code != ErrorCode::None)
+    //             {
+    //                 event!(target: "get_or_request_meta", tracing::Level::ERROR, error_code = ?partition_meta.error_code, partition = ?partition_meta.partition);
+    //             }
+    //             tokio::time::sleep(Duration::from_secs(3))
+    //                 .instrument(tracing::info_span!("Retry sleep"))
+    //                 .await;
+    //             // TODO: check either error is recoverable
+    //             //continue;
+    //             return BrokerFailureSource::KafkaErrorCode()
+    //         }
+    //     // }
+    // }
 
     #[instrument(level="debug", err, skip(self))]
     pub async fn close(self) -> anyhow::Result<()> {
@@ -465,7 +415,7 @@ impl Producer {
 }
 
 #[instrument(level = "debug")]
-async fn flushing_loop(mut buff_rx: Receiver<BuffCmd>, buffer: Arc<Mutex<Buffer>>, ack_tx2: Sender<Response>, cluster: Arc<RwLock<Cluster>>, send_timeout: Duration) -> Result<()> {
+async fn flushing_loop(mut buff_rx: Receiver<BuffCmd>, buffer: Arc<Mutex<Buffer>>, ack_tx2: Sender<Response>, cluster: Arc<Cluster>, send_timeout: Duration) -> BrokerResult<()> {
     let mut complete = false;
     loop {
         //     // TODO: check time since last flush
@@ -497,10 +447,10 @@ async fn flushing_loop(mut buff_rx: Receiver<BuffCmd>, buffer: Arc<Mutex<Buffer>
         // TODO: use Duration::MAX when stabilized
 
         // let res = buffer2.flush(&ack_tx2, &cluster).await;
-        let res: Result<()> = match timeout(send_timeout, buffer2.flush(&ack_tx2, &cluster)).await {
+        let res: BrokerResult<()> = match timeout(send_timeout, buffer2.flush(&ack_tx2, &cluster)).await {
             Err(_) => {
                 tracing::warn!("Flushing timeout");
-                Err(InternalError::Timeout)
+                Err(BrokerFailureSource::Timeout)
             },
             Ok(Err(e)) => {
                 error!("Failed to flush buffer. {:?}", e);
@@ -518,11 +468,6 @@ async fn flushing_loop(mut buff_rx: Receiver<BuffCmd>, buffer: Arc<Mutex<Buffer>
             // return Ok(())
         }
     };
-}
-
-struct ProducerTopicMetadata {
-    protocol_metadata: protocol::MetadataResponse0,
-    null_key_partition_counter: u32,
 }
 
 /// Q: should buffer data be shared or copied when sending to broker?
@@ -551,18 +496,18 @@ struct Buffer {
     bytes: u32,
     size_limit: u32,
     /// topic -> partition[] -> leader (if known). Leader is None if it is down and requires re-discovery
-    meta_cache: HashMap<String, Vec<Option<BrokerId>>>,
-    cluster: Arc<RwLock<Cluster>>,
+    // meta_cache: HashMap<String, Vec<Option<BrokerId>>>,
+    cluster: Arc<Cluster>,
 }
 
 impl Buffer {
-    fn new(cluster: Arc<RwLock<Cluster>>) -> Self {
+    fn new(cluster: Arc<Cluster>) -> Self {
         Buffer {
             topic_queues: HashMap::new(),
             bytes: 0,
             // TODO: make configurable
             size_limit: 100 * 1024 * 1024,
-            meta_cache: HashMap::new(),
+            // meta_cache: HashMap::new(),
             cluster,
         }
     }
@@ -575,14 +520,13 @@ impl Buffer {
         msg: QueuedMessage,
         topic: String,
         partition: u32,
-        meta: &protocol::TopicMetadata,
+        partitions_count: u32,
     ) -> BufferingResult {
         if self.bytes + msg.value.len() as u32 > self.size_limit {
             debug!("Overflow");
             return BufferingResult::Overflow;
         }
 
-        let partitions_count = meta.partition_metadata.len();
         let partitions = self.topic_queues.entry(topic).or_insert_with(|| {
             (0..partitions_count)
                 .map(|_| PartitionQueue::default())
@@ -598,13 +542,26 @@ impl Buffer {
     /// TODO: rust BC to become smarter. Parameter `cluster` is member of `self` but I have to pass it separately because borrow checker
     /// complains about `self` being borrowed 2 times mutably.
     //#[instrument(level = "debug", err, skip(self, acks, cluster))]
-    async fn flush(&mut self, acks: &Sender<Response>, cluster: &Arc<RwLock<Cluster>>) -> Result<()> {
-        let broker_partitioned = self.group_queue_by_leader();
+    async fn flush(&mut self, acks: &Sender<Response>, cluster: &Cluster) -> BrokerResult<()> {
+        
+        // let mut topics_meta = vec![];
+        // for topic in self.topic_queues.keys() {
+        //     let meta = cluster.get_or_request_meta(topic)
+        //         .with_retry(Duration::from_secs(1))
+        //         // TODO .timeout()
+        //         .await;
+        //     topics_meta.push(meta);
+        // }
+
+        let topics: Vec<_> = self.topic_queues.keys().collect();
+        let leaders = (|| { cluster.get_or_request_leader_map(&topics) })
+            .with_retry(Duration::from_secs(1)).await?;
+        let broker_partitioned = self.group_queue_by_leader(leaders);
 
         // Need to collect partition success or failure to adjust buffer,
         // and re-issue fetching topic metadata.
         // If contacting broker failed, then re-fetch meta for every topic in this broker.
-        let mut responses: Vec<(BrokerId, Result<ProduceResponse3>)> = vec![];
+        let mut responses: Vec<(BrokerId, BrokerResult<ProduceResponse3>)> = vec![];
 
         // TODO: send to all leaders in parallel. Use `Stream`?
         for (&leader, data) in &broker_partitioned {
@@ -617,13 +574,11 @@ impl Buffer {
                 transactional_id: None,
                 acks: 1,
                 timeout: 1500,
-                topic_data: &data,
+                topic_data: data,
             };
 
 
             // TODO: upon failure to connect to broker, reset connection and refresh metadata
-            // TODO: check locks scope to be minimal possible
-            let cluster = cluster.read().await;
             let broker = match cluster.broker_get_no_connect(leader).await {
                 Ok(broker) => broker,
                 Err(e) => /*return*/ {
@@ -702,8 +657,9 @@ impl Buffer {
         // `broker_partitioned` keeps `&mut self` reference which makes it impossible to mutate `self.topic_queues`,
         // so shadow it with only parts we need
         // TODO: this feels clumsy. When no error happen, it cause redundant `clone()`. Think better borrow design.
-        let broker_partitioned: HashMap<BrokerId,Vec<String>> = broker_partitioned.into_iter()
-            .map(|e| (e.0, e.1.keys().into_iter().map(|k| (*k).clone()).collect())).collect();
+        let broker_partitioned: HashMap<BrokerId,Vec<&str>> = broker_partitioned.into_iter()
+            // .map(|e| (e.0, e.1.keys().into_iter().map(|k| (*k).clone()).collect())).collect();
+            .map(|(leader, topics)| (leader, topics.keys().map(|t| *t).collect::<Vec<_>>())).collect();
 
 
         // Discard messages which were sent successfully
@@ -737,8 +693,9 @@ impl Buffer {
                         .unwrap();
 
                     for topic in topics {
-                        self.mark_leader_down(leader);
-                        self.cluster.write().await.start_resolving_topic((*topic).clone()).await?;
+                        self.cluster.mark_leader_down(leader).await;
+                        // TODO: at least `warn` if error sending to pipeline
+                        let _ = self.cluster.start_resolving_topics(&[topic]).await;
                         info!("Marked leader down: {}", leader);
                     }
                 }
@@ -751,56 +708,97 @@ impl Buffer {
     /// Scan message buffer and group messages by the leader and update `sending` counter.
     /// Two queues because that's how dequeue works.
     /// Returns leader->topic->partition->messages
-    fn group_queue_by_leader(
-        &mut self,
-    ) -> HashMap<BrokerId, HashMap<&String, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>>>
+    fn group_queue_by_leader<'a>(&'a mut self, leader_map: Vec<(BrokerId, Vec<(&'a str, Vec<Partition>)>)>) -> HashMap<BrokerId, HashMap<&str, HashMap<Partition, (&'a [QueuedMessage], &'a [QueuedMessage])>>>
     {
         // TODO: implement FIFO and request size bound algorithm
 
         // leader->topic->partition->recordset[]
         let mut broker_partitioned = HashMap::<
             BrokerId,
-            HashMap<&String, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>>,
+            HashMap<&str, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>>,
         >::new();
 
-        for (topic, partitioned_queue) in &mut self.topic_queues {
-            for (partition, queue) in partitioned_queue
-                .iter_mut()
-                .enumerate()
-                // Only non-empty queues
-                .filter(|(_, q)| !q.queue.is_empty())
-            {
-                let partition = partition as u32;
-                let leader = self
-                    .meta_cache
-                    .get(topic)
-                    .expect("Topic metadata is expected")
-                    .get(partition as usize)
-                    .expect("Corrupt topic metadata partition info: can not find leader for partition");
-
-                let leader = match leader {
-                    Some(leader) => leader,
-                    None => {
-                        trace!("Leader for partition {} is not known yet, skipping", partition);
-                        continue;
-                    }
+        for (leader, topics) in leader_map {
+            for (topic, partitions) in topics {
+                
+                let pqs = match self.topic_queues.get(topic) {
+                    None => continue,
+                    Some(pqs) => pqs,
                 };
 
-                // TODO: limit message size
-                queue.sending = queue.queue.len().try_into().unwrap();
+                for partition in partitions {
+                    let pq = match pqs.get(partition as usize) {
+                        Some(pq) => pq,
+                        None => {
+                            error!("Number of partitions in message queue does not match. Queue: {} metadata: {} ", pqs.len(), partitions.len());
+                            continue;
+                        }
+                    };
 
-                let topics = broker_partitioned
-                    .entry(*leader)
-                    .or_insert_with(HashMap::new);
-                // TODO use raw entries
-                let partitions = topics.entry(topic).or_insert_with(HashMap::new);
-                partitions.insert(partition, queue.queue.as_slices());
+                    // TODO: limit message size
+                    pq.sending = pq.queue.len().try_into().unwrap();
+
+
+                    broker_partitioned.entry(leader).or_default()
+                        .entry(topic).or_default()
+                        .insert(partition, pq.queue.as_slices());
+                }
             }
         }
 
         broker_partitioned
+
+
+        // for (topic, partitioned_queue) in &mut self.topic_queues {
+        //     let leaders = match leader_map.get(topic) {
+        //         Some(leader) => leader,
+        //         None => {
+        //             debug!("Not found leaders for topic {}", topic);
+        //             break;
+        //         }
+        //     };
+        //
+        //     for (partition, queue) in partitioned_queue
+        //         .iter_mut()
+        //         .enumerate()
+        //         // Only non-empty queues
+        //         .filter(|(_, q)| !q.queue.is_empty())
+        //     {
+        //         let partition = partition as u32;
+        //
+        //
+        //                 /*self
+        //             .meta_cache
+        //             .get(topic)
+        //             .expect("Topic metadata is expected")
+        //             .get(partition as usize)
+        //             .expect("Corrupt topic metadata partition info: can not find leader for partition");
+        //             */
+        //
+        //         let leader = match leaders[partition] {
+        //             Some(leader) => leader,
+        //             None => {
+        //                 trace!("Leader for partition {} is not known yet, skipping", partition);
+        //                 continue;
+        //             }
+        //         };
+        //
+        //         // TODO: limit message size
+        //         queue.sending = queue.queue.len().try_into().unwrap();
+        //
+        //         let topics = broker_partitioned
+        //             .entry(*leader)
+        //             .or_insert_with(HashMap::new);
+        //         // TODO use raw entries
+        //         let partitions = topics.entry(topic).or_insert_with(HashMap::new);
+        //         partitions.insert(partition, queue.queue.as_slices());
+        //     }
+        // }
+        //
+        // broker_partitioned
     }
 
+    /*
     fn mark_leader_down(&mut self, leader: BrokerId) {
         for (_topic, partitions) in &mut self.meta_cache {
             for leader in partitions {
@@ -808,6 +806,7 @@ impl Buffer {
             }
         }
     }
+    */
 }
 
 #[derive(Debug, Default)]

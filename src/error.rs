@@ -1,8 +1,16 @@
+//! `BrokerError` is error happen during communication with a broker, whereas `InternalError` is
+//! caused by driver itself (for example channel communication error).
+
 use thiserror::Error;
 use std::io;
 use crate::types::BrokerId;
+use crate::retry_policy::RetryResult;
+use crate::retry_policy::ErrorEvaluator;
 
-pub(crate) type Result<T,E=InternalError> = std::result::Result<T,E>;
+//pub(crate) type Result<T,E=InternalError> = std::result::Result<T,E>;
+/// Result with focus on retry-ability. Higher-level function wrap the response into retry policy
+/// and make decision on either underlying connection must be reset.
+pub(crate) type BrokerResult<T> = std::result::Result<T,BrokerFailureSource>;
 
 /// User-facing error
 #[derive(Debug, Error)]
@@ -66,18 +74,32 @@ pub enum InternalError {
 pub enum BrokerFailureSource {
     #[error(transparent)]
     Connect(#[from] io::Error),
+
+    #[error(transparent)]
+    KafkaErrorCode(#[from] crate::protocol::ErrorCode),
+
+    #[error("serialization")]
+    Serialization(#[source] anyhow::Error),
+    
     #[error("timeout")]
     Timeout,
+    
     #[error("{0}. {1}")]
     Write(String, io::Error),
+    
     #[error("read failed at position {0}. {1}")]
     Read(usize, io::Error),
+    
     #[error("unknown broker_id: {0}")]
     UnknownBrokerId(BrokerId),
 
-    // TODO: collect errors for evary broker and expose as a collection
+    // TODO: collect errors for every broker and expose as a collection
     #[error("no broker available")]
     NoBrokerAvailable,
 }
 
-// pub(crate) struct BrokerFailedError(BrokerId, BrokerFailureSource);
+impl ErrorEvaluator for BrokerFailureSource {
+    fn eval(&self) -> RetryResult {
+        todo!()
+    }
+}

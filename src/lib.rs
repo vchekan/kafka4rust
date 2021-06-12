@@ -1,4 +1,3 @@
-mod broker;
 mod cluster;
 mod connection;
 mod consumer;
@@ -11,6 +10,7 @@ mod types;
 mod utils;
 mod zigzag;
 mod resolver;
+mod retry_policy;
 
 pub mod admin;
 

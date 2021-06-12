@@ -1,8 +1,7 @@
-use crate::error::Result;
+use crate::error::BrokerResult;
 use std::future::Future;
 use tokio::time::Duration;
 use tracing_futures::Instrument;
-use thrift::ApplicationErrorKind::InternalError;
 
 pub(crate) enum RepeatResult<T> {
     Timeout,
@@ -11,7 +10,7 @@ pub(crate) enum RepeatResult<T> {
 
 pub(crate) async fn repeat_with_timeout<FF, F, T>(f: FF, delay: Duration, timeout: Duration) -> RepeatResult<F::Output>
     where FF: Fn() -> F,
-        F: Future<Output = Result<T>>
+        F: Future<Output = BrokerResult<T>>
 {
     let timeout = tokio::time::sleep(timeout);
     tokio::pin!(timeout);
@@ -38,3 +37,4 @@ pub(crate) async fn repeat_with_timeout<FF, F, T>(f: FF, delay: Duration, timeou
         }
     }
 }
+

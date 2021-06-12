@@ -26,13 +26,11 @@
 //! querying? Which connections should be used for metadata query, because long polling problem?
 //! A: ???
 
-use crate::broker::Broker;
-use crate::error::{Result, InternalError, BrokerFailureSource};
+use crate::error::{BrokerResult, InternalError, BrokerFailureSource};
 use crate::futures::{repeat_with_timeout, RepeatResult};
 use crate::protocol;
 use crate::types::*;
 use crate::utils::resolve_addr;
-use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use tokio::time::Duration;
@@ -40,12 +38,12 @@ use tracing_attributes::instrument;
 use crate::resolver::{self, start_resolver};
 use tokio::sync::{mpsc, RwLock};
 use tokio::sync::mpsc::{Sender, Receiver};
-use std::sync::{Mutex, Arc};
-use im;
-use crossbeam::epoch::{self, Owned, Shared, Atomic, Collector};
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use crate::connection::BrokerConnection;
+use std::fmt::{Debug, Formatter};
+use tracing::event;
+use crate::protocol::ErrorCode;
 
-#[derive(Debug)]
 pub struct Cluster {
     bootstrap: Vec<SocketAddr>,
     operation_timeout: Duration,
@@ -58,17 +56,32 @@ pub struct Cluster {
     // broker_id_map: im::HashMap<BrokerId, Broker>,
     // broker_addr_map: im::HashMap<BrokerId, SocketAddr>,
 
-    brokers_maps: Atomic<BrokersMaps>,
+    brokers_maps: RwLock<BrokersMaps>,
 }
 
+impl Debug for Cluster {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cluster")
+        .field("bootstrap", &self.bootstrap)
+        .field("operation_timeout", &self.operation_timeout)
+        // TODO: need to block maps to get their string
+        //.field("brokers_map", &self.brokers_maps)
+        .finish()
+    }
+}
+
+
 struct BrokersMaps {
-    pub broker_id_map: im::HashMap<BrokerId, Broker>,
-    pub broker_addr_map: im::HashMap<BrokerId, SocketAddr>,
+    pub broker_id_map: HashMap<BrokerId, Arc<BrokerConnection>>,
+    pub broker_addr_map: HashMap<BrokerId, SocketAddr>,
+    /// topic -> partition[] -> leader (if known). Leader is None if it is down and requires re-discovery
+    meta_cache: HashMap<String, Vec<Option<BrokerId>>>,
+    topics_meta: HashMap<String, protocol::MetadataResponse0>,
 }
 
 impl Cluster {
     #[instrument(err)]
-    pub fn with_bootstrap(bootstrap: &str, timeout: Option<Duration>) -> Result<Self> {
+    pub fn with_bootstrap(bootstrap: &str, timeout: Option<Duration>) -> anyhow::Result<Self> {
         let bootstrap = resolve_addr(bootstrap);
         Ok(Self::new(bootstrap, timeout))
     }
@@ -101,8 +114,12 @@ impl Cluster {
         let (resp_tx, resp_rx) = mpsc::channel(1);
         let cluster = Cluster {
             bootstrap,
-            broker_id_map: HashMap::new(),
-            broker_addr_map: HashMap::new(),
+            brokers_maps: RwLock::new(BrokersMaps {
+                broker_id_map: HashMap::new(),
+                broker_addr_map: HashMap::new(),
+                meta_cache: HashMap::new(),
+                topics_meta: HashMap::new(),
+            }),
             operation_timeout: operation_timeout.unwrap_or(Duration::from_secs(5)),
             resolver_tx: req_tx,
             resolver_rx: resp_rx,
@@ -112,140 +129,96 @@ impl Cluster {
         cluster
     }
 
-    /// Connect to known or seed broker and get topic metadata.
-    /// If `topics` is empty, then fetch metadata for all topics.
-    /// Update internal broker maps according to the response.
-    #[instrument(skip(self), err)]
-    pub async fn fetch_topic_meta_and_update(
-        &self,
-        topics: &[&str],
-    ) -> Result<protocol::MetadataResponse0> {
+    // /// Connect to known or seed broker and get topic metadata.
+    // /// If `topics` is empty, then fetch metadata for all topics.
+    // /// Update internal broker maps according to the response.
+    // /// TODO: with interior mutablity do we still need this method?
+    // #[instrument(skip(self), err)]
+    // pub async fn fetch_topic_meta_and_update(
+    //     &self,
+    //     topics: &[&str],
+    // ) -> BrokerResult<protocol::MetadataResponse0> {
+    //     let meta = self.fetch_topic_meta_no_update(topics).await?;
+    //     self.update_brokers_map(&meta);
+    //     Ok(meta)
+    // }
 
-        /*debug!("fetch_topic_meta_and_retry({:?})", topics);
-        // TODO: wait with timeout
-        for broker in self.broker_id_map.values() {
-            debug!("Trying to fetch meta from known broker {:?}", broker);
-            match fetch_topic_with_broker(broker, topics, self.operation_timeout).await {
-                Ok(meta) => {
-                    self.update_brokers_map(&meta);
-                    return Ok(meta);
-                }
-                Err(e) => {
-                    tracing::event!(tracing::Level::ERROR, "Error fetching topic meta: {}", e);
-                    info!("Error fetching topic meta1: {}", e)
-                }
-            }
-        }
-
-        let operation_timeout = self.operation_timeout;
-        let meta = repeat_with_timeout(|| async {
-            for addr in &self.bootstrap {
-                debug!("Trying to fetch meta from bootstrap broker {:?}", addr);
-                let broker = Broker::connect(*addr).await;
-                match broker {
-                    Ok(broker) => {
-                        let meta = fetch_topic_with_broker(&broker, topics, operation_timeout).await;
-                        match meta {
-                            Ok(meta) => {
-                                return Ok(meta);
-                            }
-                            Err(e) => {
-                                debug!("Failed to fetch meta from bootstrap broker {:?}. {:#?}", broker, e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        debug!("Failed to connect to bootstrap broker {:?}. {:#?}", addr, e);
-                    }
-                }
-            }
-            Err(anyhow!("Could not connect to any broker in bootstrap"))
-        },  Duration::from_secs(1), operation_timeout).await?;
-         */
-
-        let meta = self.fetch_topic_meta_no_update(topics).await?;
-        self.update_brokers_map(&meta);
-        Ok(meta)
-    }
-
-    #[instrument(skip(self), err)]
-    pub async fn fetch_topic_meta_no_update(
-        &self,
-        topics: &[&str],
-    ) -> Result<protocol::MetadataResponse0> {
-        let guard = epoch::pin();
-        let maps = self.brokers_maps.load_consume(&guard);
-
-        // fetch from known brokers
-        for broker in unsafe { maps.deref() }.broker_id_map.values() {
-            debug!("Trying to fetch meta from known broker {:?}", broker);
-            match fetch_topic_with_broker(broker, topics, self.operation_timeout).await {
-                Ok(meta) => return Ok(meta),
-                Err(e) => {
-                    tracing::event!(tracing::Level::ERROR, "Error fetching topic meta: {}", e);
-                    info!("Error fetching topic meta1: {}", e)
-                }
-            }
-        }
-
-        // if failed to fetch from known brokers, give it a try for bootstrap ones
-        let operation_timeout = self.operation_timeout;
-        let meta = repeat_with_timeout(|| async {
-            for addr in &self.bootstrap {
-                debug!("Trying to fetch meta from bootstrap broker {:?}", addr);
-                // TODO: timeout for single broker wait
-                let broker = Broker::connect(*addr).await;
-                match broker {
-                    Ok(broker) => {
-                        let meta = fetch_topic_with_broker(&broker, topics, operation_timeout).await;
-                        match meta {
-                            Ok(meta) => return Ok(meta),
-                            Err(e) => debug!("Failed to fetch meta from bootstrap broker {:?}. {:#?}", broker, e),
-                        }
-                    }
-                    Err(e) => debug!("Failed to connect to bootstrap broker {:?}. {:#?}", addr, e),
-                }
-            }
-            Err(InternalError::BrokerFailure(BrokerFailureSource::NoBrokerAvailable))
-        },  Duration::from_secs(1), operation_timeout).await;
-
-        match meta {
-            RepeatResult::Timeout => Err(InternalError::BrokerFailure(BrokerFailureSource::Timeout)),
-            RepeatResult::Ok(res) => res
-        }
-    }
+    // #[instrument(skip(self), err)]
+    // pub async fn fetch_topic_meta_no_update(
+    //     &self,
+    //     topics: &[&str],
+    // ) -> BrokerResult<protocol::MetadataResponse0> {
+    //     let maps = self.brokers_maps.read().await;
+    //
+    //     // fetch from known brokers
+    //     for broker in maps.broker_id_map.values() {
+    //         debug!("Trying to fetch meta from known broker {:?}", broker);
+    //         match fetch_topic_with_broker(broker, topics, self.operation_timeout).await {
+    //             Ok(meta) => return Ok(meta),
+    //             Err(e) => {
+    //                 tracing::event!(tracing::Level::ERROR, "Error fetching topic meta: {}", e);
+    //                 info!("Error fetching topic meta1: {}", e)
+    //             }
+    //         }
+    //     }
+    //
+    //     // if failed to fetch from known brokers, give it a try for bootstrap ones
+    //     let operation_timeout = self.operation_timeout;
+    //     let meta = repeat_with_timeout(|| async {
+    //         for addr in &self.bootstrap {
+    //             debug!("Trying to fetch meta from bootstrap broker {:?}", addr);
+    //             // TODO: timeout for single broker wait
+    //             let broker = BrokerConnection::connect(*addr).await;
+    //             match broker {
+    //                 Ok(broker) => {
+    //                     let meta = fetch_topic_with_broker(&broker, topics, operation_timeout).await;
+    //                     match meta {
+    //                         Ok(meta) => return Ok(meta),
+    //                         Err(e) => debug!("Failed to fetch meta from bootstrap broker {:?}. {}", broker, e),
+    //                     }
+    //                 }
+    //                 Err(e) => debug!("Failed to connect to bootstrap broker {:?}. {}", addr, e),
+    //             }
+    //         }
+    //         Err(InternalError::BrokerFailure(BrokerFailureSource::NoBrokerAvailable))
+    //     },  Duration::from_secs(1), operation_timeout).await;
+    //
+    //     match meta {
+    //         RepeatResult::Timeout => Err(BrokerFailureSource::Timeout),
+    //         RepeatResult::Ok(res) => res
+    //     }
+    // }
 
     #[instrument(level="debug", skip(broker_id, self))]
-    pub(crate) async fn broker_get_or_connect<'g>(&self, broker_id: BrokerId, guard: &'g epoch::Guard) -> Result<&'g Broker> {
-        let maps_ptr = self.brokers_maps.load_consume(&guard);
-        let maps = unsafe { maps_ptr.deref() };
+    pub(crate) async fn broker_get_or_connect(&self, broker_id: BrokerId) -> BrokerResult<Arc<BrokerConnection>> {
+        let maps = self.brokers_maps.read().await;
         if let Some(broker) = maps.broker_id_map.get(&broker_id) {
-            return Ok(broker);
+            return Ok(broker.clone());
         }
 
         // Cache miss, have to fetch broker metadata.
-        if let Some(addr) = maps.broker_addr_map.get(&broker_id) {
-            let broker = Broker::connect(*addr).await?;
-            debug!(
-                "broker_get_or_connect: broker_id={}, connected to {}",
-                broker_id, addr
-            );
-            // Update map
-            let newmap = maps.broker_id_map.update(broker_id, broker);
-            let newmaps = Owned::new(BrokersMaps {broker_id_map: newmap, broker_addr_map: maps.broker_addr_map.clone()});
-            let oldmaps = self.brokers_maps.swap(newmaps, Ordering::AcqRel, &guard);
-            unsafe {
-                guard.defer_destroy(oldmaps);
-                guard.flush();
+        let broker: BrokerConnection = {
+            if let Some(addr) = maps.broker_addr_map.get(&broker_id) {
+                let broker = BrokerConnection::connect(*addr).await?;
+                debug!(
+                    "broker_get_or_connect: broker_id={}, connected to {}",
+                    broker_id, addr
+                );
+                broker
+            } else {
+                return Err(BrokerFailureSource::UnknownBrokerId(broker_id))
             }
-            // load broker from new map
-            let broker = unsafe { self.brokers_maps.load_consume(&guard).deref() }.broker_id_map.get(&broker_id);
-            broker
-                // Can this even happen?
-                .ok_or(InternalError::BrokerFailure(BrokerFailureSource::UnknownBrokerId(broker_id)))
-        } else {
-            Err(InternalError::BrokerFailure(BrokerFailureSource::UnknownBrokerId(broker_id)))
+        };
+
+        let broker = Arc::new(broker);
+        // Re-take lock and update map
+        std::mem::drop(maps);
+        let mut maps = self.brokers_maps.write().await;
+        if let Some(_) = maps.broker_id_map.insert(broker_id, broker.clone()) {
+            warn!("While connecting to a missing broker, a broker got inserted");
         }
+
+        Ok(broker)
 
         // let x: Result<&Broker,_> = match self.broker_id_map.entry(broker_id) {
         //     im::hashmap::Entry::Occupied(entry) => Ok(entry.into_mut()),
@@ -267,22 +240,22 @@ impl Cluster {
     }
 
     #[instrument(level="debug", skip(broker_id, self))]
-    pub(crate) async fn broker_get_no_connect<'a>(&self, broker_id: BrokerId, guard: &'a epoch::Guard) -> Result<&'a Broker> {
-        let maps = self.brokers_maps.load_consume(guard);
-        let maps = unsafe {maps.deref()};
+    pub(crate) async fn broker_get_no_connect(&self, broker_id: BrokerId) -> BrokerResult<Arc<BrokerConnection>> {
+        let maps = self.brokers_maps.read().await;
         match maps.broker_id_map.get(&broker_id) {
-            Some(broker) => Ok(broker),
-            None => Err(InternalError::BrokerFailure(BrokerFailureSource::NoBrokerAvailable))
+            Some(broker) => Ok(broker.clone()),
+            None => Err(BrokerFailureSource::NoBrokerAvailable)
         }
     }
 
-    fn update_brokers_map(&self, meta: &protocol::MetadataResponse0) {
+    async fn update_brokers_map(&self, meta: &protocol::MetadataResponse0) {
         for broker in &meta.brokers {
             match (broker.host.as_str(), broker.port as u16).to_socket_addrs() {
                 Ok(addr) => {
                     let addr: Vec<SocketAddr> = addr.collect();
                     if !addr.is_empty() {
-                        self.broker_addr_map.insert(broker.node_id, addr[0]);
+                        let mut map = self.brokers_maps.write().await;
+                        map.broker_addr_map.insert(broker.node_id, addr[0]);
                     }
                 }
                 Err(e) => error!("Resolve broker error: {}", e),
@@ -290,26 +263,24 @@ impl Cluster {
         }
     }
 
-    pub(crate) fn reset_broker(&mut self, broker_id: BrokerId) {
-        self.broker_id_map.remove(&broker_id);
-        self.broker_addr_map.remove(&broker_id);
+    pub(crate) async fn reset_broker(&mut self, broker_id: BrokerId) {
+        let mut maps = self.brokers_maps.write().await;
+        maps.broker_id_map.remove(&broker_id);
+        maps.broker_addr_map.remove(&broker_id);
     }
 
     // TODO: what is the list of all known brokers?
     // TODO: retry policy
     /// Execute request on every broker until success
-    pub async fn request_any<R: protocol::Request>(&self, request: R) -> Result<R::Response> {
+    pub async fn request_any<R: protocol::Request>(&self, request: R) -> BrokerResult<R::Response> {
         // TODO:
         // Do not block broker list for the duration of the walk along all brokers.
         // Instead walk by the index, until index is out of size.
         // It is possible that some other process have modified the broker list while walk is
         // performed, but this is ok for "from any broker" query.
 
-        // TODO: verify ordering
-        let guard = epoch::pin();
-        let maps = self.brokers_maps.load_consume(&guard);
-
-        for broker in unsafe { maps.deref() }.broker_id_map.values() {
+        let maps = self.brokers_maps.read().await;
+        for broker in maps.broker_id_map.values() {
             match broker.send_request(&request).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => {
@@ -321,7 +292,7 @@ impl Cluster {
         // TODO: after connect we have list of broker addresses but can not know their ID yet.
         // Because of that, I have to check 2 lists, brokers with known ID and without (bootstrap ones)
         for addr in &self.bootstrap {
-            match Broker::connect(*addr).await {
+            match BrokerConnection::connect(*addr).await {
                 Ok(broker) => match broker.send_request(&request).await {
                     Ok(resp) => return Ok(resp),
                     Err(e) => {
@@ -332,35 +303,100 @@ impl Cluster {
             }
         }
 
-        Err(InternalError::BrokerFailure(BrokerFailureSource::NoBrokerAvailable))
+        Err(BrokerFailureSource::NoBrokerAvailable)
     }
 
-    pub async fn start_resolving_topics(&self, topics: impl IntoIterator<Item=String>) -> Result<()> {
+    pub async fn start_resolving_topics(&self, topics: &[&str]) -> std::result::Result<(), InternalError> {
         for topic in topics {
-            self.resolver_tx.send(resolver::Cmd::ResolveTopic(topic)).await
+            self.resolver_tx.send(resolver::Cmd::ResolveTopic(topic.to_string())).await
                 .map_err(|e| InternalError::Critical("Failed to send topic to topic resolver".into()))?;
         }
         Ok(())
     }
 
-    pub async fn start_resolving_topic(&self, topic: String) -> Result<()> {
-        self.resolver_tx.send(resolver::Cmd::ResolveTopic(topic)).await
-            .map_err(|e| InternalError::Critical("Failed to send topic to topic resolver".into()))
+    // pub async fn start_resolving_topic(&self, topic: String) -> BrokerResult<()> {
+    //     self.resolver_tx.send(resolver::Cmd::ResolveTopic(topic)).await
+    //         //.map_err(|e| InternalError::Critical("Failed to send topic to topic resolver".into()))
+    // }
+
+    // pub async fn get_or_request_meta(&self, topic: &str) -> Result<&protocol::MetadataResponse0, BrokerFailureSource> {
+    //     let maps = self.brokers_maps.read().await;
+    //     if let Some(topics_meta) = maps.topics_meta.get(topic) {
+    //         return Ok(topics_meta);
+    //     }
+    //
+    //
+    //         // Did not have meta. Fetch and cache.
+    //         // TODO: instead of loop use recovery policy
+    //         // TODO: will wait for *all* partitions to become available. Could progress on what's up for now
+    //         // and await only for failed ones?
+    //         // loop {
+    //         //     debug!("Fetching topic meta from server");
+    //         let meta = self.fetch_topic_meta_and_update(&[topic]).await?;
+    //         assert!(topic.eq_ignore_ascii_case(&meta.topics[0].topic));
+    //         let topic_metadata = &meta.topics[0];
+    //
+    //         meta.topics[0].error_code.as_result()?;
+    //
+    //             // match meta.protocol_metadata.topics[0].error_code.as_result() {
+    //             //     Err(e) if e.is_retriable() => {
+    //             //         info!("Retriable error {}", e);
+    //             //         tokio::time::sleep(Duration::from_millis(300))
+    //             //             .instrument(tracing::info_span!("Retry sleep"))
+    //             //             .await;
+    //             //         //continue;
+    //             //         return Err(BrokerFailureSource::KafkaErrorCode(e))
+    //             //     }
+    //             //     Err(e) => return Err(e.into()),
+    //             //     _ => {}
+    //             // }
+    //
+    //             if topic_metadata.partition_metadata.iter().all(|m| m.error_code == ErrorCode::None)
+    //             {
+    //                 // No errors in partitions, just save the metadata
+    //                 maps.topics_meta.insert(topic.to_string(), meta);
+    //                 let meta = maps.topics_meta.get(topic).unwrap();
+    //                 return Ok(meta);
+    //             } else {
+    //                 // Some partitions have an error, return an error
+    //                 let errors: Vec<_> = topic_metadata.partition_metadata.iter().filter(|m| m.error_code != ErrorCode::None).map(|m| (m.partition, m.error_code)).collect();
+    //                 for (partition, error) in &errors
+    //                 {
+    //                     event!(target: "get_or_request_meta", tracing::Level::WARN, error_code = ?error, partition = ?partition);
+    //                 }
+    //                 // TODO: check either error is recoverable
+    //                 //continue;
+    //                 // TODO: retrning just 1st error, should handle them individually somehow?
+    //                 return Err(BrokerFailureSource::KafkaErrorCode(errors[0].1));
+    //             }
+    //         // }
+    //     }
+
+    pub async fn get_or_request_leader_map<'a>(&self, topics: &[&'a impl AsRef<str>]) -> BrokerResult<Vec<(BrokerId, Vec<(&'a str, Vec<Partition>)>)>> {
+        todo!()
     }
 
+    /// Get 
+    pub async fn get_topic_partition_count(&self, topic: &str) -> BrokerResult<u32> {
+        todo!()
+    }
+
+    pub async fn mark_leader_down(&self, leader: BrokerId) {
+        todo!()
+    }
 }
 
 #[instrument(level="debug")]
 async fn fetch_topic_with_broker(
-    broker: &Broker,
+    broker: &BrokerConnection,
     topics: &[&str],
     timeout: Duration,
-) -> Result<protocol::MetadataResponse0> {
+) -> BrokerResult<protocol::MetadataResponse0> {
     let req = protocol::MetadataRequest0 {
         topics: topics.iter().map(|t| t.to_string()).collect(),
     };
     match tokio::time::timeout(timeout, broker.send_request(&req)).await {
-        Err(_) => Err(InternalError::BrokerFailure(BrokerFailureSource::Timeout)),
+        Err(_) => Err(BrokerFailureSource::Timeout),
         Ok(res) => res,
     }
 }

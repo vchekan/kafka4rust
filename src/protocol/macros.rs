@@ -38,12 +38,12 @@ macro_rules! response {
     ( { fn $fn:ident() -> $tp:ty} ) => {};
     ($id:ident) => {};
     ( [$id:ident] ) => {};
-    ([Result<$tp:ty>]) => {};
+    ([BrokerResult<$tp:ty>]) => {};
 
     // Array of complex type
     ( [ $sname:ident $tp:tt ] ) => (response!($sname $tp););
 
-    ([Result<$sname:ident> $def:tt ] ) => {
+    ([BrokerResult<$sname:ident> $def:tt ] ) => {
         response!($sname $def);
     };
 
@@ -55,7 +55,7 @@ macro_rules! response {
         }
 
         impl FromKafka for $sname {
-            fn from_kafka(_buff: &mut impl Buf) -> Result<$sname> {
+            fn from_kafka(_buff: &mut impl Buf) -> BrokerResult<$sname> {
                 Ok($sname { $($f: <get_type!($tp)>::from_kafka(_buff)?),* })
             }
         }
@@ -64,7 +64,7 @@ macro_rules! response {
         $( response!($tp); )*
     };
 
-    (Result<$sname:ident> $def:tt) => {
+    (BrokerResult<$sname:ident> $def:tt) => {
         response!($sname $def);
     };
 }

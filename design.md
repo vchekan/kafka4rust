@@ -44,3 +44,31 @@ should be able
 
 ## Message based design
 Locking is hard to do without slowing down things. Let's see either message based design will solve it.
+
+## Locks notes
+How to work on broker map while be able to update it?
+* Rw lock.
+* Immutable maps 
+* Lock-free (crossbeam epoch)
+
+Problem: it is desirable to return `&Broker` instead of cloning `Broker`, which means complication to locking scope. And
+`Broker` is used to send request, which means really long locking time!
+
+### RWLock
+To solve long-lived `&Broker`, looks like Arc is needed to return broker from the map.
+
+### Immutable map
+When broker found, return `&Broker` which ties lifetime to `self`.
+When broker not found, create a new one and add to a map, which will create new immutable map object. Swap pointers. Wait,
+this requires mutable references which makes it no go. 
+`AtimicPtr` does allow operation on immutable `self` but puches us into pointer operations and dereferencing pointers is 
+unsafe. In addition to this, we can not leak old map nor drop it, because there might be other threads/futures still 
+using it. This could be addressed by `crossbeam::epoch`.
+
+### Lock-free (crossbeam::epoch)
+Adaptation of Immutable Map approach but put old map into epoch collector. Now, how do we deal with returning `&Broker`?
+The problem is, thread T1 loads map pointer and return `&Broker`. At the same time thread T2 misses a broker, creates a 
+new one, replaces map pointer with a new one and put old broker into delayed drop queue. Now old queue can be dropped 
+and cause `Broker` drop while `&Broker` is still shared?
+
+Another question: is epoch future-compatible?

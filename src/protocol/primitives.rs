@@ -1,10 +1,12 @@
 use super::api::*;
-use crate::error::InternalError;
+use crate::error::{InternalError, BrokerFailureSource};
 use crate::protocol::ErrorCode;
 use crate::zigzag::*;
-use crate::error::Result;
+use crate::error::BrokerResult;
 use bytes::{Buf, BufMut, BytesMut};
 use std::fmt::Debug;
+use anyhow::anyhow;
+use crate::error::InternalError::BrokerFailure;
 
 //
 // Primitive types serializtion
@@ -80,70 +82,70 @@ where
 // Primitive types deserialization
 //
 impl FromKafka for String {
-    fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
+    fn from_kafka(buff: &mut impl Buf) -> BrokerResult<Self> {
         if buff.remaining() < 4 {
-            return Err(InternalError::CorruptMessage("EOF while reading a string len"));
+            return Err(BrokerFailureSource::Serialization(anyhow!("EOF while reading string len")));
         }
         let size = buff.get_u16_be() as usize;
         if buff.remaining() < size {
-            return Err(InternalError::CorruptMessage("EOF while reading string"));
+            return Err(BrokerFailureSource::Serialization(anyhow!("EOF while reading string")));
         }
         let str = String::from_utf8(buff.bytes()[..size].to_vec())
-            .map_err(|e| InternalError::Serialization(e.into()))?;
+            .map_err(|e| BrokerFailureSource::Serialization(e.into()))?;
         buff.advance(size);
         Ok(str)
     }
 }
 
 impl FromKafka for u32 {
-    fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
+    fn from_kafka(buff: &mut impl Buf) -> BrokerResult<Self> {
         if buff.remaining() < 4 {
-            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(BrokerFailureSource::Serialization(anyhow!("Unexpected end of buffer")));
         }
         Ok(buff.get_u32_be())
     }
 }
 
 impl FromKafka for i32 {
-    fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
+    fn from_kafka(buff: &mut impl Buf) -> BrokerResult<Self> {
         if buff.remaining() < 4 {
-            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(BrokerFailureSource::Serialization(anyhow!("Unexpected end of buffer")));
         }
         Ok(buff.get_i32_be())
     }
 }
 
 impl FromKafka for u64 {
-    fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
+    fn from_kafka(buff: &mut impl Buf) -> BrokerResult<Self> {
         if buff.remaining() < 8 {
-            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(BrokerFailureSource::Serialization(anyhow!("Unexpected end of buffer")));
         }
         Ok(buff.get_u64_be())
     }
 }
 
 impl FromKafka for i64 {
-    fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
+    fn from_kafka(buff: &mut impl Buf) -> BrokerResult<Self> {
         if buff.remaining() < 8 {
-            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(BrokerFailureSource::Serialization(anyhow!("Unexpected end of buffer")));
         }
         Ok(buff.get_i64_be())
     }
 }
 
 impl FromKafka for u16 {
-    fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
+    fn from_kafka(buff: &mut impl Buf) -> BrokerResult<Self> {
         if buff.remaining() < 2 {
-            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(BrokerFailureSource::Serialization(anyhow!("Unexpected end of buffer")));
         }
         Ok(buff.get_u16_be())
     }
 }
 
 impl FromKafka for i16 {
-    fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
+    fn from_kafka(buff: &mut impl Buf) -> BrokerResult<Self> {
         if buff.remaining() < 2 {
-            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(BrokerFailureSource::Serialization(anyhow!("Unexpected end of buffer")));
         }
         Ok(buff.get_i16_be())
     }
@@ -153,9 +155,9 @@ impl<T> FromKafka for Vec<T>
 where
     T: FromKafka + Debug,
 {
-    fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
+    fn from_kafka(buff: &mut impl Buf) -> BrokerResult<Self> {
         if buff.remaining() < 4 {
-            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(BrokerFailureSource::Serialization(anyhow!("Unexpected end of buffer")));
         }
         let len = buff.get_i32_be();
         if len == -1 || len == 0 {
@@ -163,7 +165,7 @@ where
         }
 
         if buff.remaining() < len as usize {
-            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(BrokerFailureSource::Serialization(anyhow!("Unexpected end of buffer")));
         }
         let mut res = Vec::with_capacity(len as usize);
         for _ in 0..len {
@@ -175,15 +177,16 @@ where
 }
 
 impl FromKafka for ErrorCode {
-    fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
+    fn from_kafka(buff: &mut impl Buf) -> BrokerResult<Self> {
         if buff.remaining() < 2 {
-            return Err(InternalError::CorruptMessage("Unexpected end of buffer").into());
+            return Err(BrokerFailureSource::Serialization(anyhow!("Unexpected end of buffer")));
         }
         let code = buff.get_i16_be();
+        // TODO: how to avoid unsafe? Also, in case ErrorCode is appended new error codes, this check will fail.
         if code >= -1 && code <= 87 {
             Ok(unsafe { std::mem::transmute(code) })
         } else {
-            Err(InternalError::CorruptMessage("Invalid error code").into())
+            Err(BrokerFailureSource::Serialization(anyhow!("Invalid error code")))
         }
     }
 }
@@ -203,11 +206,11 @@ impl Recordset {
 }
 
 impl FromKafka for Recordset {
-    fn from_kafka(buff: &mut impl Buf) -> Result<Self> {
+    fn from_kafka(buff: &mut impl Buf) -> BrokerResult<Self> {
         // TODO: skip control batches
 
         if buff.remaining() < 4 {
-            return Err(InternalError::CorruptMessage("EOF while reading segment size").into());
+            return Err(BrokerFailureSource::Serialization(anyhow!("EOF while reading segment size")));
         }
 
         let segment_size = buff.get_u32_be();
@@ -224,11 +227,11 @@ impl FromKafka for Recordset {
         let magic = buff.bytes().get(8 + 4 + 4);
         match magic {
             Option::None => {
-                return Err(InternalError::CorruptMessage("EOF reading magic"));
+                return Err(BrokerFailureSource::Serialization(anyhow!("EOF reading magic")));
             }
             Some(2) => {}
             Some(magic) => {
-                return Err(InternalError::UnexpectedRecordsetMagic(*magic));
+                return Err(BrokerFailureSource::Serialization(anyhow!("unexpectedf magic: {}", *magic)));
             }
         };
 
@@ -256,7 +259,7 @@ impl FromKafka for Recordset {
         for _ in 0..records_len {
             let len = get_zigzag64(buff);
             if buff.remaining() < len as usize {
-                return Err(InternalError::CorruptMessage("Recordset deserialization").into());
+                return Err(BrokerFailureSource::Serialization(anyhow!("corrupt recordset: EOF")));
             }
             let _attributes = buff.get_u8();
             let _timestamp_delta = get_zigzag64(buff);

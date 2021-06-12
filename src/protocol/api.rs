@@ -1,12 +1,12 @@
-use crate::error::{Result, BrokerFailureSource};
+use crate::error::{BrokerResult, BrokerFailureSource};
 use byteorder::BigEndian;
 use bytes::BytesMut;
 use bytes::{Buf, BufMut, ByteOrder};
 use std::fmt::Debug;
 use std::marker::Sized;
 use crate::error::InternalError;
-use crate::broker::CORRELATION_ID;
 use std::sync::atomic::Ordering;
+use crate::connection::CORRELATION_ID;
 
 #[repr(u16)]
 pub enum ApiKey {
@@ -27,7 +27,7 @@ pub trait FromKafka
 where
     Self: Sized,
 {
-    fn from_kafka(buff: &mut impl Buf) -> Result<Self>;
+    fn from_kafka(buff: &mut impl Buf) -> BrokerResult<Self>;
 }
 
 pub trait HasApiKey {
@@ -71,15 +71,14 @@ fn test (e: BrokerFailureSource, ei: InternalError) {
     let e = anyhow::Error::new(ei);
 }
 
-pub(crate) fn read_response<T>(buff: &mut impl Buf) -> (u32, Result<T,InternalError>)
+pub(crate) fn read_response<T>(buff: &mut impl Buf) -> BrokerResult<(u32,T)>
 where
     T: FromKafka,
 {
     let corr_id = buff.get_u32_be();
-    let response = T::from_kafka(buff).map_err(|e| {
-
-        let e: anyhow::Error = anyhow::Error::new(e);
-        InternalError::Serialization(e)
-    });
-    (corr_id, response)
+    let response = T::from_kafka(buff)?;//.map_err(|e| {
+        // let e: anyhow::Error = anyhow::Error::new(e);
+        // InternalError::Serialization(e)
+    // });
+    Ok((corr_id, response))
 }

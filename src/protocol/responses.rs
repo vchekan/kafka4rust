@@ -1,6 +1,6 @@
 use super::api::*;
 use crate::protocol::primitives::Recordset;
-use crate::error::Result;
+use crate::error::BrokerResult;
 use bytes::Buf;
 
 // 0
@@ -100,7 +100,7 @@ response!(ApiVersions {
     max_version: i16
 });
 
-response!(Result<ApiVersionsResponse1> {
+response!(BrokerResult<ApiVersionsResponse1> {
     error_code: ErrorCode,
     api_versions: [ApiVersions],
     throttle_time_ms: u32
