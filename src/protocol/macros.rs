@@ -48,8 +48,9 @@ macro_rules! response {
     };
 
     // Complex object
-    ($sname:ident { $($f:tt : $tp:tt),* }) => {
+    ( $(#$att:tt)* $sname:ident { $($f:tt : $tp:tt),* }) => {
         #[derive(Debug)]
+        $(#$att)*
         pub struct $sname {
             $(pub $f: get_type!($tp) ),*
         }

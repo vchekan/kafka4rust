@@ -130,7 +130,7 @@ pub async fn main_ui(bootstrap: &str) -> Result<()> {
                 tracing::event!(tracing::Level::DEBUG, %bootstrap, "Connecting");
                 tx.send(Cmd::ConnState(ConnState::Connecting)).await?;
                 let mut cluster = Cluster::with_bootstrap(&bootstrap, Some(Duration::from_secs(20)))?;
-                let topics_meta = cluster.fetch_topic_meta_and_update(&[]).await?;
+                let topics_meta = cluster.fetch_topic_meta_owned(&[]).await?;
                 tracing::debug_span!("Connected");
                 tx.send(Cmd::ConnState(ConnState::Connected)).await?;
                 let topics: Vec<_> = topics_meta

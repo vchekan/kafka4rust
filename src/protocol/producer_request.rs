@@ -33,7 +33,7 @@ pub(crate) struct ProduceRequest3<'a> {
     pub acks: i16, // 0 for no acknowledgments, 1 for only the leader and -1 for the full ISR.
     pub timeout: i32, // The time to await a response in ms
     pub topic_data:
-        &'a HashMap<&'a String, HashMap<u32, (&'a [QueuedMessage], &'a [QueuedMessage])>>,
+        &'a HashMap<&'a str, HashMap<u32, (&'a [QueuedMessage], &'a [QueuedMessage])>>,
 }
 
 impl HasApiKey for ProduceRequest3<'_> {

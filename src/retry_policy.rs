@@ -4,80 +4,41 @@ use std::future::Future;
 use log::debug;
 use std::task::{Context, Poll};
 use std::pin::Pin;
+use tokio_stream;
+use async_stream::stream;
+use async_std::prelude::Stream;
+use tokio::time::timeout as tokio_timeout;
+use crate::error::{BrokerFailureSource, BrokerResult};
 
-mod try_1 {
-    use super::*;
-
-    pub struct WithRetry {}
-
-    pub enum RetryResult {
-        Retry,
-        Terminate,
-    }
-
-    /// Evaluate either given error should be retried or is a terminal one
-    pub trait ErrorEvaluator {
-        fn eval(&self) -> RetryResult;
-    }
-
-
-    pub trait WithRetryFn<F: Future> {
-        fn with_retry(self, delay: Duration) -> Box<dyn Future<Output=F::Output>>;
-    }
-
-    impl<FUT, FUT_FACTORY, RES, ERR> WithRetryFn<FUT> for FUT_FACTORY
-        where
-            FUT_FACTORY: Fn() -> FUT,
-            FUT: Future<Output=Result<RES, ERR>>,
-            ERR: ErrorEvaluator
-    {
-        fn with_retry(self, delay: Duration) -> Box<dyn Future<Output=FUT::Output>> {
-            Box::new(async move {
-                loop {
-                    let future: FUT = self();
-                    let res = future.await;
-                    match res {
-                        Ok(res) => break Ok(res),
-                        Err(e) => {
-                            match e.eval() {
-                                RetryResult::Retry => {
-                                    debug!("Retry policy: will try again in {:?}", delay);
-                                    tokio::time::sleep(delay).await;
-                                    continue;
-                                }
-                                RetryResult::Terminate => {
-                                    debug!("Failed in retry");
-                                    break Err(e)
-                                }
-                            }
-                        }
+pub async fn with_retry<FF,F,R/*,E*/>(delay: Duration, timeout: Duration, f: FF) -> BrokerResult<R> //Result<R,E>
+    where
+        FF: Fn() -> F,
+        FF::Output: Future<Output=Result<R,/*E*/BrokerFailureSource>>,
+        F: Future<Output=Result<R,/*E*/BrokerFailureSource>>,
+        // E: ShouldRetry + std::fmt::Debug,
+{
+    loop {
+        match tokio_timeout(timeout, f()).await {
+            Ok(res) => match res {
+                Ok(res) => {
+                    debug!("with_retry: Ok");
+                    return Ok(res)
+                },
+                Err(e) => match e.should_retry() {
+                    true => {
+                        debug!("Error, will retry: {:?} in {:?}", e, delay);
+                        tokio::time::sleep(delay).await;
+                        continue;
                     }
+                    false => return Err(e),
                 }
-            })
+            }
+            Err(_) => return Err(BrokerFailureSource::Timeout)
         }
     }
 }
 
-mod try_pin {
-    use super::*;
-
-    pub struct Retry<F> {
-        f: F
-    }
-
-    trait WithRetry {
-        type Output;
-        fn with_retry(self) -> Retry<Self::Output>;
-    }
-
-    impl WithRetry for T where
-        T: Fn() -> F,
-        F: Future
-    {
-        type Output = F::Output;
-
-        fn with_retry(self) -> Retry<Self::Output> {
-            todo!()
-        }
-    }
+/// Evaluate either given error should be retried or is a terminal one
+pub trait ShouldRetry {
+    fn should_retry(&self) -> bool;
 }

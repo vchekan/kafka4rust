@@ -5,6 +5,8 @@ mod error;
 mod futures;
 mod murmur2a;
 mod producer;
+mod producer_buffer;
+mod buffer_pool;
 pub mod protocol;
 mod types;
 mod utils;

@@ -39,8 +39,9 @@ Parts:
 
 
 ## Send Buffer mutability design
-Send buffer should be accessible for write to be able to accept new messages without delay and at the same time, it 
-should be able 
+Send buffer have the following access patterns:
+* Write, short, from application thread
+* Read, long from flushing loop. Long because reference to enqueued messages are kept during sending. 
 
 ## Message based design
 Locking is hard to do without slowing down things. Let's see either message based design will solve it.

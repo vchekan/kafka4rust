@@ -69,6 +69,7 @@ impl BrokerConnection {
     /// Keys
     pub async fn connect(addr: SocketAddr) -> BrokerResult<Self> {
         let tcp = TcpStream::connect(&addr).await?;
+        debug!("Connected to {}", addr);
         let conn = BrokerConnection { addr, negotiated_api_version: vec![], tcp: Mutex::new(tcp)};
         //let conn = BrokerConnection::connect(addr)
             //.map_err(|e| InternalError::BrokerFailure(e))
@@ -85,7 +86,7 @@ impl BrokerConnection {
 
         let mut cursor = Cursor::new(buf);
         let (_corr_id, response): (u32, protocol::ApiVersionsResponse0) = read_response(&mut cursor)?;
-        trace!("Got ApiVersionResponse {:?}", response);
+        debug!("Got ApiVersionResponse {:?}", response);
         response.error_code.as_result()?;
         let negotiated_api_version = build_api_compatibility(&response);
 
@@ -150,6 +151,7 @@ impl BrokerConnection {
     }
 
     /// Generate correlation_id and serialize request to buffer
+    /// TODO: it does not make sense to have this function in connection class
     pub fn mk_request<R>(&self, request: R) -> BytesMut
     where
         R: protocol::Request,
@@ -163,9 +165,9 @@ impl BrokerConnection {
     }
 
     #[instrument(level = "debug", skip(self, request))]
-    pub async fn send_request2<R: FromKafka + Debug>(&self, mut request: BytesMut) -> BrokerResult<R> {
+    pub async fn send_request2<R: FromKafka + Debug>(&self, request: &mut BytesMut) -> BrokerResult<R> {
         debug!("Sending conn.request()...");
-        self.request(&mut request).await?;
+        self.request(request).await?;
         debug!("Sent conn.request(). Result buff len: {}", request.len());
         let mut cursor = Cursor::new(request);
         let (_corr_id, response): (_, R) = read_response(&mut cursor)?;

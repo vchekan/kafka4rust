@@ -47,21 +47,21 @@ response!(FetchAbortedTransactions {
 });
 
 // 3
-response!(MetadataResponse0 {
+response!(#[derive(Clone)] MetadataResponse0 {
     brokers: [Broker],
     topics: [TopicMetadata]
 });
-response!(Broker {
+response!(#[derive(Clone)] Broker {
     node_id: i32,
     host: String,
     port: i32
 });
-response!(TopicMetadata {
+response!(#[derive(Clone)] TopicMetadata {
     error_code: ErrorCode,
     topic: String,
     partition_metadata: [PartitionMetadata]
 });
-response!(PartitionMetadata {
+response!(#[derive(Clone)] PartitionMetadata {
     error_code: ErrorCode,
     partition: u32,
     leader: i32,

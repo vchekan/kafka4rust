@@ -43,7 +43,9 @@
 - [ ] Make sure that command send anr response are corresponding even in parallel scenario.
 - [ ] Producer sent message size limit
 - [ ] Evaluate `select!` usage for cancellation safety: https://tomaka.medium.com/a-look-back-at-asynchronous-rust-d54d63934a1c
+- [ ] Implement BufferPool to minimize large vectors allocations  
 - [ ] Use crossbeam::epoch::Pointable to store list of known brokers and metadata. Allows for lock-free walks over brokers.
+- [ ] Try actors approach: https://ryhl.io/blog/actors-with-tokio/
 
 ## Techniques
 * Try parallel-streams
@@ -79,3 +81,4 @@
 https://matklad.github.io/2020/10/15/study-of-std-io-error.html
 https://willcrichton.net/rust-api-type-patterns/
 https://aturon.github.io/blog/2015/08/27/epoch/
+https://ryhl.io/blog/actors-with-tokio/

@@ -21,7 +21,6 @@ use tracing_futures::Instrument;
 use std::future::Future;
 use tokio::sync::RwLock;
 use std::sync::Arc;
-use crossbeam::epoch;
 
 // TODO: offset start: -2, end: -1
 pub enum StartOffset {

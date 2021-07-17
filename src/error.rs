@@ -4,8 +4,7 @@
 use thiserror::Error;
 use std::io;
 use crate::types::BrokerId;
-use crate::retry_policy::RetryResult;
-use crate::retry_policy::ErrorEvaluator;
+use crate::retry_policy::ShouldRetry;
 
 //pub(crate) type Result<T,E=InternalError> = std::result::Result<T,E>;
 /// Result with focus on retry-ability. Higher-level function wrap the response into retry policy
@@ -98,8 +97,20 @@ pub enum BrokerFailureSource {
     NoBrokerAvailable,
 }
 
-impl ErrorEvaluator for BrokerFailureSource {
-    fn eval(&self) -> RetryResult {
-        todo!()
+impl ShouldRetry for BrokerFailureSource {
+    // TODO: Seems line no non-retryable errors, the only one is kafka non-retryable
+    fn should_retry(&self) -> bool {
+        use BrokerFailureSource::*;
+        match self {
+            Connect(_) => true,
+            KafkaErrorCode(e) => e.is_retriable(),
+            // TODO: seems "retryable" is not enough, need to distinct requirement to reset connection
+            Serialization(_) => true,
+            Timeout => true,
+            Write(_,_) => true,
+            Read(_,_) => true,
+            UnknownBrokerId(_) => true,
+            NoBrokerAvailable => true,
+        }
     }
 }
