@@ -2,6 +2,7 @@ use crate::error::BrokerResult;
 use std::future::Future;
 use tokio::time::Duration;
 use tracing_futures::Instrument;
+use log::{trace};
 
 pub(crate) enum RepeatResult<T> {
     Timeout,

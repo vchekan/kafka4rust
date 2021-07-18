@@ -56,7 +56,7 @@ macro_rules! response {
         }
 
         impl FromKafka for $sname {
-            fn from_kafka(_buff: &mut impl Buf) -> BrokerResult<$sname> {
+            fn from_kafka(_buff: &mut Bytes) -> BrokerResult<$sname> {
                 Ok($sname { $($f: <get_type!($tp)>::from_kafka(_buff)?),* })
             }
         }

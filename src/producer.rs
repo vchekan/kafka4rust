@@ -491,15 +491,6 @@ pub enum Response {
     },
 }
 
-/// Serialized message with topic and partition preserved because we need them in case topic
-/// resolved or topology change.
-#[derive(Debug)]
-pub(crate) struct QueuedMessage {
-    pub key: Option<Vec<u8>>,
-    pub value: Vec<u8>,
-    pub timestamp: u64,
-}
-
 pub enum TimestampType {
     Create = 0,
     LogAppend = 1,

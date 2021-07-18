@@ -1,12 +1,9 @@
 use crate::error::{BrokerResult, BrokerFailureSource};
-use byteorder::BigEndian;
-use bytes::BytesMut;
-use bytes::{Buf, BufMut, ByteOrder};
+use bytes::{BytesMut, Bytes};
+use bytes::{Buf, BufMut};
 use std::fmt::Debug;
 use std::marker::Sized;
 use crate::error::InternalError;
-use std::sync::atomic::Ordering;
-use crate::connection::CORRELATION_ID;
 
 #[repr(u16)]
 pub enum ApiKey {
@@ -27,7 +24,7 @@ pub trait FromKafka
 where
     Self: Sized,
 {
-    fn from_kafka(buff: &mut impl Buf) -> BrokerResult<Self>;
+    fn from_kafka(buff: &mut Bytes) -> BrokerResult<Self>;
 }
 
 pub trait HasApiKey {
@@ -47,15 +44,16 @@ pub(crate) fn write_request<T>(
     //correlation_id: u32,
     client_id: Option<&str>,
     buff: &mut BytesMut,
+    correlation_id: u32,
 ) where
     T: Request,
 {
-    let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
+    //let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
     buff.clear();
-    buff.put_u32_be(0); // Size: will fix after message is serialized
-    buff.put_u16_be(T::api_key() as u16);
-    buff.put_u16_be(T::api_version());
-    buff.put_u32_be(correlation_id);
+    buff.put_u32(0); // Size: will fix after message is serialized
+    buff.put_u16(T::api_key() as u16);
+    buff.put_u16(T::api_version());
+    buff.put_u32(correlation_id);
     client_id
         .unwrap_or(crate::connection::CLIENT_ID)
         .to_kafka(buff);
@@ -63,7 +61,7 @@ pub(crate) fn write_request<T>(
 
     // fix message size
     let size = buff.len() - 4;
-    BigEndian::write_u32(&mut buff[0..4], size as u32);
+    buff.get_mut(0..).unwrap().put_u32(size as u32);
 }
 
 fn test (e: BrokerFailureSource, ei: InternalError) {
@@ -71,11 +69,11 @@ fn test (e: BrokerFailureSource, ei: InternalError) {
     let e = anyhow::Error::new(ei);
 }
 
-pub(crate) fn read_response<T>(buff: &mut impl Buf) -> BrokerResult<(u32,T)>
+pub(crate) fn read_response<T>(buff: &mut Bytes) -> BrokerResult<(u32,T)>
 where
     T: FromKafka,
 {
-    let corr_id = buff.get_u32_be();
+    let corr_id = buff.get_u32();
     let response = T::from_kafka(buff)?;//.map_err(|e| {
         // let e: anyhow::Error = anyhow::Error::new(e);
         // InternalError::Serialization(e)

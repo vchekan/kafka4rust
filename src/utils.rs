@@ -1,4 +1,5 @@
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use log::{debug, error};
 
 /// Resolve adresses and produce only those which were successfully resolved.
 /// Unresolved entries will be logged with `error` level.

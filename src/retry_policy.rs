@@ -2,11 +2,6 @@ use std::time::Duration;
 use std::result::Result;
 use std::future::Future;
 use log::debug;
-use std::task::{Context, Poll};
-use std::pin::Pin;
-use tokio_stream;
-use async_stream::stream;
-use async_std::prelude::Stream;
 use tokio::time::timeout as tokio_timeout;
 use crate::error::{BrokerFailureSource, BrokerResult};
 

@@ -1,4 +1,4 @@
-use crate::producer::QueuedMessage;
+use crate::types::QueuedMessage;
 use crate::protocol::{ApiKey, HasApiKey, HasApiVersion, ProduceResponse3, Request, ToKafka};
 use crate::zigzag::{put_zigzag64, zigzag_len};
 use byteorder::{BigEndian, ByteOrder};
@@ -63,21 +63,21 @@ impl ProduceRequest3<'_> {
         serialize_string_opt(&self.transactional_id, buf);
 
         buf.reserve(2 + 4);
-        buf.put_i16_be(self.acks);
-        buf.put_i32_be(self.timeout);
+        buf.put_i16(self.acks);
+        buf.put_i32(self.timeout);
 
         buf.reserve(4);
-        buf.put_u32_be(self.topic_data.len() as u32);
+        buf.put_u32(self.topic_data.len() as u32);
         for (topic, data) in self.topic_data {
             buf.reserve(2);
-            buf.put_u16_be(topic.len() as u16);
+            buf.put_u16(topic.len() as u16);
             buf.extend_from_slice(topic.as_bytes());
 
             buf.reserve(4);
-            buf.put_u32_be(data.len() as u32);
+            buf.put_u32(data.len() as u32);
             for (partition, (recordset1, recordset2)) in data {
                 buf.reserve(4);
-                buf.put_u32_be(*partition);
+                buf.put_u32(*partition);
 
                 //
                 // Record batch
@@ -99,7 +99,7 @@ impl ProduceRequest3<'_> {
                 );
 
                 let recordset_bookmark = buf.len();
-                buf.put_u32_be(0);
+                buf.put_u32(0);
 
                 buf.put_slice(&ZERO64); // base offset
                 let batch_len_bookmark = buf.len();
@@ -108,11 +108,11 @@ impl ProduceRequest3<'_> {
                 buf.put_u8(2); // magic
                 let crc_bookmark = buf.len();
                 buf.put_slice(&ZERO32); // crc, will calculate at the end
-                buf.put_u16_be(
+                buf.put_u16(
                     CompressionType::None as u16    // TODO
                     | TimestampType::Create as u16,
                 );
-                buf.put_u32_be((recordset1.len() + recordset2.len()) as u32 - 1); // last offset delta
+                buf.put_u32((recordset1.len() + recordset2.len()) as u32 - 1); // last offset delta
 
                 // TODO: timestamp messages and get timestamp from the first one
                 // TODO: if timestamp is client generated, it is possible it will be negative.
@@ -123,16 +123,16 @@ impl ProduceRequest3<'_> {
                     .or_else(|| recordset2.first())
                     .expect("Empty recordset")
                     .timestamp;
-                buf.put_u64_be(first_timestamp);
+                buf.put_u64(first_timestamp);
                 // TODO: max timestamp
-                buf.put_u64_be(first_timestamp);
+                buf.put_u64(first_timestamp);
                 buf.put_slice(&MINUS_ONE64); // producer id
                 buf.put_slice(&MINUS_ONE16); // producer epoch
                 buf.put_slice(&MINUS_ONE32); // base sequence
 
                 // records array
                 let rs_len = recordset1.len() + recordset2.len();
-                buf.put_u32_be(rs_len as u32);
+                buf.put_u32(rs_len as u32);
                 assert!(rs_len > 0, "Empty recordset");
                 for (i, record) in recordset1.iter().enumerate() {
                     write_record(buf, i as u64, record.timestamp - first_timestamp, &record)
@@ -189,7 +189,7 @@ fn serialize_string_opt(s: &Option<&str>, buf: &mut BytesMut) {
     match s {
         Some(tx) => {
             buf.reserve(2 + tx.len());
-            buf.put_u16_be(tx.len() as u16);
+            buf.put_u16(tx.len() as u16);
             buf.put_slice(tx.as_bytes());
         }
         None => {

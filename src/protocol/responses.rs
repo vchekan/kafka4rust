@@ -1,7 +1,7 @@
 use super::api::*;
 use crate::protocol::primitives::Recordset;
 use crate::error::BrokerResult;
-use bytes::Buf;
+use bytes::Bytes;
 
 // 0
 response!(ProduceResponse3 {

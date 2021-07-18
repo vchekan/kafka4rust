@@ -10,9 +10,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 kafka4rust = {path = "../"}
-tokio = "0.3.0"
-lazy_static = "1.4.0"
-anyhow = "1.0.32"
+tokio = "1.8"
+lazy_static = "1.4"
+anyhow = "1.0"
 
-log = "0.4.11"
-simple_logger = "1.6.0"
+log = "0.4"
+simple_logger = "1.6"

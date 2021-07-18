@@ -73,3 +73,11 @@ new one, replaces map pointer with a new one and put old broker into delayed dro
 and cause `Broker` drop while `&Broker` is still shared?
 
 Another question: is epoch future-compatible?
+
+## Actor architecture
+Should BrokerConnection operate with byte arrays or kafka messages? Byte array is simple but error code analysis can't 
+be performed until message is sent back to the Buffer.
+
+Sending kafka request via channel is not easy. What would be type of message to be able to carry multiple types of 
+requests? Possibly `channel::<Box<dyn ToKafka>>()` with some additional trait to get response type from request type. But
+even then, how to call appropriate deserialize generic function, knowing a type?

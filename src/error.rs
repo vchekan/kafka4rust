@@ -74,6 +74,9 @@ pub enum BrokerFailureSource {
     #[error(transparent)]
     Connect(#[from] io::Error),
 
+    #[error("connection channel closed")]
+    ConnectionChannelClosed,
+
     #[error(transparent)]
     KafkaErrorCode(#[from] crate::protocol::ErrorCode),
 
@@ -103,6 +106,7 @@ impl ShouldRetry for BrokerFailureSource {
         use BrokerFailureSource::*;
         match self {
             Connect(_) => true,
+            ConnectionChannelClosed => true,
             KafkaErrorCode(e) => e.is_retriable(),
             // TODO: seems "retryable" is not enough, need to distinct requirement to reset connection
             Serialization(_) => true,

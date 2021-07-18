@@ -1,7 +1,5 @@
 //! Type aliases
 
-use crate::protocol::MetadataResponse0;
-
 pub(crate) type BrokerId = i32;
 pub(crate) type Partition = u32;
 pub(crate) type Offset = u64;
@@ -35,4 +33,13 @@ impl Into<PartitionMeta> for &crate::protocol::PartitionMetadata {
             leader: self.leader
         }
     }
+}
+
+/// Serialized message with topic and partition preserved because we need them in case topic
+/// resolved or topology change.
+#[derive(Debug)]
+pub(crate) struct QueuedMessage {
+    pub key: Option<Vec<u8>>,
+    pub value: Vec<u8>,
+    pub timestamp: u64,
 }

@@ -19,14 +19,12 @@
 //!
 //! Write channel: how to implement sender's pushback?
 
-use byteorder::BigEndian;
-use bytes::{ByteOrder, BytesMut};
+use bytes::{BytesMut, BufMut, Bytes, Buf};
 use std::net::SocketAddr;
 
-use crate::error::{BrokerFailureSource, InternalError, BrokerResult};
+use crate::error::{BrokerFailureSource, BrokerResult};
 use async_std::net::TcpStream;
 use async_std::prelude::*;
-use std::sync::Arc;
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use tracing;
@@ -34,25 +32,30 @@ use std::fmt::{Debug, Formatter};
 use std::sync::atomic::AtomicUsize;
 use crate::protocol;
 use crate::protocol::{write_request, read_response};
-use std::io::Cursor;
-use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
-use futures::TryFutureExt;
-use crate::protocol::FromKafka;
-
-// TODO: deal with u32 overflow
-pub static CORRELATION_ID: AtomicUsize = AtomicUsize::new(0);
+use tokio::sync::{mpsc, oneshot};
+use log::{debug, trace, info};
 
 pub(crate) const CLIENT_ID: &str = "k4rs";
 
-//#[derive(Clone)]
+pub(crate) enum Msg {
+    Request(BytesMut, oneshot::Sender<BrokerResult<BytesMut>>),
+}
+
 pub(crate) struct BrokerConnection {
     addr: SocketAddr,
     /// (api_key, agreed_version)
     negotiated_api_version: Vec<(i16, i16)>,
     // TODO: is this decision sound? Could we write 2 messages from 2 threads and read them out of order?
     //inner: Arc<Mutex<Inner>>,
-    tcp: Mutex<TcpStream>,
+    tcp: TcpStream,
+    rx: mpsc::Receiver<Msg>,
+    // TODO: handle overflow
+    correlation_id: u32,
+}
+
+#[derive(Clone)]
+pub(crate) struct Handle {
+    sender: mpsc::Sender<Msg>
 }
 
 // TODO: try to show local socket info too
@@ -67,71 +70,80 @@ impl Debug for BrokerConnection {
 impl BrokerConnection {
     /// Connect to address and issue ApiVersion request, build compatible Api Versions for all Api
     /// Keys
-    pub async fn connect(addr: SocketAddr) -> BrokerResult<Self> {
+    pub async fn connect(addr: SocketAddr, rx: mpsc::Receiver<Msg>) -> BrokerResult<Self> {
         let tcp = TcpStream::connect(&addr).await?;
         debug!("Connected to {}", addr);
-        let conn = BrokerConnection { addr, negotiated_api_version: vec![], tcp: Mutex::new(tcp)};
-        //let conn = BrokerConnection::connect(addr)
-            //.map_err(|e| InternalError::BrokerFailure(e))
-            // .await?;
+        let mut conn = BrokerConnection { addr, negotiated_api_version: vec![], tcp, rx, correlation_id: 0};
         let req = protocol::ApiVersionsRequest0 {};
         //let mut buf = Vec::with_capacity(1024);
         let mut buf = BytesMut::with_capacity(1024);
         // TODO: This is special case, we need correlationId and clientId before broker is created...
-        //let correlation_id = 0;
-
-        write_request(&req, None, &mut buf);
+        let correlation_id = 0;
+        write_request(&req, None, &mut buf, correlation_id);
         trace!("Requesting Api versions");
-        conn.request(&mut buf).await?;
+        conn.exchange_with_buf(&mut buf).await?;
 
-        let mut cursor = Cursor::new(buf);
-        let (_corr_id, response): (u32, protocol::ApiVersionsResponse0) = read_response(&mut cursor)?;
-        debug!("Got ApiVersionResponse {:?}", response);
+        let mut buf = buf.freeze();
+        let (corr_id, response): (u32, protocol::ApiVersionsResponse0) = read_response(&mut buf)?;
+        debug!("Got ApiVersionResponse {:?}; correlation_id: {}, buf: {:?}", response, corr_id, buf);
         response.error_code.as_result()?;
         let negotiated_api_version = build_api_compatibility(&response);
 
-        Ok(BrokerConnection{
+        Ok(BrokerConnection {
             addr: conn.addr,
             negotiated_api_version,
-            tcp: conn.tcp
+            tcp: conn.tcp,
+            rx: conn.rx,
+            correlation_id: 1,
         })
     }
 
-    // /// Connect to address but do not perform any check beyond successful tcp connection.
-    // pub async fn connect(addr: SocketAddr) -> Result<Self> {
-    //     let tcp = TcpStream::connect(&addr).await?;
-    //     let conn = BrokerConnection { addr, negotiated_api_version: vec![], tcp, };
-    //     Ok(conn)
-    // }
+    async fn handle(&mut self, msg: Msg) {
+        match msg {
+            Msg::Request(mut msg, respond) => {
+                // correlation has offest 8 bytes
+                msg.get_mut(8..)
+                    .expect("Corrupt message, cant write correnationId")
+                    .put_u32(self.correlation_id);
+                self.correlation_id += 1;
+                let res = match self.exchange_with_buf(&mut msg).await {
+                    Ok(()) => respond.send(Ok(msg)),
+                    Err(e) => respond.send(Err(e))
+                };
+            }
+        };
+    }
 
-    /// Write request from buffer into tcp and reuse the buffer to read response
+    /// Write request from buffer into tcp and reuse the buffer to read response.
+    /// Message size is read from the buffer, so buffer will position to the correlation_id
     #[instrument(level = "debug", err, skip(self, buf))]
-    pub async fn request(&self, buf: &mut BytesMut) -> BrokerResult<()> {
-        let mut tcp = self.tcp.lock().await;
-        trace!("Sending request[{}] to {:?}", buf.len(), tcp.peer_addr());
-        tcp.write_all(&buf).instrument(tracing::debug_span!("writing request")).await
-            .map_err(|e| BrokerFailureSource::Write(format!("writing {} bytes to socket {:?}", buf.len(), tcp.peer_addr()), e))?;
+    pub async fn exchange_with_buf(&mut self, buf: &mut BytesMut) -> BrokerResult<()> {
+        trace!("Sending request[{}] to {:?}", buf.len(), self.tcp.peer_addr());
+        self.tcp.write_all(&buf).instrument(tracing::debug_span!("writing request")).await
+            .map_err(|e| BrokerFailureSource::Write(format!("writing {} bytes to socket {:?}", buf.len(), self.tcp.peer_addr()), e))?;
 
         // TODO: buffer reuse
         buf.clear();
         // Read length into buffer
         buf.resize(4, 0_u8);
         // TODO: ensure length is sane
-        tcp.read_exact(buf).instrument(tracing::info_span!("reading msg len")).await
+        self.tcp.read_exact(buf).instrument(tracing::info_span!("reading msg len")).await
             .map_err(|e| BrokerFailureSource::Read(buf.len(), e))?;
-        let len = BigEndian::read_u32(&buf);
+        let len = buf.get_u32();
         //debug!("Response len: {}, reading body...", len);
         buf.resize(len as usize, 0_u8);
-        tcp.read_exact(buf).instrument(tracing::info_span!("reading msg body")).await
+        self.tcp.read_exact(buf).instrument(tracing::info_span!("reading msg body")).await
             .map_err(|e| BrokerFailureSource::Read(buf.len(), e))?;
 
         // TODO: validate correlation_id
-        let _correlation_id = byteorder::LittleEndian::read_u32(&buf);
+        // TODO: why little endian???
+        // let correlation_id = buf.get_u32(); //byteorder::LittleEndian::read_u32(&buf);
+        // debug!("Read correlation_id: {}", correlation_id);
         Ok(())
     }
 
     #[instrument(level = "debug", err, skip(self, request))]
-    pub async fn send_request<R>(&self, request: &R) -> BrokerResult<R::Response>
+    pub async fn exchange<R>(&mut self, request: &R) -> BrokerResult<R::Response>
     where
         R: protocol::Request,
     {
@@ -140,42 +152,16 @@ impl BrokerConnection {
         let mut buff = BytesMut::with_capacity(20 * 1024); //Vec::with_capacity(1024);
         //let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
         // let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
-        protocol::write_request(request, None, &mut buff);
+        protocol::write_request(request, None, &mut buff, self.correlation_id);
+        self.correlation_id += 1;
 
-        self.request(&mut buff).await?;
-        let mut cursor = Cursor::new(buff);
-        let (_corr_id, response) = read_response(&mut cursor)?;
+        self.exchange_with_buf(&mut buff).await?;
+        //let mut cursor = Cursor::new(buff);
+        let (_corr_id, response) = read_response(&mut buff.freeze())?;
         // TODO: check correlationId
         // TODO: check for response error
         Ok(response)
     }
-
-    /// Generate correlation_id and serialize request to buffer
-    /// TODO: it does not make sense to have this function in connection class
-    pub fn mk_request<R>(&self, request: R) -> BytesMut
-    where
-        R: protocol::Request,
-    {
-        // TODO: buffer management
-        // TODO: dynamic buffer allocation
-        let mut buff = BytesMut::with_capacity(10 * 1024); //Vec::with_capacity(1024);
-        protocol::write_request(&request, None, &mut buff);
-
-        buff
-    }
-
-    #[instrument(level = "debug", skip(self, request))]
-    pub async fn send_request2<R: FromKafka + Debug>(&self, request: &mut BytesMut) -> BrokerResult<R> {
-        debug!("Sending conn.request()...");
-        self.request(request).await?;
-        debug!("Sent conn.request(). Result buff len: {}", request.len());
-        let mut cursor = Cursor::new(request);
-        let (_corr_id, response): (_, R) = read_response(&mut cursor)?;
-        // TODO: check correlationId
-        // TODO: check for response error
-        Ok(response)
-    }
-
 }
 
 fn build_api_compatibility(them: &protocol::ApiVersionsResponse0) -> Vec<(i16, i16)> {
@@ -213,48 +199,81 @@ fn build_api_compatibility(them: &protocol::ApiVersionsResponse0) -> Vec<(i16, i
         .collect()
 }
 
+async fn run(addr: SocketAddr, rx: mpsc::Receiver<Msg>) {
+    debug!("run: started broker connect");
+    let conn = BrokerConnection::connect(addr, rx).await;
+    match conn {
+        Ok(mut conn) => {
+            debug!("run: connected, starting message loop");
+            while let Some(msg) = conn.rx.recv().await {
+                conn.handle(msg).await;
+            }
+        }
+        Err(e) => {
+            info!("Failed to connect broker: {}", e);
+        }
+    }
+}
+
+//
+// Handle
+//
+impl Handle {
+    pub fn new(addr: SocketAddr) -> Self {
+        let (tx, rx) = mpsc::channel(1);
+        tokio::spawn(run(addr, rx));
+        Handle {sender: tx}
+    }
+
+    pub async fn query(&self, request: BytesMut) -> BrokerResult<Bytes> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = self.sender.send(Msg::Request(request, tx)).await {
+            return Err(BrokerFailureSource::ConnectionChannelClosed);
+        }
+        
+        match rx.await {
+            Ok(response) => Ok(Bytes::from(response?)),
+            Err(e) => Err(BrokerFailureSource::ConnectionChannelClosed)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::{
         read_response, write_request, ApiVersionsRequest0, ApiVersionsResponse0,
     };
-    use async_std::task;
     use std::env;
-    use std::io::Cursor;
     use std::net::ToSocketAddrs;
-    use std::sync::Arc;
-    use crate::error::InternalError;
 
-    #[test]
-    fn it_works() {
-        simple_logger::init_with_level(log::Level::Debug).unwrap();
+    #[tokio::test]
+    async fn it_works() -> anyhow::Result<()> {
+        simple_logger::SimpleLogger::from_env().with_level(log::LevelFilter::Debug).init().unwrap();
+        debug!("test");
 
-        let bootstrap = env::var("kafka-bootstrap").unwrap_or("localhost:9092".to_string());
+        let bootstrap = env::var("kafka-bootstrap").unwrap_or("127.0.0.1:9092".to_string());
         let addr = bootstrap
             .to_socket_addrs()
             .unwrap()
             .next()
             .expect(format!("Host '{}' not found", bootstrap).as_str());
 
-        task::block_on(async move {
-            let conn = Arc::new(BrokerConnection::connect(addr).await.unwrap());
-            info!("conn: {:?}", conn);
-            for _ in 0..2 {
-                let conn = conn.clone();
-                task::spawn(async move {
-                    let request = ApiVersionsRequest0 {};
-                    let mut buff = BytesMut::with_capacity(1024); //Vec::new();
-                    write_request(&request, 0, None, &mut buff);
-                    conn.request(&mut buff).await.unwrap();
-                    let (correlation_id, versions): (_, std::result::Result<ApiVersionsResponse0,InternalError>) =
-                        read_response(&mut Cursor::new(buff));
-                    debug!(
-                        "correlationId: {}, versions: {:?}",
-                        correlation_id, versions
-                    );
-                });
-            }
-        });
+        let (tx, rx) = mpsc::channel::<Msg>(1);
+        for _ in 0..2 {
+            let request = ApiVersionsRequest0 {};
+            let mut buff = BytesMut::with_capacity(1024);
+            write_request(&request, None, &mut buff, 1);
+
+            let conn = Handle::new(addr);
+            let mut response = conn.query(buff).await?;
+            let (correlation_id, versions): (_, ApiVersionsResponse0) = read_response(&mut response)?;
+
+            debug!(
+                "correlationId: {}, versions: {:?}",
+                correlation_id, versions
+            );
+        }
+        Ok(())
     }
 }
