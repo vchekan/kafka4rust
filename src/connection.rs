@@ -19,6 +19,9 @@
 //!
 //! Write channel: how to implement sender's pushback?
 
+use crate::protocol::FromKafka;
+use crate::protocol::ToKafka;
+use std::time::Duration;
 use bytes::{BytesMut, BufMut, Bytes, Buf};
 use std::net::SocketAddr;
 
@@ -29,7 +32,6 @@ use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use tracing;
 use std::fmt::{Debug, Formatter};
-use std::sync::atomic::AtomicUsize;
 use crate::protocol;
 use crate::protocol::{write_request, read_response};
 use tokio::sync::{mpsc, oneshot};
@@ -41,7 +43,7 @@ pub(crate) enum Msg {
     Request(BytesMut, oneshot::Sender<BrokerResult<BytesMut>>),
 }
 
-pub(crate) struct BrokerConnection {
+struct BrokerConnection {
     addr: SocketAddr,
     /// (api_key, agreed_version)
     negotiated_api_version: Vec<(i16, i16)>,
@@ -54,8 +56,9 @@ pub(crate) struct BrokerConnection {
 }
 
 #[derive(Clone)]
-pub(crate) struct Handle {
-    sender: mpsc::Sender<Msg>
+pub(crate) struct ConnectionHandle {
+    sender: mpsc::Sender<Msg>,
+    addr: SocketAddr    // No functionality, just for display
 }
 
 // TODO: try to show local socket info too
@@ -64,6 +67,12 @@ impl Debug for BrokerConnection {
         f.debug_struct("BrokerConnection")
             .field("addr", &self.addr)
             .finish()
+    }
+}
+
+impl Debug for ConnectionHandle { 
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> { 
+        f.debug_struct("ConectionHandle").field("addr", &self.addr).finish()
     }
 }
 
@@ -142,26 +151,26 @@ impl BrokerConnection {
         Ok(())
     }
 
-    #[instrument(level = "debug", err, skip(self, request))]
-    pub async fn exchange<R>(&mut self, request: &R) -> BrokerResult<R::Response>
-    where
-        R: protocol::Request,
-    {
-        // TODO: buffer management
-        // TODO: ensure capacity (BytesMut will panic if out of range)
-        let mut buff = BytesMut::with_capacity(20 * 1024); //Vec::with_capacity(1024);
-        //let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
-        // let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
-        protocol::write_request(request, None, &mut buff, self.correlation_id);
-        self.correlation_id += 1;
+    // #[instrument(level = "debug", err, skip(self, request))]
+    // pub async fn exchange<R>(&mut self, request: &R) -> BrokerResult<R::Response>
+    // where
+    //     R: protocol::Request,
+    // {
+    //     // TODO: buffer management
+    //     // TODO: ensure capacity (BytesMut will panic if out of range)
+    //     let mut buff = BytesMut::with_capacity(20 * 1024); //Vec::with_capacity(1024);
+    //     //let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
+    //     // let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
+    //     protocol::write_request(request, None, &mut buff, self.correlation_id);
+    //     self.correlation_id += 1;
 
-        self.exchange_with_buf(&mut buff).await?;
-        //let mut cursor = Cursor::new(buff);
-        let (_corr_id, response) = read_response(&mut buff.freeze())?;
-        // TODO: check correlationId
-        // TODO: check for response error
-        Ok(response)
-    }
+    //     self.exchange_with_buf(&mut buff).await?;
+    //     //let mut cursor = Cursor::new(buff);
+    //     let (_corr_id, response) = read_response(&mut buff.freeze())?;
+    //     // TODO: check correlationId
+    //     // TODO: check for response error
+    //     Ok(response)
+    // }
 }
 
 fn build_api_compatibility(them: &protocol::ApiVersionsResponse0) -> Vec<(i16, i16)> {
@@ -218,14 +227,14 @@ async fn run(addr: SocketAddr, rx: mpsc::Receiver<Msg>) {
 //
 // Handle
 //
-impl Handle {
+impl ConnectionHandle {
     pub fn new(addr: SocketAddr) -> Self {
         let (tx, rx) = mpsc::channel(1);
-        tokio::spawn(run(addr, rx));
-        Handle {sender: tx}
+        tokio::spawn(run(addr.clone(), rx));
+        ConnectionHandle {sender: tx, addr}
     }
 
-    pub async fn query(&self, request: BytesMut) -> BrokerResult<Bytes> {
+    async fn query(&self, request: BytesMut) -> BrokerResult<Bytes> {
         let (tx, rx) = oneshot::channel();
         if let Err(e) = self.sender.send(Msg::Request(request, tx)).await {
             return Err(BrokerFailureSource::ConnectionChannelClosed);
@@ -234,6 +243,36 @@ impl Handle {
         match rx.await {
             Ok(response) => Ok(Bytes::from(response?)),
             Err(e) => Err(BrokerFailureSource::ConnectionChannelClosed)
+        }
+    }
+
+    #[instrument(level = "debug", err, skip(self, request))]
+    async fn exchange<RQ: protocol::Request>(&self, request: &RQ) -> BrokerResult<RQ::Response> {
+        // TODO: buffer management
+        // TODO: ensure capacity (BytesMut will panic if out of range)
+        let mut buff = BytesMut::with_capacity(20 * 1024); //Vec::with_capacity(1024);
+        //let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
+        // let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
+        // TODO: remove correnation_id parameter because it is fixed later in handler?
+        protocol::write_request(request, None, &mut buff, 0);
+
+        let mut buff = self.query(buff).await?;
+        let (_corr_id, response) = read_response(&mut buff)?;
+        // TODO: check correlationId
+        // TODO: check for response error
+        Ok(response)
+    }
+
+
+    #[instrument(level="debug")]
+    pub async fn fetch_topic_with_broker(&self, topics: Vec<String>, timeout: Duration) -> BrokerResult<protocol::MetadataResponse0> {
+        debug!("fetch_topic_with_broker");
+        let req = protocol::MetadataRequest0 {
+            topics,
+        };
+        match tokio::time::timeout(timeout, self.exchange(&req)).await {
+            Err(_) => Err(BrokerFailureSource::Timeout),
+            Ok(res) => res
         }
     }
 }
@@ -265,7 +304,7 @@ mod tests {
             let mut buff = BytesMut::with_capacity(1024);
             write_request(&request, None, &mut buff, 1);
 
-            let conn = Handle::new(addr);
+            let conn = ConnectionHandle::new(addr);
             let mut response = conn.query(buff).await?;
             let (correlation_id, versions): (_, ApiVersionsResponse0) = read_response(&mut response)?;
 

@@ -1,6 +1,5 @@
-use crate::cluster::Cluster;
 use crate::error::{KafkaError, InternalError, BrokerResult, BrokerFailureSource};
-use crate::murmur2a;
+use crate::{murmur2a, ClusterHandler};
 use crate::protocol;
 use crate::protocol::{ErrorCode, ProduceResponse3, PartitionResponse, ProduceResponse};
 use crate::types::*;
@@ -27,6 +26,7 @@ use futures::stream::{self, StreamExt};
 use tracing::field::debug;
 use crate::retry_policy::with_retry;
 use crate::producer_buffer::{BufferingResult, Buffer};
+use log::{debug, error};
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -198,7 +198,7 @@ impl<'a> ProducerBuilder<'a> {
 pub struct Producer {
     bootstrap: String,
     buffer: Arc<Mutex<Buffer>>,
-    cluster: Arc<Cluster>,
+    cluster: ClusterHandler,
     partitioner: Box<dyn Partitioner>,
     // TODO: is kafka topic case-sensitive?
     //topics_meta: HashMap<String, ProducerTopicMetadata>,
@@ -245,7 +245,7 @@ impl Producer {
                 builder.brokers
             )).into());
         }
-        let cluster = Arc::new(Cluster::new(seed_list, builder.send_timeout));
+        let cluster = ClusterHandler::new(seed_list, builder.send_timeout);
         // let cluster2 = cluster.clone();
         let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(1000);
         // let mut ack_tx2 = ack_tx.clone();

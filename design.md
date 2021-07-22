@@ -74,10 +74,70 @@ and cause `Broker` drop while `&Broker` is still shared?
 
 Another question: is epoch future-compatible?
 
-## Actor architecture
+# Actor architecture
 Should BrokerConnection operate with byte arrays or kafka messages? Byte array is simple but error code analysis can't 
 be performed until message is sent back to the Buffer.
 
 Sending kafka request via channel is not easy. What would be type of message to be able to carry multiple types of 
 requests? Possibly `channel::<Box<dyn ToKafka>>()` with some additional trait to get response type from request type. But
 even then, how to call appropriate deserialize generic function, knowing a type?
+
+But even with Actor architecture, it is easy to have Lock's architecture problem, for example:
+```rust
+impl Cluster {
+    fn get_or_fetch_metadata(&mut self, topic: &str) {
+        // if in self.cache, get it
+        //otherwise, connect and fetch
+        self.connect_to_any_broker_and_fetch_metadata().await;
+    }
+}
+```
+
+Fetching to a broker and getting metadata might take long time, especialy if some failure recovery is done by the 
+cluster. As `&mut self` is in scope, it means, that no other message can be processed, including flushing buffers which 
+do have all needed metadata.
+
+The solution is a Message Bus architecture. When Buffer misses metadata, it sends request to Cluster but does not wait
+for response. Cluster relays metadata request to a connection, and does not await for response either. Instead metadata 
+is published on a bus and any interested party can update their topology. 
+
+## Components and interaction
+### Initialization
+Client adds a message to the Buffer.
+Buffer detects misses in leader map for this topic and send "meta_needed(topic)" to the cluster.
+Cluster keeps a list of topics resolved and "in progress", and if a miss, sends message to Resolver.
+Resolver adds (if missing) topic to the list of topics to be resolved.
+Resolver periodically issue "fetch_meta" command to the list of brokers from bootstrap + known brokers.
+Resolver keeps and updates list of known brokers by analyzing responses.
+Resolver sends to the Cluster Ok(meta) or Err(TopicNotFound(topic)) and removes topic from the list. If request failed
+  or LeaderNotFound then do nothing and retry next time.
+Cluster sends LeaderMap to Buffer.
+Buffer keeps leader map to be able to partrition messages when "flush()" .
+
+### Failure recovery (transport error)
+Tcp connection is reset or send times out. ConnectionBroker sends "LeaderDown(leaderId)" to Cluster.  
+Cluster disposes the connection, removes it from maps and sends LeaderMap to Buffer.
+Cluster sends message to Resolver with all topics which were handled by this broker at least partially.
+
+### Failure recovery (kafka error code)
+Connection performs exchange and deserialization. If there is an error NotLeaderForPartition then send message to 
+  Cluster (PartitionDown(topic, partition))
+Cluster marks topic/partition as "down", sends LeaderMap to Buffer and recovery requst to Resolver. 
+
+### Buffer flushing
+Buffer gets timer event, or message itself when size threshold is exceeded.
+Buffer groups messages by leader, according to leader map.
+Buffer sends group to Cluster Produce(grouped_messages, respond_to).
+  ??? What is the type of respond_to?
+Cluster routes messages to appropriate Connection. If leader is missing, Nack is sent to Buffer (possible if LeaderMap 
+  update has been sent but not processed by Buffer yet).
+Connection performs exchange. 
+    If tcp error happens, Nack is sent to respond_to.
+    If NotLeaderForPartition send Cluster PartitionDown()
+    If any partition or the whole message error then send Nack(topic, Partition)
+    If success then send Ack(topic,partition) to respond_to
+    
+### Components
+#### Resolver
+Resolves multiple topics at the time. Reasoning: when failure happen, multiple topics will break and making a query for 
+every one of them does not make sense.  

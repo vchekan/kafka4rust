@@ -1,65 +1,183 @@
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio::select;
-use crate::protocol::MetadataResponse0;
-use std::collections::HashSet;
+use tokio::sync::mpsc;
+use std::collections::{HashSet, HashMap};
 use std::time::Duration;
-use log::{debug, error};
-use crate::Cluster;
-use tracing::field::debug;
-use tokio::sync::RwLock;
-use std::sync::Arc;
+use log::{debug, info, warn, error};
+use std::net::SocketAddr;
+use crate::connection::ConnectionHandle;
+use crate::protocol;
+use crate::error::{BrokerResult, BrokerFailureSource};
 
-pub(crate) enum Cmd {
-    ResolveTopic(String),
-    ResolvedTopic(String),
+pub struct ResolverHandle {
+    tx: mpsc::Sender<Msg>
 }
 
-pub(crate) fn start_resolver(mut requests: Receiver<Cmd>, result_tx: Sender<Vec<String>>) {
-    let mut topics = HashSet::<String>::new();
+struct Resolver {
+    rx: mpsc::Receiver<Msg>,
+    tx: mpsc::Sender<Msg>,  // need to send Timer messages to self
+    listener: mpsc::Sender<BrokerResult<protocol::TopicMetadata>>,
+    brokers: Vec<SocketAddr>,
+    topics: HashSet<String>,
+    // used to filter out "no change" events
+    state: HashMap<String,Vec<protocol::PartitionMetadata>>
+}
 
-    tokio::task::spawn(async move {
-        loop {
-            select! {
-                // Listen to new topic resolve inquiry
-                topic = requests.recv() => {
-                    match topic {
-                        Some(Cmd::ResolveTopic(topic)) => {
-                            topics.insert(topic); //{
-                                // debug!("Added {} topic to resolving list", topic);
-                            // } else {
-                                // debug!("Topic {} is already being resolved", topic)
-                            // }
-                        }
-                        Some(Cmd::ResolvedTopic(topic)) => {
-                            if topics.remove(&topic) {
-                                debug!("removing resolved topic from resolver's list: {}", topic);
-                            } else {
-                                warn!("resolved to remove resolved topic which was not in the resolving list: {}", topic);
+#[derive(Debug)]
+enum Msg {
+    ResolveTopic(String),
+    ResolvedTopic(protocol::MetadataResponse0),
+    Timer,
+}
+
+impl ResolverHandle {
+    pub fn new(brokers: Vec<SocketAddr>, listener: mpsc::Sender<BrokerResult<protocol::TopicMetadata>>) -> Self {
+        let (tx, rx) = mpsc::channel(1);
+        let resolver = Resolver::new(brokers, rx, tx.clone(), listener);
+        tokio::spawn(run(resolver));
+        ResolverHandle { tx }
+    }
+
+    pub async fn start_resolve(&self, topic: String) {
+        if let Err(e) = self.tx.send(Msg::ResolveTopic(topic)).await {
+            error!("Resolver channel failed: {}", e);
+        }
+    }
+}
+
+impl Resolver {
+    fn new(brokers: Vec<SocketAddr>, rx: mpsc::Receiver<Msg>, tx: mpsc::Sender<Msg>, listener: mpsc::Sender<BrokerResult<protocol::TopicMetadata>>) -> Self {
+        Resolver {
+            rx,
+            tx,
+            listener,
+            brokers,
+            topics: HashSet::new(),
+            state: HashMap::new(),
+        }
+    }
+
+    async fn handle(&mut self, msg: Msg) {
+        debug!("resolver:handle()");
+        match msg {
+            Msg::ResolveTopic(topic) => self.add_topic(topic).await,
+            Msg::Timer => {
+                let topics = self.topics.clone();
+                let brokers = self.brokers.clone();
+                debug!("Resolver: timer: topics: {:?} brokers: {:?}", topics, brokers);
+                let tx = self.tx.clone();
+
+                tokio::spawn(async move {
+                    for broker in brokers {
+                        let conn = ConnectionHandle::new(broker);
+                        // TODO: config timeout
+                        let timeout = Duration::from_secs(10);
+                        debug!("Resolver: sending meta request");
+                        match conn.fetch_topic_with_broker(topics.iter().cloned().collect(), timeout).await {
+                            Ok(meta) => {
+                                debug!("Resolver got meta");
+                                if tx.send(Msg::ResolvedTopic(meta)).await.is_err() {
+                                    error!("Failed to send resolve message to self");
+                                }
+                            },
+                            Err(e) => {
+                                debug!("Resolver failed meta {}", e);
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                                if tx.send(Msg::Timer).await.is_err() {
+                                    info!("Self channel closed. Exiting resolver loop");
+                                    return;
+                                }
                             }
                         }
-                        None => {
-                            debug!("resolver channel closed, exiting resolver loop");
-                            return;
-                        }
                     }
-                }
-
-                // Attempt to fetch metadata periodically
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                    // let topics: Vec<&str> = topics.iter().map(|t| t.as_str()).collect::<Vec<_>>();
-                    // let meta = match cluster.fetch_topic_meta_no_update(&topics).await {
-                    //     Ok(meta) => meta,
-                    //     Err(e) => {
-                    //         debug!("start_resolver: Failed to get meta: {:?}", e);
-                    //         continue;
-                    //     }
-                    // };
-                    if let Err(e) = result_tx.send(topics.iter().cloned().collect()).await {
-                        error!("No listener for resolver loop result. Exiting resolver loop");
-                        return;
+                });
+            }
+            Msg::ResolvedTopic(meta) => {
+                debug!("Resolver handles meta");
+                // TODO: update known brokers
+                for topic in meta.topics {
+                    if topic.error_code.is_ok() {
+                        let (ok_partitions, err_partitions): (Vec<_>, Vec<_>) = topic.partition_metadata.iter().partition(|p| p.error_code.is_ok());
+                        if err_partitions.is_empty() {
+                            debug!("Resolved topic, removing from resolver: '{}'", topic.topic);
+                            self.remove_topic(&topic.topic);
+                            self.fire_if_changed(topic).await;
+                        }
+                    } else if topic.error_code.is_retriable() {
+                        self.fire_if_changed(topic).await;
+                    } else {
+                        warn!("Non-resolvable error code, removing topic from resolver: '{}'", topic.topic);
+                        self.remove_topic(&topic.topic);
+                        self.listener.send(Err(BrokerFailureSource::KafkaErrorCode(topic.error_code)));
                     }
                 }
             }
         }
-    });
+    }
+
+    async fn add_topic(&mut self, topic: String) {
+        self.topics.insert(topic);
+        self.tx.send(Msg::Timer).await;
+    }
+
+    fn remove_topic(&mut self, topic: &String) {
+        self.state.remove(topic);
+        self.topics.remove(topic);
+    }
+
+    async fn fire_if_changed(&mut self, meta: protocol::TopicMetadata) {
+        let mut fire = false;
+
+        match self.state.get_mut(&meta.topic) {
+            Some(partitions) => {
+                if (partitions.len() != meta.partition_metadata.len()) {
+                    fire = true;
+                } else if partitions.iter().zip(meta.partition_metadata.iter()).any(|(a, b)| { a.error_code != b.error_code || a.partition != b.partition || a.leader != b.leader }) {
+                    fire = true
+                }
+                if fire {
+                    partitions.clear();
+                    partitions.extend_from_slice(&meta.partition_metadata[..])
+                }
+            }
+            None => {
+                self.state.insert(meta.topic.clone(), meta.partition_metadata.clone());
+                fire = true;
+            }
+        }
+        if fire {
+            if self.listener.send(Ok(meta)).await.is_err() {
+                error!("Resolver: failed to senf metadata update to listener")
+            }
+        }
+    }
+}
+
+async fn run(mut resolver: Resolver) {
+    debug!("resolver:run started");
+    while let Some(msg) = resolver.rx.recv().await {
+        debug!("resolver:run got message: {:?}", msg);
+        resolver.handle(msg).await;
+    }
+
+    debug!("resolver:run finished");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resolver::ResolverHandle;
+
+    #[tokio::test]
+    async fn test() {
+        simple_logger::SimpleLogger::from_env().with_level(log::LevelFilter::Debug).init().unwrap();
+        debug!("test");
+
+        let (bus_tx, mut bus_rx) = tokio::sync::mpsc::channel(1);
+
+        let resolver = ResolverHandle::new(vec!["127.0.0.1:9092".parse().unwrap()], bus_tx);
+        resolver.start_resolve("test1".to_string()).await;
+
+        let response = bus_rx.recv().await.unwrap().unwrap();
+        assert!(response.error_code.is_ok());
+        println!(">>>{:?}", response);
+    }
 }

@@ -47,6 +47,8 @@
 - [ ] Implement BufferPool to minimize large vectors allocations  
 - [ ] Use crossbeam::epoch::Pointable to store list of known brokers and metadata. Allows for lock-free walks over brokers.
 - [ ] Try actors approach: https://ryhl.io/blog/actors-with-tokio/
+- [ ] Test when topic partition count changes (topic re-create)
+- [ ] Are topics case-sensitive? 
 
 ## Techniques
 * Try parallel-streams

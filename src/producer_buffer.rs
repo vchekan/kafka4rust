@@ -1,16 +1,16 @@
 use std::collections::{HashMap, VecDeque};
-use crate::{Cluster, protocol, Response, buffer_pool};
-use std::sync::Arc;
-use crate::producer::QueuedMessage;
+use crate::{ClusterHandler, protocol, buffer_pool};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use crate::protocol::{ProduceResponse3};
 use crate::error::BrokerResult;
 use std::time::Duration;
 use crate::retry_policy::with_retry;
-use crate::types::{BrokerId, Partition};
+use crate::types::{BrokerId, Partition, QueuedMessage};
 use tracing::{self, event, Level};
 use tokio::sync::RwLock;
 use bytes::BytesMut;
+use log::{debug, info, warn, error};
+use crate::producer::Response;
 
 /// Q: should buffer data be shared or copied when sending to broker?
 /// A:
@@ -34,17 +34,17 @@ use bytes::BytesMut;
 ///
 #[derive(Debug)]
 pub(crate) struct Buffer {
-    topic_queues: Arc<RwLock<HashMap<String, Vec<PartitionQueue>>>>,
+    topic_queues: HashMap<String, Vec<PartitionQueue>>,
     // Current buffer size, in bytes
     size: u32,
     size_limit: u32,
-    cluster: Arc<Cluster>,
+    cluster: ClusterHandler,
 }
 
 impl Buffer {
-    pub fn new(cluster: Arc<Cluster>) -> Self {
+    pub fn new(cluster: ClusterHandler) -> Self {
         Buffer {
-            topic_queues: Arc::new(RwLock::new(HashMap::new())),
+            topic_queues: HashMap::new(),
             size: 0,
             // TODO: make configurable
             size_limit: 100 * 1024 * 1024,
@@ -85,7 +85,7 @@ impl Buffer {
     /// TODO: rust BC to become smarter. Parameter `cluster` is member of `self` but I have to pass it separately because borrow checker
     /// complains about `self` being borrowed 2 times mutably.
     //#[instrument(level = "debug", err, skip(self, acks, cluster))]
-    pub async fn flush(&self, acks: &Sender<Response>, cluster: &Cluster) -> BrokerResult<()> {
+    pub async fn flush(&self, acks: &Sender<Response>, cluster: &ClusterHandler) -> BrokerResult<()> {
 
         // let mut topics_meta = vec![];
         // for topic in self.topic_queues.keys() {
@@ -96,9 +96,8 @@ impl Buffer {
         //     topics_meta.push(meta);
         // }
 
-        let topic_queues = self.topic_queues.read().await;
         // Have to clone to break immutable and mutable (self.group_queue_by_leader) reference
-        let topics: Vec<_> = topic_queues.keys().cloned().collect();
+        let topics: Vec<_> = self.topic_queues.keys().cloned().collect();
         // TODO: timeout from settings
         let leaders = with_retry(Duration::from_secs(1), Duration::from_secs(60),
                                  || { cluster.get_or_request_leader_map(topics.as_slice()) }).await?;
