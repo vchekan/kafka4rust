@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use tokio::time::Duration;
 use tracing_attributes::instrument;
-use crate::resolver::{self, start_resolver};
+use crate::resolver;
 use tokio::sync::{mpsc, oneshot};
 use tokio::sync::mpsc::{Sender, Receiver};
 use crate::connection::ConnectionHandle;
@@ -43,6 +43,7 @@ use std::fmt::{Debug, Formatter};
 use tracing::event;
 use crate::protocol::{ErrorCode, MetadataResponse0};
 use log::{debug, info, warn, error};
+use crate::resolver::ResolverHandle;
 
 type LeaderMap = Vec<(BrokerId, Vec<(String, Vec<Partition>)>)>;
 
@@ -58,18 +59,13 @@ pub enum Msg {
 struct Cluster {
     bootstrap: Vec<SocketAddr>,
     operation_timeout: Duration,
-    resolver_tx: Sender<crate::resolver::Cmd>,
-    resolver_rx: Receiver<Vec<String>>,
-
-    // brokers_maps: RwLock<BrokersMaps>,
-    // broker_id_map: HashMap<BrokerId, Broker>,
-    // broker_addr_map: HashMap<BrokerId, SocketAddr>,
-    // broker_id_map: im::HashMap<BrokerId, Broker>,
-    // broker_addr_map: im::HashMap<BrokerId, SocketAddr>,
-
+    rx: mpsc::Receiver<Msg>,
+    resolver: ResolverHandle,
+    resolver_listener: Receiver<BrokerResult<protocol::TopicMetadata>>,
     brokers_maps: BrokersMaps,
 }
 
+#[derive(Default)]
 struct BrokersMaps {
     pub broker_id_map: HashMap<BrokerId, ConnectionHandle>,
     pub broker_addr_map: HashMap<BrokerId, SocketAddr>,
@@ -81,16 +77,18 @@ struct BrokersMaps {
 impl ClusterHandler {
     pub fn new(bootstrap: Vec<SocketAddr>, timeout: Option<Duration>) -> Self {
         let (tx, rx) = mpsc::channel(1);
-        tokio::spawn(run(bootstrap, timeout));
+        let (listener_tx, listener_rx) = mpsc::channel::<BrokerResult<protocol::TopicMetadata>>(1);
+        //let resolver = ResolverHandle::new(bootstrap, listener_tx);
+        let cluster = Cluster::new(bootstrap, rx, timeout);
+        tokio::spawn(run(cluster));
         ClusterHandler { tx }
     }
 }
 
-async fn run(bootstrap: Vec<SocketAddr>, timeout: Option<Duration>, mut rx: mpsc::Receiver<Msg>) {
-    let cluster = Cluster::new(bootstrap, timeout);
+async fn run(mut cluster: Cluster) {
     debug!("Cluster loop starting");
-    while let Some(msg) = rx.recv() {
-        cluster.handle(msg)
+    while let Some(msg) = cluster.rx.recv().await {
+        cluster.handle(msg);
     }
     debug!("Cluster loop complete, exiting");
 }
@@ -108,13 +106,13 @@ impl Debug for Cluster {
 
 impl Cluster {
     #[instrument(err)]
-    pub fn with_bootstrap(bootstrap: &str, timeout: Option<Duration>) -> anyhow::Result<Self> {
+    pub fn with_bootstrap(bootstrap: &str, rx: mpsc::Receiver<Msg>, timeout: Option<Duration>) -> anyhow::Result<Self> {
         let bootstrap = resolve_addr(bootstrap);
-        Ok(Self::new(bootstrap, timeout))
+        Ok(Self::new(bootstrap, rx, timeout))
     }
 
     /// Connect to at least one broker successfully .
-    pub fn new(bootstrap: Vec<SocketAddr>, operation_timeout: Option<Duration>) -> Self {
+    pub fn new(bootstrap: Vec<SocketAddr>, rx: mpsc::Receiver<Msg>, operation_timeout: Option<Duration>) -> Self {
         /*let connect_futures = bootstrap.iter()
             // TODO: log bad addresses which did not parse
             //.filter_map(|addr| addr.parse().ok())
@@ -137,33 +135,28 @@ impl Cluster {
         */
 
 
-        let (req_tx, req_rx) = mpsc::channel(1);
-        let (resp_tx, resp_rx) = mpsc::channel(1);
+        let bootstrap2 = bootstrap.clone();
+        let (resolver_tx, resolver_rx) = mpsc::channel(1);
         let cluster = Cluster {
             bootstrap,
-            brokers_maps: BrokersMaps {
-                broker_id_map: HashMap::new(),
-                broker_addr_map: HashMap::new(),
-                meta_cache: HashMap::new(),
-                topics_meta: HashMap::new(),
-            },
             operation_timeout: operation_timeout.unwrap_or(Duration::from_secs(5)),
-            resolver_tx: req_tx,
-            resolver_rx: resp_rx,
+            brokers_maps: BrokersMaps::default(),
+            resolver: ResolverHandle::new(bootstrap2, resolver_tx),
+            resolver_listener: resolver_rx,
+            rx
         };
-        start_resolver(req_rx, resp_tx);
 
         cluster
     }
 
-    async fn handle(msg: Msg) {
+    async fn handle(&mut self, msg: Msg) {
         match msg {
             
         }
     }
 
     #[instrument(skip(self), err)]
-    pub async fn fetch_topic_meta_no_update(&self, topics: &[&str]) -> BrokerResult<protocol::MetadataResponse0> {
+    async fn fetch_topic_meta_no_update(&self, topics: &[&str]) -> BrokerResult<protocol::MetadataResponse0> {
         // fetch from known brokers
         for broker in self.brokers_maps.broker_id_map.values() {
             debug!("Trying to fetch meta from known broker {:?}", broker);
