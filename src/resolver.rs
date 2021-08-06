@@ -14,7 +14,7 @@ pub struct ResolverHandle {
 struct Resolver {
     rx: mpsc::Receiver<Msg>,
     tx: mpsc::Sender<Msg>,  // need to send Timer messages to self
-    listener: mpsc::Sender<BrokerResult<protocol::TopicMetadata>>,
+    listener: mpsc::Sender<protocol::MetadataResponse0>,
     brokers: Vec<SocketAddr>,
     topics: HashSet<String>,
     // used to filter out "no change" events
@@ -29,7 +29,7 @@ enum Msg {
 }
 
 impl ResolverHandle {
-    pub fn new(brokers: Vec<SocketAddr>, listener: mpsc::Sender<BrokerResult<protocol::TopicMetadata>>) -> Self {
+    pub fn new(brokers: Vec<SocketAddr>, listener: mpsc::Sender<protocol::MetadataResponse0>) -> Self {
         let (tx, rx) = mpsc::channel(1);
         let resolver = Resolver::new(brokers, rx, tx.clone(), listener);
         tokio::spawn(run(resolver));
@@ -44,7 +44,7 @@ impl ResolverHandle {
 }
 
 impl Resolver {
-    fn new(brokers: Vec<SocketAddr>, rx: mpsc::Receiver<Msg>, tx: mpsc::Sender<Msg>, listener: mpsc::Sender<BrokerResult<protocol::TopicMetadata>>) -> Self {
+    fn new(brokers: Vec<SocketAddr>, rx: mpsc::Receiver<Msg>, tx: mpsc::Sender<Msg>, listener: mpsc::Sender<protocol::MetadataResponse0>) -> Self {
         Resolver {
             rx,
             tx,
@@ -93,21 +93,25 @@ impl Resolver {
             Msg::ResolvedTopic(meta) => {
                 debug!("Resolver handles meta");
                 // TODO: update known brokers
-                for topic in meta.topics {
+                for topic in &meta.topics {
                     if topic.error_code.is_ok() {
                         let (ok_partitions, err_partitions): (Vec<_>, Vec<_>) = topic.partition_metadata.iter().partition(|p| p.error_code.is_ok());
                         if err_partitions.is_empty() {
                             debug!("Resolved topic, removing from resolver: '{}'", topic.topic);
                             self.remove_topic(&topic.topic);
-                            self.fire_if_changed(topic).await;
+                            // self.fire_if_changed(topic).await;
                         }
                     } else if topic.error_code.is_retriable() {
-                        self.fire_if_changed(topic).await;
+                        // self.fire_if_changed(topic).await;
+                        debug!("Topic error, will retry: {}", topic.error_code);
                     } else {
                         warn!("Non-resolvable error code, removing topic from resolver: '{}'", topic.topic);
                         self.remove_topic(&topic.topic);
-                        self.listener.send(Err(BrokerFailureSource::KafkaErrorCode(topic.error_code)));
                     }
+                }
+                match self.listener.send(meta).await {
+                    Ok(_) => debug!("Resolver: broadcasted meta"),
+                    Err(_) => warn!("Failed to broadcast meta")
                 }
             }
         }
@@ -123,32 +127,32 @@ impl Resolver {
         self.topics.remove(topic);
     }
 
-    async fn fire_if_changed(&mut self, meta: protocol::TopicMetadata) {
-        let mut fire = false;
-
-        match self.state.get_mut(&meta.topic) {
-            Some(partitions) => {
-                if (partitions.len() != meta.partition_metadata.len()) {
-                    fire = true;
-                } else if partitions.iter().zip(meta.partition_metadata.iter()).any(|(a, b)| { a.error_code != b.error_code || a.partition != b.partition || a.leader != b.leader }) {
-                    fire = true
-                }
-                if fire {
-                    partitions.clear();
-                    partitions.extend_from_slice(&meta.partition_metadata[..])
-                }
-            }
-            None => {
-                self.state.insert(meta.topic.clone(), meta.partition_metadata.clone());
-                fire = true;
-            }
-        }
-        if fire {
-            if self.listener.send(Ok(meta)).await.is_err() {
-                error!("Resolver: failed to senf metadata update to listener")
-            }
-        }
-    }
+    // async fn fire_if_changed(&mut self, meta: protocol::TopicMetadata) {
+    //     let mut fire = false;
+    //
+    //     match self.state.get_mut(&meta.topic) {
+    //         Some(partitions) => {
+    //             if (partitions.len() != meta.partition_metadata.len()) {
+    //                 fire = true;
+    //             } else if partitions.iter().zip(meta.partition_metadata.iter()).any(|(a, b)| { a.error_code != b.error_code || a.partition != b.partition || a.leader != b.leader }) {
+    //                 fire = true
+    //             }
+    //             if fire {
+    //                 partitions.clear();
+    //                 partitions.extend_from_slice(&meta.partition_metadata[..])
+    //             }
+    //         }
+    //         None => {
+    //             self.state.insert(meta.topic.clone(), meta.partition_metadata.clone());
+    //             fire = true;
+    //         }
+    //     }
+    //     if fire {
+    //         if self.listener.send(Ok(meta)).await.is_err() {
+    //             error!("Resolver: failed to senf metadata update to listener")
+    //         }
+    //     }
+    // }
 }
 
 async fn run(mut resolver: Resolver) {
@@ -176,8 +180,8 @@ mod tests {
         let resolver = ResolverHandle::new(vec!["127.0.0.1:9092".parse().unwrap()], bus_tx);
         resolver.start_resolve("test1".to_string()).await;
 
-        let response = bus_rx.recv().await.unwrap().unwrap();
-        assert!(response.error_code.is_ok());
+        let response = bus_rx.recv().await.unwrap();
+        //assert!(response.error_code.is_ok());
         println!(">>>{:?}", response);
     }
 }

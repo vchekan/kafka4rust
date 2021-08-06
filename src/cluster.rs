@@ -31,7 +31,7 @@ use crate::futures::{repeat_with_timeout, RepeatResult};
 use crate::protocol;
 use crate::types::*;
 use crate::utils::resolve_addr;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs};
 use tokio::time::Duration;
 use tracing_attributes::instrument;
@@ -49,11 +49,11 @@ type LeaderMap = Vec<(BrokerId, Vec<(String, Vec<Partition>)>)>;
 
 #[derive(Clone)]
 pub struct ClusterHandler {
-    tx: mpsc::Sender<Msg>
+    tx: mpsc::Sender<Msg>,
 }
 
 pub enum Msg {
-    ResolveTopics(Vec<String>, oneshot::Sender<LeaderMap>),
+    GetLeaderMap(Vec<String>, oneshot::Sender<LeaderMap>),
 }
 
 struct Cluster {
@@ -61,7 +61,7 @@ struct Cluster {
     operation_timeout: Duration,
     rx: mpsc::Receiver<Msg>,
     resolver: ResolverHandle,
-    resolver_listener: Receiver<BrokerResult<protocol::TopicMetadata>>,
+    resolver_listener: Receiver<protocol::MetadataResponse0>,
     brokers_maps: BrokersMaps,
 }
 
@@ -83,12 +83,39 @@ impl ClusterHandler {
         tokio::spawn(run(cluster));
         ClusterHandler { tx }
     }
+
+    /// If broker is known, return it in the map, otherwise trigger topic resolution and ignore this
+    /// topic for now.
+    pub async fn resolve(&self, topics: Vec<String>) -> LeaderMap {
+        let (req, resp) = oneshot::channel::<LeaderMap>();
+        let _ = self.tx.send(Msg::GetLeaderMap(topics, req)).await;
+        match resp.await {
+            Ok(resp) => resp,
+            Err(e) => {
+                panic!("Cluster: resolver channel failed: {}", e)
+            }
+        }
+    }
 }
 
 async fn run(mut cluster: Cluster) {
     debug!("Cluster loop starting");
+    loop {
+        tokio::select! {
+            Some(msg) = cluster.rx.recv() => {
+                cluster.handle(msg).await;
+            },
+            Some(msg) = cluster.resolver_listener.recv() => {
+                debug!("Got resolver message");
+                cluster.update_brokers_map(&msg);
+            },
+            else => {
+                break;
+            }
+        }
+    }
     while let Some(msg) = cluster.rx.recv().await {
-        cluster.handle(msg);
+        cluster.handle(msg).await;
     }
     debug!("Cluster loop complete, exiting");
 }
@@ -146,67 +173,44 @@ impl Cluster {
             rx
         };
 
+        debug!("Cluster created");
+
         cluster
     }
 
     async fn handle(&mut self, msg: Msg) {
         match msg {
-            
-        }
-    }
+            // TODO: make sure that consumer keeps its copy of leader map and does not request it every time produce message is sent
+            Msg::GetLeaderMap(topics, response) => {
+                let leaders = self.get_known_broker_map().await;
+                let known_maps: HashSet<&String> = leaders.iter().flat_map(|i| i.1.iter().map(|t| &t.0)).collect();
+                let missing_topics: Vec<_> = topics.iter().filter(|t| !known_maps.contains(t)).collect();
+                for topic in missing_topics {
+                    debug!("Cluster: start resolving '{}'", topic);
+                    self.resolver.start_resolve(topic.clone()).await;
+                }
 
-    #[instrument(skip(self), err)]
-    async fn fetch_topic_meta_no_update(&self, topics: &[&str]) -> BrokerResult<protocol::MetadataResponse0> {
-        // fetch from known brokers
-        for broker in self.brokers_maps.broker_id_map.values() {
-            debug!("Trying to fetch meta from known broker {:?}", broker);
-            match broker.fetch_topic_with_broker(topics, self.operation_timeout).await {
-                Ok(meta) => return Ok(meta),
-                Err(e) => {
-                    tracing::event!(tracing::Level::ERROR, "Error fetching topic meta: {}", e);
-                    info!("Error fetching topic meta1: {}", e)
+                if response.send(leaders).is_err() {
+                    error!("Failed to send leader map response");
                 }
             }
         }
-
-        // if failed to fetch from known brokers, give it a try for bootstrap ones
-        let operation_timeout = self.operation_timeout;
-        let meta = repeat_with_timeout(|| async {
-            for addr in &self.bootstrap {
-                debug!("Trying to fetch meta from bootstrap broker {:?}", addr);
-                // TODO: timeout for single broker wait
-                let broker = ConnectionHandle::new(*addr);
-                let meta = broker.fetch_topic_with_broker(topics, operation_timeout).await;
-                match meta {
-                    Ok(meta) => return Ok(meta),
-                    Err(e) => debug!("Failed to fetch meta from bootstrap broker {:?}. {}", broker, e),
-                }
-            }
-            Err(BrokerFailureSource::NoBrokerAvailable)
-        },  Duration::from_secs(1), operation_timeout).await;
-
-        match meta {
-            RepeatResult::Timeout => Err(BrokerFailureSource::Timeout),
-            RepeatResult::Ok(res) => res
-        }
     }
 
-    // #[instrument(level="debug", skip(broker_id, self))]
-    // pub(crate) async fn broker_get_or_connect(&mut self, broker_id: BrokerId) -> BrokerResult<&ConnectionHandle> {
-    //     if let Some(broker) = self.brokers_maps.broker_id_map.get(&broker_id) {
-    //         return Ok(broker);
-    //     }
-    //
-    //     // Cache miss, have to fetch broker metadata.
-    //     match self.brokers_maps.broker_addr_map.get(&broker_id) {
-    //         Some(addr) => {
-    //             let broker = ConnectionHandle::new(*addr);
-    //             let _ = self.brokers_maps.broker_id_map.insert(broker_id, broker);
-    //             Ok(self.brokers_maps.broker_id_map[broker_id])
-    //         },
-    //         None => return Err(BrokerFailureSource::UnknownBrokerId(broker_id))
-    //     }
-    // }
+    /// Return leader map of known brokers. Unknown brokers will be requested in background.
+    async fn get_known_broker_map(&self) -> LeaderMap {
+        let mut res: HashMap<BrokerId, HashMap<String,Vec<Partition>>> = HashMap::new();
+        for (topic, partitions) in &self.brokers_maps.meta_cache {
+            for (partition, leaderId) in partitions.iter().enumerate() {
+                if let Some(leaderId) = leaderId {
+                    res.entry(*leaderId).or_default()
+                        .entry(topic.clone()).or_default()
+                        .push(partition as u32);
+                }
+            }
+        }
+        res.into_iter().map(|t| (t.0, t.1.into_iter().collect())).collect()
+    }
 
     #[instrument(level="debug", skip(broker_id, self))]
     pub(crate) async fn broker_get_no_connect(&self, broker_id: BrokerId) -> BrokerResult<&ConnectionHandle> {
@@ -216,7 +220,15 @@ impl Cluster {
         }
     }
 
-    async fn update_brokers_map(&mut self, meta: &protocol::MetadataResponse0) {
+    fn update_brokers_map(&mut self, meta: &protocol::MetadataResponse0) {
+        debug!("Updated brokers map");
+        for topic in &meta.topics {
+            *(self.brokers_maps.meta_cache.entry(topic.topic.clone()).or_default()) = topic.partition_metadata.iter().map(|p|
+                    if p.error_code.is_ok() { Some(p.leader) } else { None }
+                ).collect();
+        }
+
+
         for broker in &meta.brokers {
             match (broker.host.as_str(), broker.port as u16).to_socket_addrs() {
                 Ok(addr) => {
@@ -271,15 +283,15 @@ impl Cluster {
     //     Err(BrokerFailureSource::NoBrokerAvailable)
     // }
 
-    pub async fn start_resolving_topics<T>(&self, topics: T) -> std::result::Result<(), InternalError>
-        where T: IntoIterator, T::Item: AsRef<str>
-    {
-        for topic in topics {
-            self.resolver_tx.send(resolver::Cmd::ResolveTopic(topic.as_ref().to_string())).await
-                .map_err(|e| InternalError::Critical("Failed to send topic to topic resolver".into()))?;
-        }
-        Ok(())
-    }
+    // pub async fn start_resolving_topics<T>(&self, topics: T) -> std::result::Result<(), InternalError>
+    //     where T: IntoIterator, T::Item: AsRef<str>
+    // {
+    //     for topic in topics {
+    //         self.resolver_tx.send(resolver::Cmd::ResolveTopic(topic.as_ref().to_string())).await
+    //             .map_err(|e| InternalError::Critical("Failed to send topic to topic resolver".into()))?;
+    //     }
+    //     Ok(())
+    // }
 
     // pub async fn start_resolving_topic(&self, topic: String) -> BrokerResult<()> {
     //     self.resolver_tx.send(resolver::Cmd::ResolveTopic(topic)).await
@@ -383,50 +395,24 @@ impl Cluster {
     }
 }
 
-// #[instrument(level="debug")]
-// async fn fetch_topic_with_broker(
-//     broker: &BrokerConnection,
-//     topics: &[&str],
-//     timeout: Duration,
-// ) -> BrokerResult<protocol::MetadataResponse0> {
-//     let req = protocol::MetadataRequest0 {
-//         topics: topics.iter().map(|t| t.to_string()).collect(),
-//     };
-//     match tokio::time::timeout(timeout, broker.send_request(&req)).await {
-//         Err(_) => Err(BrokerFailureSource::Timeout),
-//         Ok(res) => res,
-//     }
-// }
-
-/*
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_std::task;
     use std::env;
+    use log::LevelFilter;
 
-    #[test]
-    fn resolve() {
-        simple_logger::init_with_level(log::Level::Debug).unwrap();
+    #[tokio::test]
+    async fn resolve() {
+        simple_logger::SimpleLogger::new().with_level(LevelFilter::Debug).init().unwrap();
+        let bootstrap = vec!["127.0.0.1:9092".parse().unwrap()];
 
-        task::block_on(async {
-            //let addr = vec!["127.0.0.1:9092".to_string()];
-            let bootstrap = vec![
-                //"no.such.host.com:9092".parse(),
-                //env::var("kafka-bootstrap").parse().unwrap_or("127.0.0.1:9092".parse()),
-                "broker1:9092".parse().unwrap()
-            ];
+        let mut cluster = ClusterHandler::new(bootstrap, Some(Duration::from_secs(10)));
+        let leaders = cluster.resolve(vec!["test1".into()]).await;
+        debug!("Resolved topic: {:?}", leaders);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let leaders = cluster.resolve(vec!["test1".into()]).await;
+        debug!("Resolved topic: {:?}", leaders);
 
-            //let (tx, rx) = mpsc::unbounded();
-            let mut cluster = Cluster::connect_with_bootstrap(bootstrap).unwrap();
-            let topic_meta = cluster.resolve_topic("test1").await.unwrap();
-            debug!("Resolved topic: {:?}", topic_meta);
-
-            //info!("Bootstrapped: {:?}", cluster);
-            //cluster.tx.unbounded_send(EventIn::ResolveTopic("test1".to_string())).unwrap();
-            //let res = dbg!(cluster.rx.next().await);
-            //debug!("Got response");
-        });
     }
 }
-*/

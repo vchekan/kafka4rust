@@ -141,3 +141,6 @@ Connection performs exchange.
 #### Resolver
 Resolves multiple topics at the time. Reasoning: when failure happen, multiple topics will break and making a query for 
 every one of them does not make sense.  
+
+#### Cluster 
+Cluster keeps list of known brokers and topics leader map.
