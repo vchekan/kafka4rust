@@ -61,7 +61,6 @@ struct Cluster {
     operation_timeout: Duration,
     rx: mpsc::Receiver<Msg>,
     resolver: ResolverHandle,
-    resolver_listener: Receiver<protocol::MetadataResponse0>,
     brokers_maps: BrokersMaps,
 }
 
@@ -105,13 +104,11 @@ async fn run(mut cluster: Cluster) {
             Some(msg) = cluster.rx.recv() => {
                 cluster.handle(msg).await;
             },
-            Some(msg) = cluster.resolver_listener.recv() => {
+            Ok(msg) = cluster.resolver.listener.recv() => {
                 debug!("Got resolver message");
                 cluster.update_brokers_map(&msg);
             },
-            else => {
-                break;
-            }
+            else => { break; }
         }
     }
     while let Some(msg) = cluster.rx.recv().await {
@@ -163,13 +160,11 @@ impl Cluster {
 
 
         let bootstrap2 = bootstrap.clone();
-        let (resolver_tx, resolver_rx) = mpsc::channel(1);
         let cluster = Cluster {
             bootstrap,
             operation_timeout: operation_timeout.unwrap_or(Duration::from_secs(5)),
             brokers_maps: BrokersMaps::default(),
-            resolver: ResolverHandle::new(bootstrap2, resolver_tx),
-            resolver_listener: resolver_rx,
+            resolver: ResolverHandle::new(bootstrap2),
             rx
         };
 

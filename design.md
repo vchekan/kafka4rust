@@ -144,3 +144,10 @@ every one of them does not make sense.
 
 #### Cluster 
 Cluster keeps list of known brokers and topics leader map.
+
+### Metadata broadcasting
+Topic metadata is used by different components, Cluster needs it to group messages by leader, Resolver needs it to connect to all
+known brokers, Producer needs partitions count to partition message by the key.
+
+One option is to build a hierarchy of metadata propagation, Resolver sends meta to Cluster, Cluster to Producer, Producer to Buffer.
+Another option is to build broadcast system, where Resolver broadcast meta updates to every subscriber.

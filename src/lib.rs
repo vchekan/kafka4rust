@@ -3,8 +3,8 @@ mod connection;
 mod resolver;
 mod cluster;
 // mod consumer;
-// mod producer_buffer;
-// mod producer;
+//mod producer_buffer;
+//mod producer;
 // pub mod admin;
 mod buffer_pool;
 

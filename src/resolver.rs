@@ -1,4 +1,4 @@
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, broadcast};
 use std::collections::{HashSet, HashMap};
 use std::time::Duration;
 use log::{debug, info, warn, error};
@@ -8,13 +8,14 @@ use crate::protocol;
 use crate::error::{BrokerResult, BrokerFailureSource};
 
 pub struct ResolverHandle {
-    tx: mpsc::Sender<Msg>
+    tx: mpsc::Sender<Msg>,
+    pub listener: broadcast::Receiver<protocol::MetadataResponse0>,
 }
 
 struct Resolver {
     rx: mpsc::Receiver<Msg>,
     tx: mpsc::Sender<Msg>,  // need to send Timer messages to self
-    listener: mpsc::Sender<protocol::MetadataResponse0>,
+    listener: broadcast::Sender<protocol::MetadataResponse0>,
     brokers: Vec<SocketAddr>,
     topics: HashSet<String>,
     // used to filter out "no change" events
@@ -29,11 +30,12 @@ enum Msg {
 }
 
 impl ResolverHandle {
-    pub fn new(brokers: Vec<SocketAddr>, listener: mpsc::Sender<protocol::MetadataResponse0>) -> Self {
+    pub fn new(brokers: Vec<SocketAddr>) -> Self {
         let (tx, rx) = mpsc::channel(1);
-        let resolver = Resolver::new(brokers, rx, tx.clone(), listener);
+        let (listener_tx, listener) = broadcast::channel(1);
+        let resolver = Resolver::new(brokers, rx, tx.clone(), listener_tx);
         tokio::spawn(run(resolver));
-        ResolverHandle { tx }
+        ResolverHandle { tx, listener }
     }
 
     pub async fn start_resolve(&self, topic: String) {
@@ -44,7 +46,7 @@ impl ResolverHandle {
 }
 
 impl Resolver {
-    fn new(brokers: Vec<SocketAddr>, rx: mpsc::Receiver<Msg>, tx: mpsc::Sender<Msg>, listener: mpsc::Sender<protocol::MetadataResponse0>) -> Self {
+    fn new(brokers: Vec<SocketAddr>, rx: mpsc::Receiver<Msg>, tx: mpsc::Sender<Msg>, listener: broadcast::Sender<protocol::MetadataResponse0>) -> Self {
         Resolver {
             rx,
             tx,
@@ -109,9 +111,9 @@ impl Resolver {
                         self.remove_topic(&topic.topic);
                     }
                 }
-                match self.listener.send(meta).await {
+                match self.listener.send(meta) {
                     Ok(_) => debug!("Resolver: broadcasted meta"),
-                    Err(_) => warn!("Failed to broadcast meta")
+                    Err(e) => warn!("Failed to broadcast meta: {}", e)
                 }
             }
         }
@@ -175,12 +177,12 @@ mod tests {
         simple_logger::SimpleLogger::from_env().with_level(log::LevelFilter::Debug).init().unwrap();
         debug!("test");
 
-        let (bus_tx, mut bus_rx) = tokio::sync::mpsc::channel(1);
+        // let (bus_tx, mut bus_rx) = tokio::sync::broadcast::channel(1);
 
-        let resolver = ResolverHandle::new(vec!["127.0.0.1:9092".parse().unwrap()], bus_tx);
+        let mut resolver = ResolverHandle::new(vec!["127.0.0.1:9092".parse().unwrap()]);
         resolver.start_resolve("test1".to_string()).await;
 
-        let response = bus_rx.recv().await.unwrap();
+        let response = resolver.listener.recv().await.unwrap();
         //assert!(response.error_code.is_ok());
         println!(">>>{:?}", response);
     }
