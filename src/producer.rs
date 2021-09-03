@@ -10,7 +10,6 @@ use std::collections::{HashMap, VecDeque, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 use std::fmt::Debug;
-use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
@@ -27,6 +26,7 @@ use tracing::field::debug;
 use crate::retry_policy::with_retry;
 use crate::producer_buffer::{BufferingResult, Buffer};
 use log::{debug, error};
+use tokio::sync::mpsc;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -132,14 +132,6 @@ use log::{debug, error};
 /// A: ???
 ///
 
-/*
-/// When message key is null, a counter is needed for round-robin partitioning.
-pub struct ProducerTopicMetadata {
-    protocol_metadata: protocol::MetadataResponse0,
-    null_key_partition_counter: u32,
-}
-*/
-
 // TODO: is `Send` needed? Can we convert to QueuedMessage before crossing thread boundaries?
 // TODO: maybe can replace with &[u8] also?
 pub trait ToMessage: Send {
@@ -158,6 +150,11 @@ impl Partitioner for Murmur2Partitioner {
         murmur2a::hash32(key)
     }
 }
+impl Debug for Murmur2Partitioner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Murmur2Partitioner")
+    }
+}
 
 #[derive(Debug)]
 pub struct FixedPartitioner(pub u32);
@@ -167,16 +164,14 @@ impl Partitioner for FixedPartitioner {
     }
 }
 
-impl Debug for Murmur2Partitioner {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Murmur2Partitioner")
-    }
-}
-
 #[derive(Debug)]
 enum BuffCmd {
     Flush,
     FlushAndClose,
+}
+
+enum Msg {
+    Produce(QueuedMessage, String)
 }
 
 #[derive(Debug)]
@@ -192,21 +187,87 @@ impl<'a> ProducerBuilder<'a> {
     }
     pub fn hasher(mut self, hasher: Box<dyn Partitioner>) -> Self { self.hasher = Some(hasher); self }
     pub fn send_timeout(self, timeout: Duration) -> Self { ProducerBuilder {send_timeout: Some(timeout), ..self} }
-    pub fn start(self) -> anyhow::Result<(Producer,Receiver<Response>)> { Ok(Producer::new(self)?) }
+    
+    /// If bootstrap address does not resolve, return error
+    pub fn build(self) -> anyhow::Result<ProducerHandler> { ProducerHandler::new(self) }
 }
 
-pub struct Producer {
+pub struct ProducerHandler {
+    tx: mpsc::Sender<Msg>,
+}
+
+struct Producer {
+    rx: mpsc::Receiver<Msg>,
     bootstrap: String,
-    buffer: Arc<Mutex<Buffer>>,
+    buffer: Buffer,
     cluster: ClusterHandler,
-    partitioner: Box<dyn Partitioner>,
-    // TODO: is kafka topic case-sensitive?
-    //topics_meta: HashMap<String, ProducerTopicMetadata>,
+    partitioner: Box<dyn Partitioner + Send>,
+    /// Async response (ack/nack) to the caller
     acks: Sender<Response>,
+    /// Channel to the buffer
     buffer_commands: Sender<BuffCmd>,
     flush_loop_handle: tokio::task::JoinHandle<BrokerResult<()>>,
     send_timeout: Option<Duration>,
+    /// Counter use to round-robin messages with null key
     null_key_partition_counter: u32,
+    topic_partitions_count: HashMap<String,usize>,
+}
+
+struct Producer2 {
+    rx: mpsc::Receiver<Msg>,
+    bootstrap: String,
+    buffer: Buffer,
+    cluster: ClusterHandler,
+    partitioner: Box<dyn Partitioner + Send>,
+    /// Async response (ack/nack) to the caller
+    acks: Sender<Response>,
+    /// Channel to the buffer
+    buffer_commands: Sender<BuffCmd>,
+    flush_loop_handle: tokio::task::JoinHandle<BrokerResult<()>>,
+    send_timeout: Option<Duration>,
+    /// Counter use to round-robin messages with null key
+    null_key_partition_counter: u32,
+    topic_partitions_count: HashMap<String,usize>,
+}
+impl Producer2 {
+    fn new() -> Self {todo!()}
+}
+
+
+/// `ProducerHandler` is not simply a channel proxy to `Producer` but also isolates awaiting for topic
+/// resolution from buffer background flushing.
+impl ProducerHandler {
+    pub fn new(builder: ProducerBuilder) -> anyhow::Result<Self> {
+        let (tx, rx) = mpsc::channel(1);
+        let (producer, acks_rx) = Producer::new(builder, rx)?;
+        tokio::spawn(async move {
+            run(producer).await;
+        });
+
+        Ok(ProducerHandler { tx })
+    }
+
+    pub async fn send<M: ToMessage + 'static>(&self, msg: M, topic: &str) {
+        let msg = QueuedMessage {
+            key: msg.key(),
+            value: msg.value(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Failed to get timestamp")
+                .as_millis() as u64,
+        };
+
+        if self.tx.send(Msg::Produce(msg, topic.to_string())).await.is_err() {
+            error!("ProducerHandler: failed to send message to Producer");
+        }
+    }
+}
+
+async fn run(mut producer: Producer) {
+    while let Some(msg) = producer.rx.recv().await {
+        producer.handle(msg).await;
+    }
+    debug!("producer:run finished");
 }
 
 impl Debug for Producer {
@@ -219,24 +280,11 @@ impl Debug for Producer {
     }
 }
 
-/*
-impl Producer {
-    /// Synchronously resolve bootstrap servers DNS addresses and start background worker process
-    /// to connect and flush data buffer periodically.
-    /// Note, that actual connection to the broker is not happenings until first message is sent.
-    /// Default MURMUR2 hasher is used (the same as Java).
-    #[instrument(level = "debug")]
-    fn new(seed: &str, ) -> Result<(Self, Receiver<Response>), KafkaError> {
-        Producer::with_hasher(seed, Box::new(Murmur2Partitioner {}))
-    }
-}
-*/
-
 impl Producer {
     /// Resolves bootstrap addresses and creates producer.
     /// Broker connection and topology resolution will be started upon first `send` request.
     #[instrument(level = "debug", err)]
-    pub fn new(builder: ProducerBuilder) -> anyhow::Result<(Self, Receiver<Response>)> {
+    pub fn new(builder: ProducerBuilder, rx: mpsc::Receiver<Msg>) -> anyhow::Result<(Self, Receiver<Response>)> {
         // TODO: resolve names async and account for connect timeout
         let seed_list = utils::resolve_addr(builder.brokers);
         if seed_list.is_empty() {
@@ -246,12 +294,10 @@ impl Producer {
             )).into());
         }
         let cluster = ClusterHandler::new(seed_list, builder.send_timeout);
-        // let cluster2 = cluster.clone();
-        let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(1000);
-        // let mut ack_tx2 = ack_tx.clone();
+        let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(1);
         let (buff_tx, mut buff_rx) = channel::<BuffCmd>(2);
 
-        let buffer = Arc::new(Mutex::new(Buffer::new(cluster.clone())));
+        let buffer = Buffer::new(cluster.clone());
         // let buffer2 = buffer.clone();
         // TODO: default flush timeout is not very scientific. Think either whole flush should have timeout or its internal parts
         let send_timeout = builder.send_timeout.unwrap_or(Duration::from_secs(30));
@@ -260,6 +306,7 @@ impl Producer {
         let flush_loop_handle: JoinHandle<_> = tokio::spawn(flushing_loop(buff_rx, buffer.clone(), ack_tx.clone(), cluster.clone(), send_timeout));
 
         let producer = Producer {
+            rx,
             bootstrap: builder.brokers.to_string(),
             buffer,
             cluster,
@@ -270,13 +317,21 @@ impl Producer {
             flush_loop_handle,
             send_timeout: builder.send_timeout,
             null_key_partition_counter: 0,
+            topic_partitions_count: HashMap::new(),
         };
 
         Ok((producer, ack_rx))
     }
 
+    async fn handle(&mut self, msg: Msg) {
+        match msg {
+            Msg::Produce(msg, topic) => self.send(msg, topic).await
+        };
+    }
+
+    /*
     #[instrument(level = "debug", err, skip(msg, self))]
-    pub async fn send<M: ToMessage + 'static>(&mut self, msg: M, topic: &str) -> Result<(),anyhow::Error> {
+    pub async fn send<M: ToMessage + 'static>(&mut self, msg: M, topic: &str) {
         // TODO: potentially long time between lock acquisition and release because of topic resolution
         // TODO: timeout from settings
         let partitions_count = with_retry(Duration::from_secs(1), Duration::from_secs(60), || { self.cluster.get_topic_partition_count(topic)})
@@ -309,13 +364,46 @@ impl Producer {
             }
         }
     }
+    */
+
+    #[instrument(level = "debug", err, skip(msg, self))]
+    async fn send(&mut self, msg: QueuedMessage, topic: String) -> BrokerResult<()> {
+        let partition = match &msg.key {
+            Some(key) => self.partitioner.partition(&key),
+            None => {
+                self.null_key_partition_counter += 1;
+                self.null_key_partition_counter
+            }
+        };
+
+        let partition_count = self.get_or_fetch_partition_count(&topic).await?;
+
+        let partition = partition % partition_count as u32;
+
+        match self.topic_partitions_count.get(&topic) {
+            Some(partition_count) => {
+                // TODO: await instead of returning buffering result
+                self.buffer.add(msg, topic, partition, *partition_count as u32).await;
+            }
+            None => {
+                // TODO:
+                panic!("Buffer overflow handling not implemented");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get partitions count from cache or fetch from
+    async fn get_or_fetch_partition_count(&self, topic: &str) -> BrokerResult<usize> {
+        self.cluster.get_or_fetch_partition_count(topic.to_string()).await
+    }
 
     #[instrument(level="debug", err, skip(self))]
     pub async fn flush(&mut self) -> BrokerResult<()> {
         debug!("Flushing buffer before close");
-        let mut buffer = self.buffer.lock().await;
         // let mut cluster = self.cluster.write().await;
-        let res = buffer.flush(&mut self.acks, &self.cluster).await;
+        let res = self.buffer.flush(&mut self.acks, &self.cluster).await;
         debug!("Flushing result: {:#?}", res);
         res
     }
@@ -416,39 +504,39 @@ impl Producer {
 }
 
 #[instrument(level = "debug")]
-async fn flushing_loop(mut buff_rx: Receiver<BuffCmd>, buffer: Arc<Mutex<Buffer>>, ack_tx2: Sender<Response>, cluster: Arc<Cluster>, send_timeout: Duration) -> BrokerResult<()> {
+async fn flushing_loop(mut buff_rx: Receiver<BuffCmd>, buffer: &mut Buffer, ack_tx: Sender<Response>, cluster: ClusterHandler, send_timeout: Duration) -> BrokerResult<()> {
     let mut complete = false;
     loop {
         //     // TODO: check time since last flush
         //     // TODO: configure flush time
         tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => { debug!("Buffer timer"); }
-                    cmd = buff_rx.recv() => {
-                        match cmd {
-                            Some(BuffCmd::Flush) => {
-                                debug!("Flushing buffer");
-                            }
-                            Some(BuffCmd::FlushAndClose) => {
-                                debug!("Buffer flush before closing");
-                                complete = true;
-                            }
-                            None => {
-                                debug!("Producer closed. Exiting buffer flush loop");
-                                complete = true;
-                            }
-                        }
+            _ = tokio::time::sleep(Duration::from_secs(5)) => { debug!("Buffer timer"); }
+            cmd = buff_rx.recv() => {
+                match cmd {
+                    Some(BuffCmd::Flush) => {
+                        debug!("Flushing buffer");
+                    }
+                    Some(BuffCmd::FlushAndClose) => {
+                        debug!("Buffer flush before closing");
+                        complete = true;
+                    }
+                    None => {
+                        debug!("Producer closed. Exiting buffer flush loop");
+                        complete = true;
                     }
                 }
+            }
+        }
 
         debug!("Waiting for buffer locks");
         // TODO: is buffer locked worst-case until flush timeout? Does it mean no append can happen?
-        let mut buffer2 = buffer.lock().await;
+        //let mut buffer2 = buffer.lock().await;
         // TODO: handle result
         debug!("Flushing with {:?} send_timeout", send_timeout);
         // TODO: use Duration::MAX when stabilized
 
         // let res = buffer2.flush(&ack_tx2, &cluster).await;
-        let res: BrokerResult<()> = match timeout(send_timeout, buffer2.flush(&ack_tx2, &cluster)).await {
+        let res: BrokerResult<()> = match timeout(send_timeout, buffer.flush(&ack_tx, &cluster)).await {
             Err(_) => {
                 tracing::warn!("Flushing timeout");
                 Err(BrokerFailureSource::Timeout)

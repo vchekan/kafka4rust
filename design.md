@@ -151,3 +151,21 @@ known brokers, Producer needs partitions count to partition message by the key.
 
 One option is to build a hierarchy of metadata propagation, Resolver sends meta to Cluster, Cluster to Producer, Producer to Buffer.
 Another option is to build broadcast system, where Resolver broadcast meta updates to every subscriber.
+
+### Producer: should connect in constructor or not?
+Producer needs to have patrition count in order to be able to perform key partitioning. So it makes no sense to make
+Producer available before topic is resolved. On the other hand, if we want to publish to any topic, and make topic part
+of `send()` api, then we would have to resolve topic metadata during `send()`.
+
+On the other hand there are legitimate patterns when publishing topic is calculated dynamically for every message, for 
+example request-response pattern.
+
+So it is necessary to figure out how to wait for topic info to arrive in Producer. The challenge is, Producer must stop 
+processing until topic is resolved but it needs to process.
+
+Waiting for single topic to resolve while processing everything else is complicated. So simpler workflow could be used.
+When new topic is observed, resolve request is sent, while messages are put into "unresolved" queue. Once topic is resolved,
+Producer scans "unresolved" queue and puts messages into per-partition queue structure. If "unresolved" queue is overflow,
+then it awaits for partition to resolve. As implemented in Producer, it will not freeze Buffer background flushing but will
+freeze sending data by caller, which is acceptable and expected. 
+TODO: make sure that Buffer->Producer communication does not freeze Buffer background flushing.

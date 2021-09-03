@@ -41,9 +41,10 @@ use tokio::sync::mpsc::{Sender, Receiver};
 use crate::connection::ConnectionHandle;
 use std::fmt::{Debug, Formatter};
 use tracing::event;
-use crate::protocol::{ErrorCode, MetadataResponse0};
+use crate::protocol::{ErrorCode, MetadataResponse0, Broker};
 use log::{debug, info, warn, error};
 use crate::resolver::ResolverHandle;
+use tokio_stream::StreamExt;
 
 type LeaderMap = Vec<(BrokerId, Vec<(String, Vec<Partition>)>)>;
 
@@ -54,19 +55,21 @@ pub struct ClusterHandler {
 
 pub enum Msg {
     GetLeaderMap(Vec<String>, oneshot::Sender<LeaderMap>),
+    GetOrFetchPartitionCount(String, oneshot::Sender<BrokerResult<usize>>),
+    BrokerById(BrokerId, oneshot::Sender<Option<ConnectionHandle>>),
 }
 
 struct Cluster {
     bootstrap: Vec<SocketAddr>,
     operation_timeout: Duration,
     rx: mpsc::Receiver<Msg>,
-    resolver: ResolverHandle,
+    pub resolver: ResolverHandle,
     brokers_maps: BrokersMaps,
 }
 
 #[derive(Default)]
 struct BrokersMaps {
-    pub broker_id_map: HashMap<BrokerId, ConnectionHandle>,
+    pub connections: HashMap<BrokerId, ConnectionHandle>,
     pub broker_addr_map: HashMap<BrokerId, SocketAddr>,
     /// topic -> partition[] -> leader (if known). Leader is None if it is down and requires re-discovery
     meta_cache: HashMap<String, Vec<Option<BrokerId>>>,
@@ -76,8 +79,6 @@ struct BrokersMaps {
 impl ClusterHandler {
     pub fn new(bootstrap: Vec<SocketAddr>, timeout: Option<Duration>) -> Self {
         let (tx, rx) = mpsc::channel(1);
-        let (listener_tx, listener_rx) = mpsc::channel::<BrokerResult<protocol::TopicMetadata>>(1);
-        //let resolver = ResolverHandle::new(bootstrap, listener_tx);
         let cluster = Cluster::new(bootstrap, rx, timeout);
         tokio::spawn(run(cluster));
         ClusterHandler { tx }
@@ -95,25 +96,58 @@ impl ClusterHandler {
             }
         }
     }
+
+    pub async fn get_or_fetch_partition_count(&self, topic: String) -> BrokerResult<usize> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(Msg::GetOrFetchPartitionCount(topic, tx)).await;
+        match rx.await {
+            Ok(res) => res,
+            Err(e) => {
+                error!("failed to receive result");
+                Err(BrokerFailureSource::Internal(e.into()))
+            }
+        }
+    }
+
+    pub async fn broker_by_id(&self, id: BrokerId) -> Option<ConnectionHandle> {
+        let (req, resp) = oneshot::channel();
+        self.tx.send(Msg::BrokerById(id, req));
+        match resp.await {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Cluster closed connection");
+                None
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for ClusterHandler {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        // TODO: retain bootstrap field for Display purpose?
+        write!(f, "ClusterHandler")
+    }
 }
 
 async fn run(mut cluster: Cluster) {
     debug!("Cluster loop starting");
     loop {
         tokio::select! {
-            Some(msg) = cluster.rx.recv() => {
-                cluster.handle(msg).await;
-            },
+            biased;
+
             Ok(msg) = cluster.resolver.listener.recv() => {
                 debug!("Got resolver message");
                 cluster.update_brokers_map(&msg);
             },
+            Some(msg) = cluster.rx.recv() => {
+                cluster.handle(msg).await;
+            },
             else => { break; }
         }
     }
-    while let Some(msg) = cluster.rx.recv().await {
-        cluster.handle(msg).await;
-    }
+    // while let Some(msg) = cluster.rx.recv().await {
+    //     cluster.handle(msg).await;
+    // }
     debug!("Cluster loop complete, exiting");
 }
 
@@ -189,6 +223,13 @@ impl Cluster {
                     error!("Failed to send leader map response");
                 }
             }
+            Msg::GetOrFetchPartitionCount(topic, reply) => {
+                self.get_or_fetch_partition_count(topic, reply).await
+            }
+            Msg::BrokerById(id, respond_to) => {
+                let conn = self.brokers_maps.connections.get(&id).cloned();
+                respond_to.send(conn);
+            }
         }
     }
 
@@ -209,7 +250,7 @@ impl Cluster {
 
     #[instrument(level="debug", skip(broker_id, self))]
     pub(crate) async fn broker_get_no_connect(&self, broker_id: BrokerId) -> BrokerResult<&ConnectionHandle> {
-        match self.brokers_maps.broker_id_map.get(&broker_id) {
+        match self.brokers_maps.connections.get(&broker_id) {
             Some(broker) => Ok(broker),
             None => Err(BrokerFailureSource::NoBrokerAvailable)
         }
@@ -238,9 +279,45 @@ impl Cluster {
     }
 
     pub(crate) async fn reset_broker(&mut self, broker_id: BrokerId) {
-        self.brokers_maps.broker_id_map.remove(&broker_id);
+        self.brokers_maps.connections.remove(&broker_id);
         self.brokers_maps.broker_addr_map.remove(&broker_id);
     }
+
+    /// Get partitions count from cache or listen in background fore resolution
+    async fn get_or_fetch_partition_count(&self, topic: String, respond_to: oneshot::Sender<BrokerResult<usize>>) {
+        if let Some(meta) = self.brokers_maps.topics_meta.get(&topic) {
+            if let Err(e) = respond_to.send(Ok(meta.partitions.len())) {
+                // TODO: should panic?
+                error!("get_or_fetch_partition_count: failed to send response");
+            }
+            return
+        }
+
+
+        let mut listener = self.resolver.listener();
+        // TODO: race condition, what if answer comes before listening happen?
+        self.resolver.start_resolve(topic.clone()).await;
+        // TODO: configure timeout
+        tokio::spawn(tokio::time::timeout(Duration::from_secs(3*60),async move {
+            loop {
+                match listener.recv().await {
+                    Ok(meta) => {
+                         if let Some(meta) = meta.topics.iter().find(|t| t.topic == topic) {
+                             if let Err (e) = respond_to.send(Ok(topic.len())) {
+                                 error!("get_or_fetch_partition_count: failed to send response");
+                             }
+                             break;
+                         }
+                    }
+                    Err(e) => {
+                        respond_to.send(Err(BrokerFailureSource::Internal(e.into())));
+                        break;
+                    }
+                }
+            }
+        }));
+    }
+
 
     // // TODO: what is the list of all known brokers?
     // // TODO: retry policy

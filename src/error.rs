@@ -98,6 +98,10 @@ pub enum BrokerFailureSource {
     // TODO: collect errors for every broker and expose as a collection
     #[error("no broker available")]
     NoBrokerAvailable,
+
+    /// Usually failed channel, etc.
+    #[error("internal")]
+    Internal(#[source] anyhow::Error),
 }
 
 impl ShouldRetry for BrokerFailureSource {

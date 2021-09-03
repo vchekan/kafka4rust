@@ -234,7 +234,7 @@ impl ConnectionHandle {
         ConnectionHandle {sender: tx, addr}
     }
 
-    async fn query(&self, request: BytesMut) -> BrokerResult<Bytes> {
+    pub async fn query(&self, request: BytesMut) -> BrokerResult<Bytes> {
         let (tx, rx) = oneshot::channel();
         if let Err(e) = self.sender.send(Msg::Request(request, tx)).await {
             return Err(BrokerFailureSource::ConnectionChannelClosed);
@@ -247,7 +247,7 @@ impl ConnectionHandle {
     }
 
     #[instrument(level = "debug", err, skip(self, request))]
-    async fn exchange<RQ: protocol::Request>(&self, request: &RQ) -> BrokerResult<RQ::Response> {
+    pub async fn exchange<RQ: protocol::Request>(&self, request: &RQ) -> BrokerResult<RQ::Response> {
         // TODO: buffer management
         // TODO: ensure capacity (BytesMut will panic if out of range)
         let mut buff = BytesMut::with_capacity(20 * 1024); //Vec::with_capacity(1024);

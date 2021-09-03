@@ -6,10 +6,12 @@ use std::net::SocketAddr;
 use crate::connection::ConnectionHandle;
 use crate::protocol;
 use crate::error::{BrokerResult, BrokerFailureSource};
+use tokio::sync::oneshot;
 
 pub struct ResolverHandle {
     tx: mpsc::Sender<Msg>,
     pub listener: broadcast::Receiver<protocol::MetadataResponse0>,
+    publisher: broadcast::Sender<protocol::MetadataResponse0>,
 }
 
 struct Resolver {
@@ -19,13 +21,15 @@ struct Resolver {
     brokers: Vec<SocketAddr>,
     topics: HashSet<String>,
     // used to filter out "no change" events
-    state: HashMap<String,Vec<protocol::PartitionMetadata>>
+    state: HashMap<String,Vec<protocol::PartitionMetadata>>,
+    awaiting_resolve: HashMap<String, Vec<oneshot::Sender<Vec<protocol::PartitionMetadata>>>>,
 }
 
 #[derive(Debug)]
 enum Msg {
-    ResolveTopic(String),
+    StartResolving(String),
     ResolvedTopic(protocol::MetadataResponse0),
+    Resolve(String, oneshot::Sender<Vec<protocol::PartitionMetadata>>),
     Timer,
 }
 
@@ -33,15 +37,19 @@ impl ResolverHandle {
     pub fn new(brokers: Vec<SocketAddr>) -> Self {
         let (tx, rx) = mpsc::channel(1);
         let (listener_tx, listener) = broadcast::channel(1);
-        let resolver = Resolver::new(brokers, rx, tx.clone(), listener_tx);
+        let resolver = Resolver::new(brokers, rx, tx.clone(), listener_tx.clone());
         tokio::spawn(run(resolver));
-        ResolverHandle { tx, listener }
+        ResolverHandle { tx, listener , publisher: listener_tx}
     }
 
     pub async fn start_resolve(&self, topic: String) {
-        if let Err(e) = self.tx.send(Msg::ResolveTopic(topic)).await {
+        if let Err(e) = self.tx.send(Msg::StartResolving(topic)).await {
             error!("Resolver channel failed: {}", e);
         }
+    }
+
+    pub fn listener(&self) -> broadcast::Receiver<protocol::MetadataResponse0> {
+        self.publisher.subscribe()
     }
 }
 
@@ -54,13 +62,14 @@ impl Resolver {
             brokers,
             topics: HashSet::new(),
             state: HashMap::new(),
+            awaiting_resolve: HashMap::new(),
         }
     }
 
     async fn handle(&mut self, msg: Msg) {
         debug!("resolver:handle()");
         match msg {
-            Msg::ResolveTopic(topic) => self.add_topic(topic).await,
+            Msg::StartResolving(topic) => self.add_topic(topic).await,
             Msg::Timer => {
                 let topics = self.topics.clone();
                 let brokers = self.brokers.clone();
@@ -114,6 +123,15 @@ impl Resolver {
                 match self.listener.send(meta) {
                     Ok(_) => debug!("Resolver: broadcasted meta"),
                     Err(e) => warn!("Failed to broadcast meta: {}", e)
+                }
+
+
+            }
+            Msg::Resolve(topic, send_to) => {
+                if let Some(meta) = self.state.get(&topic) {
+                    send_to.send(meta.clone());
+                } else {
+                    self.awaiting_resolve.entry(topic).or_default().push(send_to)
                 }
             }
         }
