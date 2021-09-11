@@ -213,27 +213,6 @@ struct Producer {
     topic_partitions_count: HashMap<String,usize>,
 }
 
-struct Producer2 {
-    rx: mpsc::Receiver<Msg>,
-    bootstrap: String,
-    buffer: Buffer,
-    cluster: ClusterHandler,
-    partitioner: Box<dyn Partitioner + Send>,
-    /// Async response (ack/nack) to the caller
-    acks: Sender<Response>,
-    /// Channel to the buffer
-    buffer_commands: Sender<BuffCmd>,
-    flush_loop_handle: tokio::task::JoinHandle<BrokerResult<()>>,
-    send_timeout: Option<Duration>,
-    /// Counter use to round-robin messages with null key
-    null_key_partition_counter: u32,
-    topic_partitions_count: HashMap<String,usize>,
-}
-impl Producer2 {
-    fn new() -> Self {todo!()}
-}
-
-
 /// `ProducerHandler` is not simply a channel proxy to `Producer` but also isolates awaiting for topic
 /// resolution from buffer background flushing.
 impl ProducerHandler {
@@ -241,7 +220,8 @@ impl ProducerHandler {
         let (tx, rx) = mpsc::channel(1);
         let (producer, acks_rx) = Producer::new(builder, rx)?;
         tokio::spawn(async move {
-            run(producer).await;
+            //run(producer).await;
+            todo!();
         });
 
         Ok(ProducerHandler { tx })

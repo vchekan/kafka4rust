@@ -169,3 +169,13 @@ Producer scans "unresolved" queue and puts messages into per-partition queue str
 then it awaits for partition to resolve. As implemented in Producer, it will not freeze Buffer background flushing but will
 freeze sending data by caller, which is acceptable and expected. 
 TODO: make sure that Buffer->Producer communication does not freeze Buffer background flushing.
+
+## Short vs long living async operations
+Not all async are equal. If long-lived async, such as discovery of cluster repartitioning, is called from short-lived,
+such as actor event handling, then things will go wrong. Timeouts, deadlocks, performance degradation.
+
+So you should not be able to call long-living async from short-living one. Long-living should be called as fire-and-forget
+with respond-to caller's `handle` method.
+
+But fire-and-forget is not very convenient to use. You have to define request message, response message, respond_to field
+in request message, and we have not even touched cancellation yet.

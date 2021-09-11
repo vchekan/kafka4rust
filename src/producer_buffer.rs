@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use crate::{ClusterHandler, protocol, buffer_pool};
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc;
 use crate::protocol::{ProduceResponse3};
 use crate::error::BrokerResult;
 use std::time::Duration;
@@ -33,13 +33,40 @@ use crate::producer::Response;
 ///                                | topic 3 --| partition 0; recordset
 ///
 #[derive(Debug)]
-pub(crate) struct Buffer {
+pub(super) struct Buffer {
     topic_queues: HashMap<String, Vec<PartitionQueue>>,
     // Current buffer size, in bytes
     size: u32,
     size_limit: u32,
     cluster: ClusterHandler,
 }
+
+#[derive(PartialEq, Debug)]
+pub(super) enum BufferingResult {
+    Ok,
+    Overflow,
+}
+
+#[derive(Debug, Default)]
+struct PartitionQueue {
+    queue: VecDeque<QueuedMessage>,
+    // How many message are being sent
+    sending: u32,
+}
+
+// enum Msg {
+//
+// }
+//
+// pub(crate) struct BufferHandler {
+//     tx: mpsc::Sender<Msg>
+// }
+//
+// impl BufferHandler {
+//     pub fn new(cluster: ClusterHandler) -> Self {
+//         val buffer = Buffer::new(cluster)
+//     }
+// }
 
 impl Buffer {
     pub fn new(cluster: ClusterHandler) -> Self {
@@ -84,7 +111,7 @@ impl Buffer {
     /// TODO: rust BC to become smarter. Parameter `cluster` is member of `self` but I have to pass it separately because borrow checker
     /// complains about `self` being borrowed 2 times mutably.
     //#[instrument(level = "debug", err, skip(self, acks, cluster))]
-    pub async fn flush(&mut self, acks: &Sender<Response>, cluster: &ClusterHandler) -> BrokerResult<()> {
+    pub async fn flush(&mut self, acks: &mpsc::Sender<Response>, cluster: &ClusterHandler) -> BrokerResult<()> {
         // Have to clone to break immutable and mutable (self.group_queue_by_leader) reference
         let topics: Vec<_> = self.topic_queues.keys().cloned().collect();
         // TODO: timeout from settings
@@ -342,15 +369,3 @@ impl Buffer {
     }
 }
 
-#[derive(PartialEq, Debug)]
-pub(crate) enum BufferingResult {
-    Ok,
-    Overflow,
-}
-
-#[derive(Debug, Default)]
-struct PartitionQueue {
-    queue: VecDeque<QueuedMessage>,
-    // How many message are being sent
-    sending: u32,
-}
