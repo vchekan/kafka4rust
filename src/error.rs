@@ -119,6 +119,7 @@ impl ShouldRetry for BrokerFailureSource {
             Read(_,_) => true,
             UnknownBrokerId(_) => true,
             NoBrokerAvailable => true,
+            Internal(_) => false,
         }
     }
 }

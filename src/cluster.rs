@@ -53,7 +53,7 @@ pub struct ClusterHandler {
     tx: mpsc::Sender<Msg>,
 }
 
-pub enum Msg {
+enum Msg {
     GetLeaderMap(Vec<String>, oneshot::Sender<LeaderMap>),
     GetOrFetchPartitionCount(String, oneshot::Sender<BrokerResult<usize>>),
     BrokerById(BrokerId, oneshot::Sender<Option<ConnectionHandle>>),
@@ -486,5 +486,7 @@ mod tests {
         let leaders = cluster.resolve(vec!["test1".into()]).await;
         debug!("Resolved topic: {:?}", leaders);
 
+        let count = cluster.get_or_fetch_partition_count("test1".into()).await.unwrap();
+        println!("partitions: {}", count);
     }
 }
