@@ -9,7 +9,7 @@ kafka4rust = {path = "../../"}
 jni = "0.17.0"
 log = "0.4.11"
 simple_logger = "1.11.0"
-tokio = {version = "0.3.0", features = ["full"] }
+tokio = {version = "1.8.4", features = ["full"] }
 lazy_static = "1.4.0"
 waker-fn = "1.1.0"
 pin-utils = "0.1.0"
