@@ -2,7 +2,7 @@ version: '3'
 services:
   jaeger:
     # UI http://localhost:16686
-    image: jaegertracing/all-in-one:1.22
+    image: jaegertracing/all-in-one:latest
     environment:
       - COLLECTOR_ZIPKIN_HTTP_PORT=9411
     networks:

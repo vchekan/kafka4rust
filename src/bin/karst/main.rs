@@ -2,8 +2,8 @@ mod ui;
 
 use anyhow::Result;
 use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
-use kafka4rust::{protocol, Cluster, ProducerBuilder};
-use opentelemetry::api::trace::provider::Provider;
+use kafka4rust::{protocol, ClusterHandler, ProducerBuilder};
+//use opentelemetry::api::trace::provider::Provider;
 use opentelemetry::{global, sdk};
 use std::process::exit;
 use tracing::dispatcher;
@@ -11,11 +11,13 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 use tracing_attributes::instrument;
 use std::time::Duration;
+use itertools::Itertools;
+use kafka4rust::init_tracer;
 
 #[tokio::main]
 #[instrument(level="debug")]
 async fn main() -> Result<()> {
-    init_tracer()?;
+    let _tracer = init_tracer("karst")?;
     // let span = tracing::info_span!("main");
     // let _guard = span.enter();
 
@@ -35,7 +37,7 @@ async fn main() -> Result<()> {
     match cli.subcommand() {
         ("list", Some(list)) => {
             let brokers = list.value_of("brokers").unwrap();
-            let mut cluster = Cluster::with_bootstrap(brokers, Some(Duration::from_secs(20)))?;
+            let mut cluster = ClusterHandler::with_bootstrap(brokers, Some(Duration::from_secs(20)))?;
             // TODO: check for errors
             let meta = cluster.fetch_topic_meta_owned(&[]).await?;
             match list.subcommand() {
@@ -180,50 +182,28 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
 }
 
 pub(crate) async fn get_offsets(
-    cluster: &Cluster,
+    cluster: &ClusterHandler,
     topics_partition_count: &[(&str, u32)],
 ) -> Result<protocol::ListOffsetsResponse0> {
-    let req = protocol::ListOffsetsRequest0 {
-        replica_id: -1,
-        topics: topics_partition_count
-            .iter()
-            .map(|t| protocol::Topics {
-                topic: t.0.to_string(),
-                partitions: (0..t.1)
-                    .map(|partition| protocol::Partition {
-                        partition,
-                        timestamp: -1,
-                        max_num_offsets: 2,
-                    })
-                    .collect(),
-            })
-            .collect(),
-    };
-    Ok(cluster.request_any(req).await?)
-}
-
-pub fn init_tracer() -> Result<()> {
-    let exporter = opentelemetry_jaeger::Exporter::builder()
-        .with_process(opentelemetry_jaeger::Process {
-            service_name: "karst-tui".to_string(),
-            tags: vec![],
-        })
-        .init()?;
-    let provider = sdk::Provider::builder()
-        .with_simple_exporter(exporter)
-        .with_config(sdk::Config {
-            default_sampler: Box::new(sdk::Sampler::Always),
-            max_events_per_span: 500,
-            ..Default::default()
-        })
-        .build();
-    global::set_provider(provider);
-
-    let tracer = global::trace_provider().get_tracer("component1");
-    let otl = tracing_opentelemetry::layer().with_tracer(tracer);
-    let subscriber = Registry::default().with(otl);
-    let dispatch = dispatcher::Dispatch::new(subscriber);
-    dispatcher::set_global_default(dispatch)?;
-
-    Ok(())
+    let topics_partition_count = topics_partition_count
+        .iter().map(|t| (t.0.to_owned(), t.1))
+        .collect_vec();
+    Ok(cluster.fetch_offsets(topics_partition_count).await?)
+    // let req = protocol::ListOffsetsRequest0 {
+    //     replica_id: -1,
+    //     topics: topics_partition_count
+    //         .iter()
+    //         .map(|t| protocol::Topics {
+    //             topic: t.0.to_string(),
+    //             partitions: (0..t.1)
+    //                 .map(|partition| protocol::Partition {
+    //                     partition,
+    //                     timestamp: -1,
+    //                     max_num_offsets: 2,
+    //                 })
+    //                 .collect(),
+    //         })
+    //         .collect(),
+    // };
+    // Ok(cluster.request_any(req).await?)
 }

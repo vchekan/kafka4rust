@@ -18,15 +18,14 @@ use async_stream;
 use tracing::{self, event, Level};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
-use tracing_subscriber::fmt::format::debug_fn;
 use tokio::task::JoinHandle;
 use anyhow::Context;
 use futures::stream::{self, StreamExt};
 use tracing::field::debug;
 use crate::retry_policy::with_retry;
-use crate::producer_buffer::{BufferingResult, Buffer};
+use crate::producer_buffer::BufferHandler;
 use log::{debug, error};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -139,11 +138,11 @@ pub trait ToMessage: Send {
     fn value(&self) -> Vec<u8>;
 }
 
-pub trait Partitioner: Debug + Send {
+pub trait Partitioner: Debug + Send + Sync {
     fn partition(&self, key: &[u8]) -> u32;
 }
 
-// clients/src/main/java/org/apache/kafka/clients/producer/internals/DefaultPartitioner.java
+/// clients/src/main/java/org/apache/kafka/clients/producer/internals/DefaultPartitioner.java
 pub struct Murmur2Partitioner {}
 impl Partitioner for Murmur2Partitioner {
     fn partition(&self, key: &[u8]) -> u32 {
@@ -171,7 +170,8 @@ enum BuffCmd {
 }
 
 enum Msg {
-    Produce(QueuedMessage, String)
+    Produce(QueuedMessage, String),
+    Flush(oneshot::Sender<BrokerResult<()>>),
 }
 
 #[derive(Debug)]
@@ -199,14 +199,14 @@ pub struct ProducerHandler {
 struct Producer {
     rx: mpsc::Receiver<Msg>,
     bootstrap: String,
-    buffer: Buffer,
+    buffer: BufferHandler,
     cluster: ClusterHandler,
-    partitioner: Box<dyn Partitioner + Send>,
+    partitioner: Box<dyn Partitioner>,
     /// Async response (ack/nack) to the caller
     acks: Sender<Response>,
     /// Channel to the buffer
     buffer_commands: Sender<BuffCmd>,
-    flush_loop_handle: tokio::task::JoinHandle<BrokerResult<()>>,
+    //flush_loop_handle: tokio::task::JoinHandle<BrokerResult<()>>,
     send_timeout: Option<Duration>,
     /// Counter use to round-robin messages with null key
     null_key_partition_counter: u32,
@@ -220,8 +220,7 @@ impl ProducerHandler {
         let (tx, rx) = mpsc::channel(1);
         let (producer, acks_rx) = Producer::new(builder, rx)?;
         tokio::spawn(async move {
-            //run(producer).await;
-            todo!();
+            run(producer).await;
         });
 
         Ok(ProducerHandler { tx })
@@ -240,6 +239,13 @@ impl ProducerHandler {
         if self.tx.send(Msg::Produce(msg, topic.to_string())).await.is_err() {
             error!("ProducerHandler: failed to send message to Producer");
         }
+    }
+
+    pub async fn close(self) -> anyhow::Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.tx.send(Msg::Flush(tx)).await;
+        rx.await?;
+        Ok(())
     }
 }
 
@@ -277,13 +283,13 @@ impl Producer {
         let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(1);
         let (buff_tx, mut buff_rx) = channel::<BuffCmd>(2);
 
-        let buffer = Buffer::new(cluster.clone());
+        let buffer = BufferHandler::new(cluster.clone());
         // let buffer2 = buffer.clone();
         // TODO: default flush timeout is not very scientific. Think either whole flush should have timeout or its internal parts
         let send_timeout = builder.send_timeout.unwrap_or(Duration::from_secs(30));
 
         // TODO: wait in `close` for loop to end
-        let flush_loop_handle: JoinHandle<_> = tokio::spawn(flushing_loop(buff_rx, buffer.clone(), ack_tx.clone(), cluster.clone(), send_timeout));
+        //let flush_loop_handle: JoinHandle<_> = tokio::spawn(flushing_loop(buff_rx, buffer.clone(), ack_tx.clone(), cluster.clone(), send_timeout));
 
         let producer = Producer {
             rx,
@@ -294,7 +300,7 @@ impl Producer {
             // topics_meta: HashMap::new(),
             acks: ack_tx,
             buffer_commands: buff_tx,
-            flush_loop_handle,
+            //flush_loop_handle,
             send_timeout: builder.send_timeout,
             null_key_partition_counter: 0,
             topic_partitions_count: HashMap::new(),
@@ -304,8 +310,10 @@ impl Producer {
     }
 
     async fn handle(&mut self, msg: Msg) {
-        match msg {
-            Msg::Produce(msg, topic) => self.send(msg, topic).await
+        // TODO: handle result
+        let _res = match msg {
+            Msg::Produce(msg, topic) => self.send(msg, topic).await,
+            Msg::Flush(respond_to) => self.flush().await,
         };
     }
 
@@ -348,6 +356,7 @@ impl Producer {
 
     #[instrument(level = "debug", err, skip(msg, self))]
     async fn send(&mut self, msg: QueuedMessage, topic: String) -> BrokerResult<()> {
+        // calculate partition by the key
         let partition = match &msg.key {
             Some(key) => self.partitioner.partition(&key),
             None => {
@@ -355,9 +364,8 @@ impl Producer {
                 self.null_key_partition_counter
             }
         };
-
+        // TODO: no long-time blocking should exist
         let partition_count = self.get_or_fetch_partition_count(&topic).await?;
-
         let partition = partition % partition_count as u32;
 
         match self.topic_partitions_count.get(&topic) {
@@ -367,7 +375,7 @@ impl Producer {
             }
             None => {
                 // TODO:
-                panic!("Buffer overflow handling not implemented");
+                panic!();
             }
         }
 
@@ -381,11 +389,12 @@ impl Producer {
 
     #[instrument(level="debug", err, skip(self))]
     pub async fn flush(&mut self) -> BrokerResult<()> {
-        debug!("Flushing buffer before close");
-        // let mut cluster = self.cluster.write().await;
-        let res = self.buffer.flush(&mut self.acks, &self.cluster).await;
-        debug!("Flushing result: {:#?}", res);
-        res
+        todo!()
+        // debug!("Flushing buffer before close");
+        // // let mut cluster = self.cluster.write().await;
+        // let res = self.buffer.flush(&mut self.acks, &self.cluster).await;
+        // debug!("Flushing result: {:#?}", res);
+        // res
     }
 
     /// Get topic's meta from cache or request from broker.
@@ -474,70 +483,71 @@ impl Producer {
 
     #[instrument(level="debug", err, skip(self))]
     pub async fn close(self) -> anyhow::Result<()> {
-        debug!("Closing producer...");
-        self.buffer_commands.send(BuffCmd::FlushAndClose).await?;
-        debug!("Sent BuffCmd::FlushAndClose, waiting for loop exit");
-        self.flush_loop_handle.await.context("producer closing")??;
-        debug!("Producer closed");
-        Ok(())
+        todo!()
+        // debug!("Closing producer...");
+        // self.buffer_commands.send(BuffCmd::FlushAndClose).await?;
+        // debug!("Sent BuffCmd::FlushAndClose, waiting for loop exit");
+        // self.flush_loop_handle.await.context("producer closing")??;
+        // debug!("Producer closed");
+        // Ok(())
     }
 }
 
-#[instrument(level = "debug")]
-async fn flushing_loop(mut buff_rx: Receiver<BuffCmd>, buffer: &mut Buffer, ack_tx: Sender<Response>, cluster: ClusterHandler, send_timeout: Duration) -> BrokerResult<()> {
-    let mut complete = false;
-    loop {
-        //     // TODO: check time since last flush
-        //     // TODO: configure flush time
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(5)) => { debug!("Buffer timer"); }
-            cmd = buff_rx.recv() => {
-                match cmd {
-                    Some(BuffCmd::Flush) => {
-                        debug!("Flushing buffer");
-                    }
-                    Some(BuffCmd::FlushAndClose) => {
-                        debug!("Buffer flush before closing");
-                        complete = true;
-                    }
-                    None => {
-                        debug!("Producer closed. Exiting buffer flush loop");
-                        complete = true;
-                    }
-                }
-            }
-        }
+// #[instrument(level = "debug")]
+// async fn flushing_loop(mut buff_rx: Receiver<BuffCmd>, buffer: &mut Buffer, ack_tx: Sender<Response>, cluster: ClusterHandler, send_timeout: Duration) -> BrokerResult<()> {
+//     let mut complete = false;
+//     loop {
+//         //     // TODO: check time since last flush
+//         //     // TODO: configure flush time
+//         tokio::select! {
+//             _ = tokio::time::sleep(Duration::from_secs(5)) => { debug!("Buffer timer"); }
+//             cmd = buff_rx.recv() => {
+//                 match cmd {
+//                     Some(BuffCmd::Flush) => {
+//                         debug!("Flushing buffer");
+//                     }
+//                     Some(BuffCmd::FlushAndClose) => {
+//                         debug!("Buffer flush before closing");
+//                         complete = true;
+//                     }
+//                     None => {
+//                         debug!("Producer closed. Exiting buffer flush loop");
+//                         complete = true;
+//                     }
+//                 }
+//             }
+//         }
 
-        debug!("Waiting for buffer locks");
-        // TODO: is buffer locked worst-case until flush timeout? Does it mean no append can happen?
-        //let mut buffer2 = buffer.lock().await;
-        // TODO: handle result
-        debug!("Flushing with {:?} send_timeout", send_timeout);
-        // TODO: use Duration::MAX when stabilized
+//         debug!("Waiting for buffer locks");
+//         // TODO: is buffer locked worst-case until flush timeout? Does it mean no append can happen?
+//         //let mut buffer2 = buffer.lock().await;
+//         // TODO: handle result
+//         debug!("Flushing with {:?} send_timeout", send_timeout);
+//         // TODO: use Duration::MAX when stabilized
 
-        // let res = buffer2.flush(&ack_tx2, &cluster).await;
-        let res: BrokerResult<()> = match timeout(send_timeout, buffer.flush(&ack_tx, &cluster)).await {
-            Err(_) => {
-                tracing::warn!("Flushing timeout");
-                Err(BrokerFailureSource::Timeout)
-            },
-            Ok(Err(e)) => {
-                error!("Failed to flush buffer. {:?}", e);
-                Err(e)
-            },
-            Ok(Ok(_)) => {
-                tracing::trace!("Flush Ok");
-                Ok(())
-            }
-        };
+//         // let res = buffer2.flush(&ack_tx2, &cluster).await;
+//         let res: BrokerResult<()> = match timeout(send_timeout, buffer.flush(&ack_tx, &cluster)).await {
+//             Err(_) => {
+//                 tracing::warn!("Flushing timeout");
+//                 Err(BrokerFailureSource::Timeout)
+//             },
+//             Ok(Err(e)) => {
+//                 error!("Failed to flush buffer. {:?}", e);
+//                 Err(e)
+//             },
+//             Ok(Ok(_)) => {
+//                 tracing::trace!("Flush Ok");
+//                 Ok(())
+//             }
+//         };
 
-        if complete {
-            debug!("Buffer flush loop quit");
-            return  res;
-            // return Ok(())
-        }
-    };
-}
+//         if complete {
+//             debug!("Buffer flush loop quit");
+//             return  res;
+//             // return Ok(())
+//         }
+//     };
+// }
 
 
 
@@ -614,3 +624,97 @@ impl ToMessage for &[u8] {
 //     fn key(&self) -> Option<Vec<u8>> { None }
 //     fn value(&self) -> Vec<u8> { Vec::from(self) }
 // }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+    use opentelemetry::trace::Tracer;
+    use crate::ProducerBuilder;
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing;
+    use tracing::{info_span, instrument};
+    use tracing_subscriber::Registry;
+
+    #[test]
+    fn test3() -> anyhow::Result<()> {
+        use opentelemetry::global;
+        use opentelemetry::trace::Tracer;
+        use instrument::Instrument;
+
+        global::set_text_map_propagator(opentelemetry_jaeger::Propagator::default());
+        let tracer =
+            opentelemetry_jaeger::new_agent_pipeline()
+            .with_service_name("test3")
+            .install_simple()?;
+
+        let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+        let subscriber = Registry::default().with(telemetry);
+        tracing::subscriber::set_global_default(subscriber)?;
+        //tracing::subscriber::with_default(subscriber, || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    tracing::info!("thread 2");
+                }.instrument(info_span!("thread")));
+        //});
+
+
+        global::shutdown_tracer_provider(); // sending remaining spans
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test() -> anyhow::Result<()> {
+        simple_logger::init_with_level(log::Level::Trace)?;
+        opentelemetry::global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
+        let tracer = opentelemetry_jaeger::new_agent_pipeline()
+            .with_service_name("producer-test")
+            .install_batch(opentelemetry::runtime::Tokio)?;
+            // .install_simple()?;
+        tracer.in_span("test", |cx| {
+            tracing::info!("root");
+        });
+
+        tracing::info!("root");
+
+        opentelemetry::global::shutdown_tracer_provider();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test1() -> anyhow::Result<()> {
+        simple_logger::init_with_level(log::Level::Trace)?;
+        // let tracer = opentelemetry_jaeger::new_pipeline()
+        //     .with_service_name("producer-test")
+        //     .install_simple()?;
+        let subscriber_fmt = tracing_subscriber::fmt::fmt().with_level(true).finish();
+        // let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+        // let subscriber = tracing_subscriber::Registry::default().with(telemetry);
+        tracing::subscriber::set_global_default(subscriber_fmt).unwrap();
+
+        let root_span = tracing::span!(tracing::Level::INFO, "root-span", work_units = 2);
+        let guard = root_span.enter();
+        tracing::info!("info-1");
+        tracing::event!(tracing::Level::INFO, "event-1");
+        call_instrumented();
+        tracing::info!("info-2");
+
+        //tokio::time::sleep(Duration::from_secs(5)).await;
+
+        //std::mem::drop(guard);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        opentelemetry::global::shutdown_tracer_provider();
+        Ok(())
+    }
+
+    #[tracing::instrument]
+    fn call_instrumented() {
+        tracing::info!("call_instrumented called");
+    }
+
+
+}

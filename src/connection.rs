@@ -25,13 +25,15 @@ use std::time::Duration;
 use bytes::{BytesMut, BufMut, Bytes, Buf};
 use std::net::SocketAddr;
 
-use crate::error::{BrokerFailureSource, BrokerResult};
+use crate::error::{BrokerFailureSource, BrokerResult, InternalError};
 use async_std::net::TcpStream;
 use async_std::prelude::*;
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use tracing;
 use std::fmt::{Debug, Formatter};
+use std::io::Cursor;
+use std::sync::atomic::{AtomicU32, Ordering};
 use crate::protocol;
 use crate::protocol::{write_request, read_response};
 use tokio::sync::{mpsc, oneshot};
@@ -112,10 +114,18 @@ impl ConnectionHandle {
     }
 }
 
+impl Debug for Msg {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Msg::Request(..) => f.write_str("Msg::Request")
+        }
+    }
+}
 
 impl BrokerConnection {
     /// Connect to address and issue ApiVersion request, build compatible Api Versions for all Api
     /// Keys
+    #[instrument(level="debug")]
     async fn connect(addr: SocketAddr, rx: mpsc::Receiver<Msg>) -> BrokerResult<Self> {
         let tcp = TcpStream::connect(&addr).await?;
         debug!("Connected to {}", addr);
@@ -144,6 +154,7 @@ impl BrokerConnection {
         })
     }
 
+    #[instrument(name="connection-handle")]
     async fn handle(&mut self, msg: Msg) {
         match msg {
             Msg::Request(mut msg, respond) => {
@@ -188,26 +199,27 @@ impl BrokerConnection {
         Ok(())
     }
 
-    // #[instrument(level = "debug", err, skip(self, request))]
-    // pub async fn exchange<R>(&mut self, request: &R) -> BrokerResult<R::Response>
-    // where
-    //     R: protocol::Request,
-    // {
-    //     // TODO: buffer management
-    //     // TODO: ensure capacity (BytesMut will panic if out of range)
-    //     let mut buff = BytesMut::with_capacity(20 * 1024); //Vec::with_capacity(1024);
-    //     //let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
-    //     // let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
-    //     protocol::write_request(request, None, &mut buff, self.correlation_id);
-    //     self.correlation_id += 1;
+    #[instrument(level = "debug", err, skip(self, request))]
+    pub async fn exchange<R>(&mut self, request: &R) -> BrokerResult<R::Response>
+    where
+        R: protocol::Request,
+    {
+        // TODO: buffer management
+        // TODO: ensure capacity (BytesMut will panic if out of range)
+        let mut buff = BytesMut::with_capacity(20 * 1024); //Vec::with_capacity(1024);
+        //let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
+        // let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
+        protocol::write_request(request, None, &mut buff, self.correlation_id);
+        self.correlation_id += 1;
 
-    //     self.exchange_with_buf(&mut buff).await?;
-    //     //let mut cursor = Cursor::new(buff);
-    //     let (_corr_id, response) = read_response(&mut buff.freeze())?;
-    //     // TODO: check correlationId
-    //     // TODO: check for response error
-    //     Ok(response)
-    // }
+        self.exchange_with_buf(&mut buff).await?;
+        //let mut cursor = Cursor::new(buff);
+        let (_corr_id, response) = read_response(&mut buff.freeze())?;
+        // TODO: check correlationId
+        // TODO: check for response error
+        Ok(response)
+    }
+
 }
 
 fn build_api_compatibility(them: &protocol::ApiVersionsResponse0) -> Vec<(i16, i16)> {
@@ -245,8 +257,8 @@ fn build_api_compatibility(them: &protocol::ApiVersionsResponse0) -> Vec<(i16, i
         .collect()
 }
 
+#[instrument(name="connection-handler")]
 async fn run(addr: SocketAddr, rx: mpsc::Receiver<Msg>) {
-    debug!("run: started broker connect");
     let conn = BrokerConnection::connect(addr, rx).await;
     match conn {
         Ok(mut conn) => {

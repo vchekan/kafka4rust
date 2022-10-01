@@ -6,7 +6,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use kafka4rust::protocol::Broker;
-use kafka4rust::{protocol, Cluster};
+use kafka4rust::{protocol, ClusterHandler};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io::{stdout, Write};
@@ -129,7 +129,7 @@ pub async fn main_ui(bootstrap: &str) -> Result<()> {
             let res = async {
                 tracing::event!(tracing::Level::DEBUG, %bootstrap, "Connecting");
                 tx.send(Cmd::ConnState(ConnState::Connecting)).await?;
-                let mut cluster = Cluster::with_bootstrap(&bootstrap, Some(Duration::from_secs(20)))?;
+                let mut cluster = ClusterHandler::with_bootstrap(&bootstrap, Some(Duration::from_secs(20)))?;
                 let topics_meta = cluster.fetch_topic_meta_owned(&[]).await?;
                 tracing::debug_span!("Connected");
                 tx.send(Cmd::ConnState(ConnState::Connected)).await?;

@@ -33,18 +33,12 @@ use crate::producer::Response;
 ///                                | topic 3 --| partition 0; recordset
 ///
 #[derive(Debug)]
-pub(super) struct Buffer {
+struct Buffer {
     topic_queues: HashMap<String, Vec<PartitionQueue>>,
     // Current buffer size, in bytes
     size: u32,
     size_limit: u32,
     cluster: ClusterHandler,
-}
-
-#[derive(PartialEq, Debug)]
-pub(super) enum BufferingResult {
-    Ok,
-    Overflow,
 }
 
 #[derive(Debug, Default)]
@@ -54,19 +48,32 @@ struct PartitionQueue {
     sending: u32,
 }
 
-// enum Msg {
-//
-// }
-//
-// pub(crate) struct BufferHandler {
-//     tx: mpsc::Sender<Msg>
-// }
-//
-// impl BufferHandler {
-//     pub fn new(cluster: ClusterHandler) -> Self {
-//         val buffer = Buffer::new(cluster)
-//     }
-// }
+enum Msg {
+
+}
+
+pub(crate) struct BufferHandler {
+    tx: mpsc::Sender<Msg>
+}
+
+impl BufferHandler {
+    pub fn new(cluster: ClusterHandler) -> Self {
+        let(tx, rx) = mpsc::channel(8);
+        tokio::spawn(run(cluster, rx));
+        BufferHandler { tx }
+    }
+
+    pub async fn add(&self, msg: QueuedMessage, topic: String, partition: Partition, partition_count: u32) {
+        todo!()
+    }
+}
+
+async fn run(cluster: ClusterHandler, mut rx: mpsc::Receiver<Msg>) {
+    let mut buffer = Buffer::new(cluster);
+    while let Some(msg) = rx.recv().await {
+        buffer.handle(msg).await;
+    }
+}
 
 impl Buffer {
     pub fn new(cluster: ClusterHandler) -> Self {
@@ -80,6 +87,10 @@ impl Buffer {
         }
     }
 
+    async fn handle(&mut self, msg: Msg) {
+        todo!()
+    }
+
     /// Is async because topic metadata might require resolving.
     /// At the same time, we do not want to blow memory with awaiting tasks
     /// if resolving takes time and message velocity is high.
@@ -87,25 +98,26 @@ impl Buffer {
         &mut self,
         msg: QueuedMessage,
         topic: String,
-        partition: u32,
-        partitions_count: u32,
-    ) -> BufferingResult {
-        if self.size + msg.value.len() as u32 > self.size_limit {
-            debug!("Overflow");
-            // TODO: await instead
-            return BufferingResult::Overflow;
-        }
-
-        let partitions = self.topic_queues.entry(topic).or_insert_with(|| {
-            (0..partitions_count)
-                .map(|_| PartitionQueue::default())
-                .collect()
-        });
-
-        self.size += (msg.value.len() + msg.key.as_ref().map(|k| k.len()).unwrap_or(0)) as u32;
-
-        partitions[partition as usize].queue.push_back(msg);
-        BufferingResult::Ok
+        partition: Partition,
+        partitions_count: u32
+    ) {
+        todo!()
+        // if self.size + msg.value.len() as u32 > self.size_limit {
+        //     debug!("Overflow");
+        //     // TODO: await instead
+        //     return BufferingResult::Overflow;
+        // }
+        //
+        // let partitions = self.topic_queues.entry(topic).or_insert_with(|| {
+        //     (0..partitions_count)
+        //         .map(|_| PartitionQueue::default())
+        //         .collect()
+        // });
+        //
+        // self.size += (msg.value.len() + msg.key.as_ref().map(|k| k.len()).unwrap_or(0)) as u32;
+        //
+        // partitions[partition as usize].queue.push_back(msg);
+        // BufferingResult::Ok
     }
 
     /// TODO: rust BC to become smarter. Parameter `cluster` is member of `self` but I have to pass it separately because borrow checker

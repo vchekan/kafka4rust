@@ -29,43 +29,79 @@ services:
 #      - "14250:14250"
 #      - "9411:9411"
   broker1:
-    image: kafka4rust-broker
-    ports:
-      - "9092:9092"
-    build:
-      context: .
-    depends_on:
-      - zookeeper
-    networks:
-      - hostnet
-    environment:
-      BROKER_OPTS: >-
-        --override broker.id=1
-        --override advertised.listeners=INSIDE://:9094,OUTSIDE://localhost:9092
-        --override listeners=INSIDE://:9094,OUTSIDE://:9092
-        --override listener.security.protocol.map=INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
-        --override inter.broker.listener.name=INSIDE
-        --override zookeeper.connect=zookeeper:2181
-        --override num.partitions=10
-  broker2:
-    image: kafka4rust-broker
+    image: bitnami/kafka:3.2.3
     ports:
       - "9093:9093"
-    build:
-      context: .
+#    build:
+#      context: .
+    depends_on:
+      - zookeeper
+    networks:
+      - hostnet
+#    environment:
+#      - KAFKA_BROKER_ID=1
+#      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+#      - ALLOW_PLAINTEXT_LISTENER=yes
+#      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+#      - KAFKA_CFG_LISTENERS=INSIDE://:9094,OUTSIDE://:9092
+#      - KAFKA_CFG_advertised.listeners=INSIDE://:9094,OUTSIDE://localhost:9092
+#      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=INSIDE
+
+
+    environment:
+    - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+    - ALLOW_PLAINTEXT_LISTENER=yes
+    - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CLIENT:PLAINTEXT,EXTERNAL:PLAINTEXT
+    - KAFKA_CFG_LISTENERS=CLIENT://:9094,EXTERNAL://:9093
+    - KAFKA_CFG_ADVERTISED_LISTENERS=CLIENT://:9094,EXTERNAL://localhost:9093
+    - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=CLIENT
+#      - KAFKA_CFG_num.partitions=10
+
+#      BROKER_OPTS: >-
+#        --override broker.id=1
+#        --override advertised.listeners=INSIDE://:9094,OUTSIDE://localhost:9092
+#        --override listeners=INSIDE://:9094,OUTSIDE://:9092
+#        --override listener.security.protocol.map=INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+#        --override inter.broker.listener.name=INSIDE
+#        --override zookeeper.connect=zookeeper:2181
+#        --override num.partitions=10
+  broker2:
+    image: bitnami/kafka:3.2.3
+    ports:
+      - "9092:9092"
+#    build:
+#      context: .
     depends_on:
       - zookeeper
     networks:
       - hostnet
     environment:
-      BROKER_OPTS: >-
-        --override broker.id=2
-        --override advertised.listeners=INSIDE://:9094,OUTSIDE://localhost:9093
-        --override listeners=INSIDE://:9094,OUTSIDE://:9093
-        --override listener.security.protocol.map=INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
-        --override inter.broker.listener.name=INSIDE
-        --override zookeeper.connect=zookeeper:2181
-        --override num.partitions=10
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CLIENT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_CFG_LISTENERS=CLIENT://:9094,EXTERNAL://:9092
+      - KAFKA_CFG_ADVERTISED_LISTENERS=CLIENT://:9094,EXTERNAL://localhost:9092
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=CLIENT
+
+#    environment:
+#      - KAFKA_BROKER_ID=1
+#      - ALLOW_PLAINTEXT_LISTENER=yes
+#      - KAFKA_CFG_advertised.listeners=INSIDE://:9094,OUTSIDE://localhost:9093
+#      - KAFKA_CFG_listeners=INSIDE://:9094,OUTSIDE://:9093
+#      - KAFKA_CFG_listener.security.protocol.map=INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+#      - KAFKA_CFG_inter.broker.listener.name=INSIDE
+#      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+#
+#      - KAFKA_CFG_num.partitions=10
+
+#      BROKER_OPTS: >-
+#        --override broker.id=2
+#        --override advertised.listeners=INSIDE://:9094,OUTSIDE://localhost:9093
+#        --override listeners=INSIDE://:9094,OUTSIDE://:9093
+#        --override listener.security.protocol.map=INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+#        --override inter.broker.listener.name=INSIDE
+#        --override zookeeper.connect=zookeeper:2181
+#        --override num.partitions=10
 networks:
   hostnet:
     

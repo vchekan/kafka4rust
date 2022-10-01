@@ -1,4 +1,5 @@
 //! Design questions
+//! Design questions
 //! Q: What is communication and ownership between Cluster and TopicResolver?
 //! A: channels
 //!
@@ -40,8 +41,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::sync::mpsc::{Sender, Receiver};
 use crate::connection::ConnectionHandle;
 use std::fmt::{Debug, Formatter};
-use tracing::event;
-use crate::protocol::{ErrorCode, MetadataResponse0, Broker};
+use tracing::{debug_span, event, Instrument, Span};
+use crate::protocol::{ErrorCode, MetadataResponse0, Broker, Request};
 use log::{debug, info, warn, error};
 use crate::resolver::ResolverHandle;
 use tokio_stream::StreamExt;
@@ -53,10 +54,12 @@ pub struct ClusterHandler {
     tx: mpsc::Sender<Msg>,
 }
 
+#[derive(Debug)]
 enum Msg {
     GetLeaderMap(Vec<String>, oneshot::Sender<LeaderMap>),
     GetOrFetchPartitionCount(String, oneshot::Sender<BrokerResult<usize>>),
     BrokerById(BrokerId, oneshot::Sender<Option<ConnectionHandle>>),
+    ListOffsets(Vec<(String,u32)>, oneshot::Sender<protocol::ListOffsetsResponse0>),
 }
 
 struct Cluster {
@@ -84,12 +87,19 @@ impl ClusterHandler {
         ClusterHandler { tx }
     }
 
+    #[instrument(err)]
+    pub fn with_bootstrap(bootstrap: &str, timeout: Option<Duration>) -> anyhow::Result<Self> {
+        let bootstrap = resolve_addr(bootstrap);
+        Ok(Self::new(bootstrap, timeout))
+    }
     /// If broker is known, return it in the map, otherwise trigger topic resolution and ignore this
     /// topic for now.
+    #[instrument(level="debug")]
     pub async fn resolve(&self, topics: Vec<String>) -> LeaderMap {
         let (req, resp) = oneshot::channel::<LeaderMap>();
-        let _ = self.tx.send(Msg::GetLeaderMap(topics, req)).await;
-        match resp.await {
+        let _ = self.tx.send(Msg::GetLeaderMap(topics, req))
+            .instrument(debug_span!("send")).await;
+        match resp.instrument(debug_span!("read")).await {
             Ok(resp) => resp,
             Err(e) => {
                 panic!("Cluster: resolver channel failed: {}", e)
@@ -97,6 +107,7 @@ impl ClusterHandler {
         }
     }
 
+    #[instrument]
     pub async fn get_or_fetch_partition_count(&self, topic: String) -> BrokerResult<usize> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(Msg::GetOrFetchPartitionCount(topic, tx)).await;
@@ -109,6 +120,7 @@ impl ClusterHandler {
         }
     }
 
+    #[instrument]
     pub async fn broker_by_id(&self, id: BrokerId) -> Option<ConnectionHandle> {
         let (req, resp) = oneshot::channel();
         self.tx.send(Msg::BrokerById(id, req));
@@ -120,22 +132,35 @@ impl ClusterHandler {
             }
         }
     }
+
+    pub async fn fetch_offsets(&self, topics_partition_count: Vec<(String, u32)>) -> BrokerResult<protocol::ListOffsetsResponse0>
+    {
+        let (req, resp) = oneshot::channel();
+        if let Err(e) = self.tx.send(Msg::ListOffsets(topics_partition_count, req)).await {
+            return Err(BrokerFailureSource::Internal(e.into()));
+        }
+        match resp.await {
+            Ok(r) => Ok(r),
+            Err(e) => Err(BrokerFailureSource::Internal(e.into()))
+        }
+    }
 }
 
-impl std::fmt::Debug for ClusterHandler {
+impl Debug for ClusterHandler {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         // TODO: retain bootstrap field for Display purpose?
         write!(f, "ClusterHandler")
     }
 }
 
+#[instrument(level="debug")]
 async fn run(mut cluster: Cluster) {
     debug!("Cluster loop starting");
     loop {
         tokio::select! {
             biased;
 
-            Ok(msg) = cluster.resolver.listener.recv() => {
+            Ok(msg) = cluster.resolver.listener.recv().instrument(debug_span!("reading from resolver")) => {
                 debug!("Got resolver message");
                 cluster.update_brokers_map(&msg);
             },
@@ -163,12 +188,6 @@ impl Debug for Cluster {
 }
 
 impl Cluster {
-    #[instrument(err)]
-    pub fn with_bootstrap(bootstrap: &str, rx: mpsc::Receiver<Msg>, timeout: Option<Duration>) -> anyhow::Result<Self> {
-        let bootstrap = resolve_addr(bootstrap);
-        Ok(Self::new(bootstrap, rx, timeout))
-    }
-
     /// Connect to at least one broker successfully .
     pub fn new(bootstrap: Vec<SocketAddr>, rx: mpsc::Receiver<Msg>, operation_timeout: Option<Duration>) -> Self {
         /*let connect_futures = bootstrap.iter()
@@ -207,11 +226,12 @@ impl Cluster {
         cluster
     }
 
+    #[instrument]
     async fn handle(&mut self, msg: Msg) {
         match msg {
             // TODO: make sure that consumer keeps its copy of leader map and does not request it every time produce message is sent
             Msg::GetLeaderMap(topics, response) => {
-                let leaders = self.get_known_broker_map().await;
+                let leaders = self.get_known_broker_map();
                 let known_maps: HashSet<&String> = leaders.iter().flat_map(|i| i.1.iter().map(|t| &t.0)).collect();
                 let missing_topics: Vec<_> = topics.iter().filter(|t| !known_maps.contains(t)).collect();
                 for topic in missing_topics {
@@ -230,11 +250,16 @@ impl Cluster {
                 let conn = self.brokers_maps.connections.get(&id).cloned();
                 respond_to.send(conn);
             }
+            Msg::ListOffsets(topics_partition_count, respond_to) => {
+                let offsets = self.list_offsets(topics_partition_count).await;
+                respond_to.send(offsets);
+            }
         }
     }
 
     /// Return leader map of known brokers. Unknown brokers will be requested in background.
-    async fn get_known_broker_map(&self) -> LeaderMap {
+    #[instrument(level="debug")]
+    fn get_known_broker_map(&self) -> LeaderMap {
         let mut res: HashMap<BrokerId, HashMap<String,Vec<Partition>>> = HashMap::new();
         for (topic, partitions) in &self.brokers_maps.meta_cache {
             for (partition, leaderId) in partitions.iter().enumerate() {
@@ -278,12 +303,14 @@ impl Cluster {
         }
     }
 
+    #[instrument]
     pub(crate) async fn reset_broker(&mut self, broker_id: BrokerId) {
         self.brokers_maps.connections.remove(&broker_id);
         self.brokers_maps.broker_addr_map.remove(&broker_id);
     }
 
     /// Get partitions count from cache or listen in background fore resolution
+    #[instrument]
     async fn get_or_fetch_partition_count(&self, topic: String, respond_to: oneshot::Sender<BrokerResult<usize>>) {
         if let Some(meta) = self.brokers_maps.topics_meta.get(&topic) {
             if let Err(e) = respond_to.send(Ok(meta.partitions.len())) {
@@ -315,45 +342,50 @@ impl Cluster {
                     }
                 }
             }
-        }));
+        }.instrument(debug_span!("reading resolver"))));
+    }
+
+    #[instrument]
+    async fn list_offsets(&self, topics_partition_count: Vec<(String, u32)>) -> protocol::ListOffsetsResponse0 {
+        todo!()
     }
 
 
     // // TODO: what is the list of all known brokers?
     // // TODO: retry policy
     // /// Execute request on every broker until success
-    // pub async fn request_any<R: protocol::Request>(&self, request: R) -> BrokerResult<R::Response> {
-    //     // TODO:
-    //     // Do not block broker list for the duration of the walk along all brokers.
-    //     // Instead walk by the index, until index is out of size.
-    //     // It is possible that some other process have modified the broker list while walk is
-    //     // performed, but this is ok for "from any broker" query.
-    //
-    //     for broker in self.brokers_maps.broker_id_map.values() {
-    //         match broker.send_request(&request).await {
-    //             Ok(resp) => return Ok(resp),
-    //             Err(e) => {
-    //                 info!("Error {:?}", e)
-    //             }
-    //         }
-    //     }
-    //
-    //     // TODO: after connect we have list of broker addresses but can not know their ID yet.
-    //     // Because of that, I have to check 2 lists, brokers with known ID and without (bootstrap ones)
-    //     for addr in &self.bootstrap {
-    //         match ConnectionHandle::connect(*addr).await {
-    //             Ok(broker) => match broker.send_request(&request).await {
-    //                 Ok(resp) => return Ok(resp),
-    //                 Err(e) => {
-    //                     info!("Error {}", e)
-    //                 }
-    //             },
-    //             Err(e) => info!("Error fetching topic meta: {}", e),
-    //         }
-    //     }
-    //
-    //     Err(BrokerFailureSource::NoBrokerAvailable)
-    // }
+    pub async fn request_any<R: protocol::Request>(&self, request: R) -> BrokerResult<R::Response> {
+        // TODO:
+        // Do not block broker list for the duration of the walk along all brokers.
+        // Instead walk by the index, until index is out of size.
+        // It is possible that some other process have modified the broker list while walk is
+        // performed, but this is ok for "from any broker" query.
+
+        for broker in self.brokers_maps.connections.values() {
+            match broker.exchange(&request).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    info!("Error {:?}", e)
+                }
+            }
+        }
+
+        // TODO: after connect we have list of broker addresses but can not know their ID yet.
+        //      Because of that, I have to check 2 lists, brokers with known ID and without (bootstrap ones)
+        // for addr in &self.bootstrap {
+        //     match ConnectionHandle::connect(*addr).await {
+        //         Ok(broker) => match broker.send_request(&request).await {
+        //             Ok(resp) => return Ok(resp),
+        //             Err(e) => {
+        //                 info!("Error {}", e)
+        //             }
+        //         },
+        //         Err(e) => info!("Error fetching topic meta: {}", e),
+        //     }
+        // }
+
+        Err(BrokerFailureSource::NoBrokerAvailable)
+    }
 
     // pub async fn start_resolving_topics<T>(&self, topics: T) -> std::result::Result<(), InternalError>
     //     where T: IntoIterator, T::Item: AsRef<str>
@@ -473,20 +505,26 @@ mod tests {
     use async_std::task;
     use std::env;
     use log::LevelFilter;
+    use tracing::Instrument;
+    use crate::utils::init_tracer;
 
     #[tokio::test]
+    #[instrument(level="info")]
     async fn resolve() {
-        simple_logger::SimpleLogger::new().with_level(LevelFilter::Debug).init().unwrap();
-        let bootstrap = vec!["127.0.0.1:9092".parse().unwrap()];
+        let _tracer = init_tracer("test");
+        async {
+            simple_logger::SimpleLogger::new().with_level(LevelFilter::Debug).init().unwrap();
+            let bootstrap = vec!["127.0.0.1:9092".parse().unwrap()];
 
-        let mut cluster = ClusterHandler::new(bootstrap, Some(Duration::from_secs(10)));
-        let leaders = cluster.resolve(vec!["test1".into()]).await;
-        debug!("Resolved topic: {:?}", leaders);
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        let leaders = cluster.resolve(vec!["test1".into()]).await;
-        debug!("Resolved topic: {:?}", leaders);
+            let mut cluster = ClusterHandler::new(bootstrap, Some(Duration::from_secs(10)));
+            let leaders = cluster.resolve(vec!["test1".into()]).await;
+            debug!("Resolved topic: {:?}", leaders);
+            //tokio::time::sleep(Duration::from_secs(3)).instrument(tracing::info_span!("sleep")).await;
+            //let leaders = cluster.resolve(vec!["test1".into()]).await;
+            //debug!("Resolved topic: {:?}", leaders);
 
-        let count = cluster.get_or_fetch_partition_count("test1".into()).await.unwrap();
-        println!("partitions: {}", count);
+            let count = cluster.get_or_fetch_partition_count("test1".into()).await.unwrap();
+            println!("partitions: {}", count);
+        }.instrument(tracing::info_span!("resolve-test")).await
     }
 }

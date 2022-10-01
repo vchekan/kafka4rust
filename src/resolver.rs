@@ -9,6 +9,8 @@ use crate::connection::ConnectionHandle;
 use crate::protocol;
 use crate::error::{BrokerResult, BrokerFailureSource};
 use tokio::sync::oneshot;
+use tracing::{debug_span, Instrument};
+use tracing_attributes::instrument;
 
 pub struct ResolverHandle {
     tx: mpsc::Sender<Msg>,
@@ -51,6 +53,7 @@ impl ResolverHandle {
         ResolverHandle { tx, listener , publisher: listener_tx}
     }
 
+    #[instrument(level="debug", skip(self))]
     pub async fn start_resolve(&self, topic: String) {
         if let Err(e) = self.tx.send(Msg::StartResolving(topic)).await {
             error!("Resolver channel failed: {}", e);
@@ -179,7 +182,7 @@ impl Resolver {
                     }
                 }
             }
-        });
+        }.instrument(debug_span!("resolver_thread")));
     }
 
     // async fn fire_if_changed(&mut self, meta: protocol::TopicMetadata) {

@@ -1,5 +1,9 @@
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use log::{debug, error};
+use opentelemetry::global;
+use opentelemetry::trace::Tracer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Registry;
 
 /// Resolve adresses and produce only those which were successfully resolved.
 /// Unresolved entries will be logged with `error` level.
@@ -40,3 +44,41 @@ pub(crate) fn resolve_addr(addr: &str) -> Vec<SocketAddr> {
         .collect()
 }
 
+pub struct TraceGuard {}
+impl Drop for TraceGuard {
+    fn drop(&mut self) {
+        global::shutdown_tracer_provider();
+    }
+}
+pub fn init_tracer(name: &str) -> anyhow::Result<TraceGuard> {
+    global::set_text_map_propagator(opentelemetry_jaeger::Propagator::default());
+    let tracer = opentelemetry_jaeger::new_agent_pipeline()
+        .with_service_name(name)
+        .install_simple()?;
+    let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+    let subscriber = Registry::default().with(telemetry);
+    tracing::subscriber::set_global_default(subscriber)?;
+
+    Ok(TraceGuard{})
+
+    // let exporter = opentelemetry_jaeger::Exporter::builder()
+    //     .with_agent_endpoint("localhost:6831".parse().unwrap())
+    //     .with_process(opentelemetry_jaeger::Process {
+    //         service_name: "kafka4rust".to_string(),
+    //         tags: vec![
+    //             //Key::new("exporter").string("jaeger"),
+    //             //Key::new("float").f64(312.23),
+    //         ],
+    //     })
+    //     .init()?;
+    // let provider = sdk::Provider::builder()
+    //     .with_simple_exporter(exporter)
+    //     .with_config(sdk::Config {
+    //         default_sampler: Box::new(sdk::Sampler::Always),
+    //         max_events_per_span: 500,
+    //         ..Default::default()
+    //     })
+    //     .build();
+    // global::set_provider(provider);
+    // Ok(())
+}
