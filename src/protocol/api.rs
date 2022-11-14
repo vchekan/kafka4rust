@@ -35,7 +35,7 @@ pub trait HasApiVersion {
     fn api_version() -> u16;
 }
 
-pub trait Request: ToKafka + HasApiKey + HasApiVersion {
+pub trait Request: ToKafka + HasApiKey + HasApiVersion + Debug {
     type Response: FromKafka + Debug;
 }
 

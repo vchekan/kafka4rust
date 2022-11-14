@@ -83,7 +83,7 @@ impl ConnectionHandle {
     }
 
     /// Allocate buffer, serialize request, send query, deserialize response.
-    #[instrument(level = "debug", err, skip(self, request))]
+    #[instrument(level = "debug", ret, err)]
     pub async fn exchange<RQ: protocol::Request>(&self, request: &RQ) -> BrokerResult<RQ::Response> {
         // TODO: buffer management
         // TODO: ensure capacity (BytesMut will panic if out of range)

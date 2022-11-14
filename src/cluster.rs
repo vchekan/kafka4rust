@@ -33,7 +33,7 @@ use crate::protocol;
 use crate::types::*;
 use crate::utils::resolve_addr;
 use std::collections::{HashMap, HashSet};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use tokio::time::Duration;
 use tracing_attributes::instrument;
 use crate::resolver;
@@ -41,8 +41,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::sync::mpsc::{Sender, Receiver};
 use crate::connection::ConnectionHandle;
 use std::fmt::{Debug, Formatter};
+use futures::TryFutureExt;
+use itertools::{cloned, Itertools};
 use tracing::{debug_span, event, Instrument, Span};
-use crate::protocol::{ErrorCode, MetadataResponse0, Broker, Request};
+use crate::protocol::{ErrorCode, MetadataResponse0, Broker, Request, MetadataRequest0, ListOffsetsRequest0};
 use log::{debug, info, warn, error};
 use crate::resolver::ResolverHandle;
 use tokio_stream::StreamExt;
@@ -59,7 +61,8 @@ enum Msg {
     GetLeaderMap(Vec<String>, oneshot::Sender<LeaderMap>),
     GetOrFetchPartitionCount(String, oneshot::Sender<BrokerResult<usize>>),
     BrokerById(BrokerId, oneshot::Sender<Option<ConnectionHandle>>),
-    ListOffsets(Vec<(String,u32)>, oneshot::Sender<protocol::ListOffsetsResponse0>),
+    ListOffsets(Vec</*(*/String/*,u32)*/>, oneshot::Sender<BrokerResult<Vec<BrokerResult<protocol::ListOffsetsResponse0>>>>),
+    FetchTopics(Vec<String>, oneshot::Sender<BrokerResult<MetadataResponse0>>)
 }
 
 struct Cluster {
@@ -72,10 +75,12 @@ struct Cluster {
 
 #[derive(Default)]
 struct BrokersMaps {
+    /// Active connections
     pub connections: HashMap<BrokerId, ConnectionHandle>,
+    /// Known brokers socket addresses
     pub broker_addr_map: HashMap<BrokerId, SocketAddr>,
     /// topic -> partition[] -> leader (if known). Leader is None if it is down and requires re-discovery
-    meta_cache: HashMap<String, Vec<Option<BrokerId>>>,
+    leader_cache: HashMap<String, Vec<Option<BrokerId>>>,
     topics_meta: HashMap<String, TopicMeta>,
 }
 
@@ -133,14 +138,28 @@ impl ClusterHandler {
         }
     }
 
-    pub async fn fetch_offsets(&self, topics_partition_count: Vec<(String, u32)>) -> BrokerResult<protocol::ListOffsetsResponse0>
+    pub async fn fetch_offsets(&self, topics: Vec<String>) -> BrokerResult<Vec<BrokerResult<protocol::ListOffsetsResponse0>>>
     {
         let (req, resp) = oneshot::channel();
-        if let Err(e) = self.tx.send(Msg::ListOffsets(topics_partition_count, req)).await {
+        if let Err(e) = self.tx.send(Msg::ListOffsets(topics, req)).await {
             return Err(BrokerFailureSource::Internal(e.into()));
         }
         match resp.await {
-            Ok(r) => Ok(r),
+            Ok(Ok(r)) => Ok(r),
+            Ok(Err(r)) => Err(r),
+            Err(e) => Err(BrokerFailureSource::Internal(e.into()))
+        }
+    }
+
+    #[instrument]
+    pub async fn fetch_topic_meta_owned(&self, topics: Vec<String>) -> BrokerResult<MetadataResponse0> {
+        let (req, resp) = oneshot::channel();
+        if let Err(e) = self.tx.send(Msg::FetchTopics(topics, req)).await {
+            return Err(BrokerFailureSource::Internal(e.into()));
+        }
+
+        match resp.await {
+            Ok(topics) => topics,
             Err(e) => Err(BrokerFailureSource::Internal(e.into()))
         }
     }
@@ -236,7 +255,7 @@ impl Cluster {
                 let missing_topics: Vec<_> = topics.iter().filter(|t| !known_maps.contains(t)).collect();
                 for topic in missing_topics {
                     debug!("Cluster: start resolving '{}'", topic);
-                    self.resolver.start_resolve(topic.clone()).await;
+                    self.resolver.start_resolve(vec![topic.clone()]).await;
                 }
 
                 if response.send(leaders).is_err() {
@@ -254,6 +273,10 @@ impl Cluster {
                 let offsets = self.list_offsets(topics_partition_count).await;
                 respond_to.send(offsets);
             }
+            Msg::FetchTopics(topics, respond_to) => {
+                let topics = self.fetch_topic_meta_owned(topics).await;
+                respond_to.send(topics);
+            }
         }
     }
 
@@ -261,7 +284,7 @@ impl Cluster {
     #[instrument(level="debug")]
     fn get_known_broker_map(&self) -> LeaderMap {
         let mut res: HashMap<BrokerId, HashMap<String,Vec<Partition>>> = HashMap::new();
-        for (topic, partitions) in &self.brokers_maps.meta_cache {
+        for (topic, partitions) in &self.brokers_maps.leader_cache {
             for (partition, leaderId) in partitions.iter().enumerate() {
                 if let Some(leaderId) = leaderId {
                     res.entry(*leaderId).or_default()
@@ -271,6 +294,40 @@ impl Cluster {
             }
         }
         res.into_iter().map(|t| (t.0, t.1.into_iter().collect())).collect()
+    }
+
+    #[instrument(ret)]
+    fn group_leader_by_topic<'a>(&'a self, topics: &'a[String]) -> HashMap<BrokerId, Vec<String>> {
+        let mut res: HashMap<BrokerId, Vec<String>> = HashMap::new();
+
+        for topic in topics {
+            match self.brokers_maps.leader_cache.get(topic) {
+                Some(brokers) => {
+                    for (partition, leaderId) in brokers.into_iter().enumerate() {
+                        if let Some(leaderId) = leaderId {
+                            res.entry(*leaderId).or_default().push(topic.to_owned());
+                        }
+                    }
+                },
+                None => warn!("topic not found: {}", topic)
+            }
+        }
+
+        res
+    }
+
+    fn connect_if_not_connected(&mut self, broker_id: BrokerId) {
+        let mut new_connections = vec![];
+        if !self.brokers_maps.connections.contains_key(&broker_id) {
+            if let Some(addr) = self.brokers_maps.broker_addr_map.get(&broker_id) {
+                let conn = ConnectionHandle::new(*addr);
+                new_connections.push((broker_id, conn));
+            }
+        }
+
+        for (brokerId, conn) in new_connections {
+            self.brokers_maps.connections.insert(brokerId, conn);
+        }
     }
 
     #[instrument(level="debug", skip(broker_id, self))]
@@ -284,7 +341,7 @@ impl Cluster {
     fn update_brokers_map(&mut self, meta: &protocol::MetadataResponse0) {
         debug!("Updated brokers map");
         for topic in &meta.topics {
-            *(self.brokers_maps.meta_cache.entry(topic.topic.clone()).or_default()) = topic.partition_metadata.iter().map(|p|
+            *(self.brokers_maps.leader_cache.entry(topic.topic.clone()).or_default()) = topic.partition_metadata.iter().map(|p|
                     if p.error_code.is_ok() { Some(p.leader) } else { None }
                 ).collect();
         }
@@ -323,7 +380,7 @@ impl Cluster {
 
         let mut listener = self.resolver.listener();
         // TODO: race condition, what if answer comes before listening happen?
-        self.resolver.start_resolve(topic.clone()).await;
+        self.resolver.start_resolve(vec![topic.clone()]).await;
         // TODO: configure timeout
         tokio::spawn(tokio::time::timeout(Duration::from_secs(3*60),async move {
             loop {
@@ -345,16 +402,65 @@ impl Cluster {
         }.instrument(debug_span!("reading resolver"))));
     }
 
-    #[instrument]
-    async fn list_offsets(&self, topics_partition_count: Vec<(String, u32)>) -> protocol::ListOffsetsResponse0 {
-        todo!()
+    #[instrument(ret)]
+    async fn list_offsets(&mut self, topics: Vec<String>) -> BrokerResult<Vec<BrokerResult<protocol::ListOffsetsResponse0>>> {
+        let mut res = vec![];
+        self.get_or_request_meta_many(&topics).await?;
+        let broker_topics = self.group_leader_by_topic(&topics);
+
+        for broker_id in broker_topics.keys() {
+            self.ensure_broker_connected(broker_id);
+        }
+
+        for (brokerId, topics) in broker_topics {
+            if let Some(conn) = self.brokers_maps.connections.get(&brokerId) {
+                let offset_request = ListOffsetsRequest0 {
+                    replica_id: -1,
+                    topics: topics.into_iter()
+                        .filter_map(|topic| self.brokers_maps.topics_meta.get(&topic)
+                            .map(|meta| {
+                                protocol::Topics {
+                                        topic: topic.to_owned(),
+                                        partitions: (0..meta.partitions.len()).map( | partition | {
+                                        protocol::Partition {
+                                            partition: partition as u32,
+                                            // TODO: pass start/end offset
+                                            //  max timestamp for message offsets. returns the largest offsets that are before the given time. Pass -2L for TopicHead, and -1L for TopicTail
+                                            timestamp: -2,
+                                            max_num_offsets: 1
+                                        }
+                                        }).collect_vec()
+                                }
+                            })
+                        ).collect_vec()
+                };
+                // TODO: execute requests in parallel
+                let response =  conn.exchange(&offset_request).await;
+                res.push(response)
+            } else {
+                tracing::warn!("Can't find connection with brokerId: {}. Known brokers: {:?}", brokerId, self.brokers_maps.broker_addr_map);
+            }
+        }
+
+        Ok(res)
+    }
+
+    fn ensure_broker_connected(&mut self, broker_id: &BrokerId) {
+        if self.brokers_maps.connections.contains_key(broker_id) {
+            return;
+        }
+        if let Some(addr) = self.brokers_maps.broker_addr_map.get(broker_id) {
+            let handle = ConnectionHandle::new(addr.clone());
+            self.brokers_maps.connections.insert(*broker_id, handle);
+        }
     }
 
 
     // // TODO: what is the list of all known brokers?
     // // TODO: retry policy
     // /// Execute request on every broker until success
-    pub async fn request_any<R: protocol::Request>(&self, request: R) -> BrokerResult<R::Response> {
+    #[instrument]
+    pub async fn request_any<R: protocol::Request + Debug>(&self, request: R) -> BrokerResult<R::Response> {
         // TODO:
         // Do not block broker list for the duration of the walk along all brokers.
         // Instead walk by the index, until index is out of size.
@@ -365,7 +471,7 @@ impl Cluster {
             match broker.exchange(&request).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => {
-                    info!("Error {:?}", e)
+                    tracing::debug!("Error {:?}", e)
                 }
             }
         }
@@ -384,6 +490,13 @@ impl Cluster {
         //     }
         // }
 
+        for addr in &self.bootstrap {
+            match ConnectionHandle::new(addr.clone()).exchange(&request).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => tracing::debug!("Error: {:?}", e)
+            }
+        }
+
         Err(BrokerFailureSource::NoBrokerAvailable)
     }
 
@@ -397,10 +510,9 @@ impl Cluster {
     //     Ok(())
     // }
 
-    // pub async fn start_resolving_topic(&self, topic: String) -> BrokerResult<()> {
-    //     self.resolver_tx.send(resolver::Cmd::ResolveTopic(topic)).await
-    //         //.map_err(|e| InternalError::Critical("Failed to send topic to topic resolver".into()))
-    // }
+    pub async fn start_resolving_topic(&self, topics: Vec<String>) {
+        self.resolver.start_resolve(topics).await
+    }
 
     // /// TODO: I can not return `&protocol::MetadataResponse0` if I take a lock inside this function.
     // ///   The only way I've found so far is to return the guard which guarantees that data is inside.
@@ -445,17 +557,22 @@ impl Cluster {
     //     }
     // }
 
-    // async fn get_or_request_meta_many(&self, topics: &[&str]) -> Result<RwLockReadGuard<'_, BrokersMaps>, BrokerFailureSource> {
-    //     let maps = self.brokers_maps.read().await;
-    //     let missing: Vec<&str> = topics.into_iter().filter(|t| !maps.topics_meta.contains_key(**t)).map(|t| *t).collect();
-    //
-    //     if !missing.is_empty() {
-    //         let meta = self.fetch_topic_meta_no_update(&missing).await?;
-    //         self.update_meta(&meta);
-    //     }
-    //
-    //     todo!()
-    // }
+    #[instrument(ret)]
+    async fn get_or_request_meta_many(&mut self, topics: &Vec<String>) -> BrokerResult<()> {
+        // let maps = self.brokers_maps.read().await;
+        let missing = topics.into_iter()
+            .filter(|topic| !self.brokers_maps.topics_meta.contains_key(*topic))
+            .map(|topic| topic.to_owned())
+            .collect_vec();
+        tracing::debug!("Missing topics: {:?}", missing);
+
+        if !missing.is_empty() {
+            let meta = self.fetch_topic_meta_no_update(missing).await?;
+            self.update_meta(&meta).await;
+        }
+
+        Ok(())
+    }
 
     // pub async fn get_or_request_leader_map<'a>(&self, topics: &[impl AsRef<str>]) -> BrokerResult<Vec<(BrokerId, Vec<(&'a str, Vec<Partition>)>)>> {
     //     let map = self.brokers_maps.read().await;
@@ -463,11 +580,19 @@ impl Cluster {
     //     todo!()
     // }
 
-    // /// Used by UI, does not retry internal topic or partition errors
-    // pub async fn fetch_topic_meta_owned(&self, topics: &[&str]) -> BrokerResult<protocol::MetadataResponse0> {
-    //     let meta = self.fetch_topic_meta_no_update(topics).await?;
-    //     Ok(meta.clone())
-    // }
+    /// Used by UI, does not retry internal topic or partition errors
+    #[instrument]
+    pub async fn fetch_topic_meta_owned(&self, topics: Vec<String>) -> BrokerResult<protocol::MetadataResponse0> {
+        let meta = self.fetch_topic_meta_no_update(topics).await?;
+        Ok(meta.clone())
+    }
+
+    #[instrument(ret)]
+    async fn fetch_topic_meta_no_update(&self, topics: Vec<String>) -> BrokerResult<MetadataResponse0> {
+
+        let request = MetadataRequest0 { topics };
+        self.request_any(request).await
+    }
 
     // pub async fn get_topic_partition_count(&self, topic: &str) -> BrokerResult<u32> {
     //     let meta = self.brokers_maps.topics_meta.get(topic);
@@ -478,10 +603,10 @@ impl Cluster {
     //     todo!()
     // }
 
+    #[instrument]
     async fn update_meta(&mut self, meta: &protocol::MetadataResponse0) {
-        // let mut maps = self.brokers_maps.write().await;
         for topic in &meta.topics {
-            if topic.error_code != ErrorCode::None {
+            if !topic.error_code.is_ok() {
                 continue
             }
             let topic_meta = self.brokers_maps.topics_meta.entry(topic.topic.clone()).or_insert_with(||
@@ -490,11 +615,37 @@ impl Cluster {
                     partitions: (0..topic.partition_metadata.len()).map(|_| None).collect()
                 });
             for partition in &topic.partition_metadata {
-                if partition.error_code != ErrorCode::None {
+                if !partition.error_code.is_ok() {
                     continue
                 }
                 topic_meta.partitions[partition.partition as usize] = Some(partition.into())
             }
+
+            // leader_cache
+            let leaders = self.brokers_maps.leader_cache.entry(topic.topic.clone())
+                .or_insert_with(|| (0..topic.partition_metadata.len()).map(|_| None ).collect());
+            for partition in &topic.partition_metadata {
+                if !partition.error_code.is_ok() {
+                    continue
+                }
+                leaders[partition.partition as usize] = Some(partition.leader);
+            }
+        }
+
+        for broker in &meta.brokers {
+            if let Ok(addr) = broker.host.parse::<IpAddr>() {
+                self.brokers_maps.broker_addr_map.insert(broker.node_id, SocketAddr::new(addr, broker.port as u16));
+                continue
+            }
+            if let Ok(addr) = (broker.host.as_str(), broker.port as u16).to_socket_addrs() {
+                let addr: Vec<_> = addr.collect();
+                if !addr.is_empty() {
+                    self.brokers_maps.broker_addr_map.insert(broker.node_id, addr[0]);
+                    continue;
+                }
+            }
+
+            tracing::warn!("failed to parse broker host: {}", &broker.host);
         }
     }
 }
@@ -510,7 +661,7 @@ mod tests {
 
     #[tokio::test]
     #[instrument(level="info")]
-    async fn resolve() {
+    async fn resolve_topic() {
         let _tracer = init_tracer("test");
         async {
             simple_logger::SimpleLogger::new().with_level(LevelFilter::Debug).init().unwrap();
@@ -526,5 +677,21 @@ mod tests {
             let count = cluster.get_or_fetch_partition_count("test1".into()).await.unwrap();
             println!("partitions: {}", count);
         }.instrument(tracing::info_span!("resolve-test")).await
+    }
+
+    #[tokio::test]
+    #[instrument]
+    async fn fetch_offsets() {
+        let _tracer = init_tracer("test");
+        simple_logger::SimpleLogger::new().with_level(LevelFilter::Debug).init().unwrap();
+        let bootstrap = vec!["127.0.0.1:9092".parse().unwrap()];
+
+        // TODO: when brokers are down, `some_offsets: Ok([])` is returned. Return actual error.
+
+        let mut cluster = ClusterHandler::new(bootstrap, Some(Duration::from_secs(10)));
+        let zero_offsets = cluster.fetch_offsets(vec!["test1".to_owned()]).await;
+        let some_offsets = cluster.fetch_offsets(vec!["topic2".to_owned()]).await;
+        println!("zero_offsets: {:?}", zero_offsets);
+        println!("some_offsets: {:?}", some_offsets);
     }
 }

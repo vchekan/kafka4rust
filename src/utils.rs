@@ -2,18 +2,20 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use log::{debug, error};
 use opentelemetry::global;
 use opentelemetry::trace::Tracer;
+use tracing_attributes::instrument;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 
-/// Resolve adresses and produce only those which were successfully resolved.
+/// Resolve addresses and produce only those which were successfully resolved.
 /// Unresolved entries will be logged with `error` level.
 /// Input list is comma or space separated list of IP addresses or hostnames.
-/// If port is missing, 9092 is assummed.
+/// If port is missing, 9092 is assumed.
 ///
 /// ```
 /// let bootstrap = "127.0.0.1,192.169.1.1, 192.169.1.2, , 192.169.1.3:9099 localhost:1 www.ibm.com";
 /// let result = bootstrap.to_bootstrap_addr()?;
 /// ```
+#[instrument(ret)]
 pub(crate) fn resolve_addr(addr: &str) -> Vec<SocketAddr> {
     addr.split(|c| c == ',' || c == ' ')
         .filter(|a| !a.is_empty())

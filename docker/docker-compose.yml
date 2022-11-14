@@ -5,7 +5,7 @@ services:
     ports:
       - "2181:2181"
     networks:
-      - hostnet
+      - kafkanet
   zkui:
     image: qnib/plain-zkui@sha256:d66972bd886ade9a8d7383f5064bd825f6d29275a282250cb0adf52475f67726
     ports:
@@ -13,7 +13,7 @@ services:
     environment:
       - ZK_SERVER=zookeeper:2181
     networks:
-      - hostnet
+      - kafkanet
 #  jaeger:
 #    # UI http://localhost:16686
 #    image: jaegertracing/all-in-one:1.17
@@ -37,7 +37,7 @@ services:
     depends_on:
       - zookeeper
     networks:
-      - hostnet
+      - kafkanet
 #    environment:
 #      - KAFKA_BROKER_ID=1
 #      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
@@ -74,7 +74,7 @@ services:
     depends_on:
       - zookeeper
     networks:
-      - hostnet
+      - kafkanet
     environment:
       - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
       - ALLOW_PLAINTEXT_LISTENER=yes
@@ -103,5 +103,5 @@ services:
 #        --override zookeeper.connect=zookeeper:2181
 #        --override num.partitions=10
 networks:
-  hostnet:
+  kafkanet:
     

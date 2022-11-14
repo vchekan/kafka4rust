@@ -5,6 +5,7 @@ use log::{debug, info, warn, error};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
+use futures::TryFutureExt;
 use crate::connection::ConnectionHandle;
 use crate::protocol;
 use crate::error::{BrokerResult, BrokerFailureSource};
@@ -22,10 +23,13 @@ struct Resolver {
     rx: mpsc::Receiver<Msg>,
     tx: mpsc::Sender<Msg>,  // need to send Timer messages to self
     listener: broadcast::Sender<protocol::MetadataResponse0>,
-    // used to filter out "no change" events
+    // is used to filter out "no change" events
     state: HashMap<String,Vec<protocol::PartitionMetadata>>,
+    
     awaiting_resolve: HashMap<String, Vec<oneshot::Sender<Vec<protocol::PartitionMetadata>>>>,
-    topics: Arc<Mutex<TopicRecords>>,
+    //topics: Arc<Mutex<TopicRecords>>,
+    // known brokers and topics
+    topics: TopicRecords,
     new_topic: Arc<Notify>
 }
 
@@ -38,7 +42,7 @@ struct TopicRecords {
 
 #[derive(Debug)]
 enum Msg {
-    StartResolving(String),
+    StartResolving(Vec<String>),
     ResolvedTopic(protocol::MetadataResponse0),
     Resolve(String, oneshot::Sender<Vec<protocol::PartitionMetadata>>),
     Timer,
@@ -54,8 +58,8 @@ impl ResolverHandle {
     }
 
     #[instrument(level="debug", skip(self))]
-    pub async fn start_resolve(&self, topic: String) {
-        if let Err(e) = self.tx.send(Msg::StartResolving(topic)).await {
+    pub async fn start_resolve(&self, topics: Vec<String>) {
+        if let Err(e) = self.tx.send(Msg::StartResolving(topics)).await {
             error!("Resolver channel failed: {}", e);
         }
     }
@@ -73,25 +77,27 @@ impl Resolver {
             listener,
             state: HashMap::new(),
             awaiting_resolve: HashMap::new(),
-            topics: Arc::new(Mutex::new(TopicRecords{
+            topics: TopicRecords{
                 brokers,
                 topics: HashSet::new()
-            })),
+            },
             new_topic: Arc::new(Notify::new())
         };
 
-        Self::start_resolve_loop(resolver.topics.clone(), resolver.tx.clone(), resolver.new_topic.clone());
+        //Self::start_resolve_loop(resolver.topics, resolver.tx.clone(), resolver.new_topic.clone());
 
         resolver
     }
 
+    #[instrument(skip(self))]
     async fn handle(&mut self, msg: Msg) {
-        debug!("resolver:handle()");
         match msg {
-            Msg::StartResolving(topic) => {
-                let mut topics = self.topics.lock().unwrap();
-                if topics.topics.insert(topic) {
-                    self.new_topic.notify_one();
+            Msg::StartResolving(topics) => {
+                //let mut topics = self.topics.lock().unwrap();
+                for topic in topics {
+                    if self.topics.topics.insert(topic) {
+                        self.new_topic.notify_one();
+                    }
                 }
             },
             Msg::Timer => {
@@ -134,56 +140,55 @@ impl Resolver {
     }
 
     fn remove_topic(&mut self, topic: &String) {
-        let mut topics = self.topics.lock().unwrap();
         self.state.remove(topic);
-        topics.topics.remove(topic);
+        self.topics.topics.remove(topic);
     }
 
-    fn start_resolve_loop(topic_records: Arc<Mutex<TopicRecords>>, tx: mpsc::Sender<Msg>, new_topic: Arc<Notify>) {
-        tokio::spawn(async move {
-            loop {
-                let timeout = tokio::time::sleep(Duration::from_secs(5));
-                tokio::select! {
-                    _ = new_topic.notified() => {
-                        debug!("resolver: loop woke up: new_topic");
-                    }
-                    _ = timeout => {
-                        debug!("resolver: loop woke up: timer");
-                    }
-                };
-                
-                let (topics, brokers) = {
-                    // Fight drop at the end of syntax block
-                    let topic_records_g = topic_records.lock().unwrap();
-                    let topics = topic_records_g.topics.clone();
-                    let brokers = topic_records_g.brokers.clone();
-                    (topics, brokers)
-                };
-
-                debug!("Resolver: fetching topics: {:?} brokers: {:?}", topics, brokers);
-
-                if !brokers.is_empty() {
-                    for broker in brokers {
-                        let conn = ConnectionHandle::new(broker);
-                        // TODO: config timeout
-                        let timeout = Duration::from_secs(10);
-                        debug!("Resolver: sending meta request");
-                        match conn.fetch_topic_with_broker(topics.iter().cloned().collect(), timeout).await {
-                            Ok(meta) => {
-                                debug!("Resolver got meta");
-                                if tx.send(Msg::ResolvedTopic(meta)).await.is_err() {
-                                    error!("Failed to send resolve message to self");
-                                }
-                            },
-                            Err(e) => {
-                                debug!("Resolver failed meta {:?}", e);
-                            }
-                        }
-                    }
-                }
-            }
-        }.instrument(debug_span!("resolver_thread")));
-    }
+    // fn start_resolve_loop(topic_records: TopicRecords, tx: mpsc::Sender<Msg>, new_topic: Arc<Notify>) {
+    //     tokio::spawn(async move {
+    //         loop {
+    //             let timeout = tokio::time::sleep(Duration::from_secs(5));
+    //             tokio::select! {
+    //                 _ = new_topic.notified() => {
+    //                     debug!("resolver: loop woke up: new_topic");
+    //                 }
+    //                 _ = timeout => {
+    //                     debug!("resolver: loop woke up: timer");
+    //                 }
+    //             };
+    //
+    //             let (topics, brokers) = {
+    //                 // Fight drop at the end of syntax block
+    //                 //let topic_records_g = topic_records.lock().unwrap();
+    //                 let topics = topic_records.topics.clone();
+    //                 let brokers = topic_records.brokers.clone();
+    //                 (topics, brokers)
+    //             };
+    //
+    //             debug!("Resolver: fetching topics: {:?} brokers: {:?}", topics, brokers);
+    //
+    //             if !brokers.is_empty() {
+    //                 for broker in brokers {
+    //                     let conn = ConnectionHandle::new(broker);
+    //                     // TODO: config timeout
+    //                     let timeout = Duration::from_secs(10);
+    //                     debug!("Resolver: sending meta request");
+    //                     match conn.fetch_topic_with_broker(topics.iter().cloned().collect(), timeout).await {
+    //                         Ok(meta) => {
+    //                             debug!("Resolver got meta");
+    //                             if tx.send(Msg::ResolvedTopic(meta)).await.is_err() {
+    //                                 error!("Failed to send resolve message to self");
+    //                             }
+    //                         },
+    //                         Err(e) => {
+    //                             debug!("Resolver failed meta {:?}", e);
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }.instrument(debug_span!("resolver_thread")));
+    // }
 
     // async fn fire_if_changed(&mut self, meta: protocol::TopicMetadata) {
     //     let mut fire = false;
@@ -236,7 +241,7 @@ mod tests {
         // let (bus_tx, mut bus_rx) = tokio::sync::broadcast::channel(1);
 
         let mut resolver = ResolverHandle::new(vec!["127.0.0.1:9092".parse().unwrap()]);
-        resolver.start_resolve("test1".to_string()).await;
+        resolver.start_resolve(vec!["test1".to_string()]).await;
 
 
         let response = resolver.listener.recv().await.unwrap();

@@ -6,18 +6,18 @@ use kafka4rust::{protocol, ClusterHandler, ProducerBuilder};
 //use opentelemetry::api::trace::provider::Provider;
 use opentelemetry::{global, sdk};
 use std::process::exit;
-use tracing::dispatcher;
+use tracing::{dispatcher, info_span};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 use tracing_attributes::instrument;
 use std::time::Duration;
 use itertools::Itertools;
+use log::debug;
 use kafka4rust::init_tracer;
 
 #[tokio::main]
 #[instrument(level="debug")]
 async fn main() -> Result<()> {
-    let _tracer = init_tracer("karst")?;
     // let span = tracing::info_span!("main");
     // let _guard = span.enter();
 
@@ -33,23 +33,39 @@ async fn main() -> Result<()> {
     };*/
     // TODO: logging messes up UI. Think how to redirect into a window in UI?
     // simple_logger::SimpleLogger::new().with_level(level).init().unwrap();
+    simple_logger::init_with_env()?;
+
+    let _tracer = init_tracer("karst")?;/* {
+        Ok(_) => {},
+        Err(e) => debug!("Failed to init tracing: {}", e)
+    };*/
+
+    info_span!("ui-main");
 
     match cli.subcommand() {
         ("list", Some(list)) => {
             let brokers = list.value_of("brokers").unwrap();
+            let format = list.value_of("format").unwrap();
+
             let mut cluster = ClusterHandler::with_bootstrap(brokers, Some(Duration::from_secs(20)))?;
             // TODO: check for errors
-            let meta = cluster.fetch_topic_meta_owned(&[]).await?;
+            let meta = cluster.fetch_topic_meta_owned(vec![]).await?;
             match list.subcommand() {
                 ("topics", Some(_matches)) => {
-                    let topics = meta.topics.iter().map(|t| t.topic.to_string());
-                    topics.for_each(|t| println!("{}", t));
+                    let topics = meta.topics.iter();//.map(|t| t.topic.to_string());
+                    topics.for_each(|t| {
+                        println!("Topic: {}", t.topic);
+                        if !t.error_code.is_ok() {
+                            println!("Error: {}", t.error_code);
+                        }
+                        println!("Partitions: {:?}",t.partition_metadata)
+                    });
                 }
                 ("brokers", Some(_matches)) => {
                     let brokers = meta
                         .brokers
                         .iter()
-                        .map(|b| format!("{}:{}", b.host, b.port));
+                        .map(|b| format!("id:{} addr: {}:{}", b.node_id, b.host, b.port));
                     brokers.for_each(|t| println!("{}", t));
                 }
                 _ => {
@@ -72,15 +88,16 @@ async fn main() -> Result<()> {
                 producer = producer.send_timeout(Duration::from_secs(send_timeout));
             }
 
-            let (mut producer, _acks) =
-                producer.start().expect("Failed to create publisher");
-            if let Some(key) = key {
-                let msg = (Some(key.to_string()), val.to_string());
-                producer.send(msg, topic).await?;
-            } else {
-                producer.send((Option::<&[u8]>::None,val.to_string()), topic).await?;
-            }
-            producer.close().await?;
+            todo!()
+            // let (mut producer, _acks) =
+            //     producer.start().expect("Failed to create publisher");
+            // if let Some(key) = key {
+            //     let msg = (Some(key.to_string()), val.to_string());
+            //     producer.send(msg, topic).await?;
+            // } else {
+            //     producer.send((Option::<&[u8]>::None,val.to_string()), topic).await?;
+            // }
+            // producer.close().await?;
         }
         ("ui", Some(args)) => {
             let brokers = args.value_of("brokers").unwrap();
@@ -98,6 +115,16 @@ fn brokers_arg<'a, 'b>() -> Arg<'a, 'b> {
         long("brokers").
         help("Bootstrap servers, comma separated, port is optional, for example host1.dc.net,192.168.1.1:9092").
         takes_value(true)
+}
+
+fn format_arg<'a, 'b>() -> Arg<'a, 'b> {
+    Arg::with_name("format")
+        .default_value("text")
+        .short("f")
+        .long("format")
+        .help("Format result output")
+        .takes_value(true)
+        .possible_values(&["text", "json", "table"])
 }
 
 fn parse_cli<'a>() -> ArgMatches<'a> {
@@ -120,7 +147,8 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
         .about("list items (topics, brokers, partitions)")
         .setting(AppSettings::ColoredHelp)
         .arg(brokers_arg())
-            .subcommand(SubCommand::with_name("topics").
+        .arg(format_arg())
+        .subcommand(SubCommand::with_name("topics").
             about("List topics").
             arg(
                 Arg::with_name("filter").

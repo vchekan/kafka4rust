@@ -52,6 +52,7 @@
 - [ ] Test when topic partition count changes (topic re-create)
 - [ ] Are topics case-sensitive?
 - [ ] Tracing conventions https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/messaging.md
+- [ ] `async-backtrace` crate
 
 ## Techniques
 * Try parallel-streams

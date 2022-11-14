@@ -5,6 +5,7 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use crc32c::crc32c;
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 
 const ZERO32: [u8; 4] = [0, 0, 0, 0];
 const ZERO64: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
@@ -152,6 +153,18 @@ impl ProduceRequest3<'_> {
                 BigEndian::write_u32(&mut buf[crc_bookmark..], crc);
             }
         }
+    }
+}
+
+impl Debug for ProduceRequest3<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        // write!(f, "ProduceRequest3 [transactional_id: {:?}], asks: {:?}", self.transactional_id, self.acks)
+        f.debug_struct("ProduceRequest3")
+            .field("transactional_id", &self.transactional_id)
+            .field("asks", &self.acks)
+            .field("timeout", &self.timeout)
+            .field("topics_data(length)", &self.topic_data.len())
+            .finish()
     }
 }
 
