@@ -425,8 +425,9 @@ impl Cluster {
                                         protocol::Partition {
                                             partition: partition as u32,
                                             // TODO: pass start/end offset
-                                            //  max timestamp for message offsets. returns the largest offsets that are before the given time. Pass -2L for TopicHead, and -1L for TopicTail
-                                            timestamp: -2,
+                                            //  max timestamp for message offsets. returns the largest offsets that
+                                            //  are before the given time. Pass -2L for TopicHead, and -1L for TopicTail
+                                            timestamp: -1,
                                             max_num_offsets: 1
                                         }
                                         }).collect_vec()

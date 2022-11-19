@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
     };*/
     // TODO: logging messes up UI. Think how to redirect into a window in UI?
     // simple_logger::SimpleLogger::new().with_level(level).init().unwrap();
-    simple_logger::init_with_env()?;
+    //simple_logger::init_with_env()?;
 
     let _tracer = init_tracer("karst")?;/* {
         Ok(_) => {},
@@ -209,29 +209,29 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
     ).get_matches()
 }
 
-pub(crate) async fn get_offsets(
-    cluster: &ClusterHandler,
-    topics_partition_count: &[(&str, u32)],
-) -> Result<protocol::ListOffsetsResponse0> {
-    let topics_partition_count = topics_partition_count
-        .iter().map(|t| (t.0.to_owned(), t.1))
-        .collect_vec();
-    Ok(cluster.fetch_offsets(topics_partition_count).await?)
-    // let req = protocol::ListOffsetsRequest0 {
-    //     replica_id: -1,
-    //     topics: topics_partition_count
-    //         .iter()
-    //         .map(|t| protocol::Topics {
-    //             topic: t.0.to_string(),
-    //             partitions: (0..t.1)
-    //                 .map(|partition| protocol::Partition {
-    //                     partition,
-    //                     timestamp: -1,
-    //                     max_num_offsets: 2,
-    //                 })
-    //                 .collect(),
-    //         })
-    //         .collect(),
-    // };
-    // Ok(cluster.request_any(req).await?)
-}
+// pub(crate) async fn get_offsets(
+//     cluster: &ClusterHandler,
+//     topics_partition_count: &[(&str, u32)],
+// ) -> Result<protocol::ListOffsetsResponse0> {
+//     let topics_partition_count = topics_partition_count
+//         .iter().map(|t| (t.0.to_owned(), t.1))
+//         .collect_vec();
+//     Ok(cluster.fetch_offsets(topics_partition_count).await?)
+//     // let req = protocol::ListOffsetsRequest0 {
+//     //     replica_id: -1,
+//     //     topics: topics_partition_count
+//     //         .iter()
+//     //         .map(|t| protocol::Topics {
+//     //             topic: t.0.to_string(),
+//     //             partitions: (0..t.1)
+//     //                 .map(|partition| protocol::Partition {
+//     //                     partition,
+//     //                     timestamp: -1,
+//     //                     max_num_offsets: 2,
+//     //                 })
+//     //                 .collect(),
+//     //         })
+//     //         .collect(),
+//     // };
+//     // Ok(cluster.request_any(req).await?)
+// }
