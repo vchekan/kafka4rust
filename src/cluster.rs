@@ -27,8 +27,7 @@
 //! querying? Which connections should be used for metadata query, because long polling problem?
 //! A: ???
 
-use crate::error::{BrokerResult, InternalError, BrokerFailureSource};
-use crate::futures::{repeat_with_timeout, RepeatResult};
+use crate::error::{BrokerResult, BrokerFailureSource};
 use crate::protocol;
 use crate::types::*;
 use crate::utils::resolve_addr;
@@ -36,18 +35,14 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use tokio::time::Duration;
 use tracing_attributes::instrument;
-use crate::resolver;
 use tokio::sync::{mpsc, oneshot};
-use tokio::sync::mpsc::{Sender, Receiver};
 use crate::connection::ConnectionHandle;
 use std::fmt::{Debug, Formatter};
-use futures::TryFutureExt;
-use itertools::{cloned, Itertools};
-use tracing::{debug_span, event, Instrument, Span};
-use crate::protocol::{ErrorCode, MetadataResponse0, Broker, Request, MetadataRequest0, ListOffsetsRequest0};
-use log::{debug, info, warn, error};
+use itertools::Itertools;
+use tracing::{debug_span, Instrument};
+use crate::protocol::{MetadataResponse0, MetadataRequest0, ListOffsetsRequest0};
+use log::{debug, warn, error};
 use crate::resolver::ResolverHandle;
-use tokio_stream::StreamExt;
 
 type LeaderMap = Vec<(BrokerId, Vec<(String, Vec<Partition>)>)>;
 

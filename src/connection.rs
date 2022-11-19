@@ -19,21 +19,17 @@
 //!
 //! Write channel: how to implement sender's pushback?
 
-use crate::protocol::FromKafka;
-use crate::protocol::ToKafka;
 use std::time::Duration;
 use bytes::{BytesMut, BufMut, Bytes, Buf};
 use std::net::SocketAddr;
 
-use crate::error::{BrokerFailureSource, BrokerResult, InternalError};
+use crate::error::{BrokerFailureSource, BrokerResult};
 use async_std::net::TcpStream;
 use async_std::prelude::*;
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use tracing;
 use std::fmt::{Debug, Formatter};
-use std::io::Cursor;
-use std::sync::atomic::{AtomicU32, Ordering};
 use crate::protocol;
 use crate::protocol::{write_request, read_response};
 use tokio::sync::{mpsc, oneshot};

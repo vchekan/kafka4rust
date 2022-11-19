@@ -1,15 +1,11 @@
 use std::collections::{HashMap, VecDeque};
-use crate::{ClusterHandler, protocol, buffer_pool};
+use crate::{ClusterHandler, protocol};
 use tokio::sync::mpsc;
 use crate::protocol::{ProduceResponse3};
 use crate::error::BrokerResult;
-use std::time::Duration;
-use crate::retry_policy::with_retry;
 use crate::types::{BrokerId, Partition, QueuedMessage};
-use tracing::{self, event, Level};
-use tokio::sync::RwLock;
-use bytes::BytesMut;
-use log::{debug, info, warn, error};
+use tracing::{self, event};
+use log::{debug, info, error};
 use crate::producer::Response;
 
 /// Q: should buffer data be shared or copied when sending to broker?
@@ -128,7 +124,7 @@ impl Buffer {
         let topics: Vec<_> = self.topic_queues.keys().cloned().collect();
         // TODO: timeout from settings
         let leaders = cluster.resolve(topics).await;
-        let mut broker_partitioned = self.group_queue_by_leader(&leaders);
+        let broker_partitioned = self.group_queue_by_leader(&leaders);
 
         // Need to collect partition success or failure to adjust buffer,
         // and re-issue fetching topic metadata.

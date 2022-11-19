@@ -1,7 +1,6 @@
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use log::{debug, error};
 use opentelemetry::global;
-use opentelemetry::trace::Tracer;
 use tracing_attributes::instrument;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;

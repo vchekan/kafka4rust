@@ -1,16 +1,10 @@
 use tokio::sync::{mpsc, broadcast, Notify};
 use std::collections::{HashSet, HashMap};
-use std::time::Duration;
-use log::{debug, info, warn, error};
+use log::{debug, warn, error};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicBool;
-use futures::TryFutureExt;
-use crate::connection::ConnectionHandle;
+use std::sync::Arc;
 use crate::protocol;
-use crate::error::{BrokerResult, BrokerFailureSource};
 use tokio::sync::oneshot;
-use tracing::{debug_span, Instrument};
 use tracing_attributes::instrument;
 
 pub struct ResolverHandle {
