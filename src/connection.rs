@@ -28,7 +28,6 @@ use async_std::net::TcpStream;
 use async_std::prelude::*;
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
-use tracing;
 use std::fmt::{Debug, Formatter};
 use crate::protocol;
 use crate::protocol::{write_request, read_response};
@@ -83,7 +82,7 @@ impl ConnectionHandle {
     pub async fn exchange<RQ: protocol::Request>(&self, request: &RQ) -> BrokerResult<RQ::Response> {
         // TODO: buffer management
         // TODO: ensure capacity (BytesMut will panic if out of range)
-        let mut buff = BytesMut::with_capacity(20 * 1024); //Vec::with_capacity(1024);
+        let mut buff = BytesMut::with_capacity(200 * 1024); //Vec::with_capacity(1024);
         //let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
         // let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
         // TODO: remove correnation_id parameter because it is fixed later in handler?

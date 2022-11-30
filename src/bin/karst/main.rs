@@ -35,10 +35,12 @@ async fn main() -> Result<()> {
     // simple_logger::SimpleLogger::new().with_level(level).init().unwrap();
     //simple_logger::init_with_env()?;
 
-    let _tracer = init_tracer("karst")?;/* {
-        Ok(_) => {},
-        Err(e) => debug!("Failed to init tracing: {}", e)
-    };*/
+
+    let _tracer = if cli.is_present("tracing") {
+        Some(init_tracer("karst")?)
+    } else {
+        None
+    };
 
     info_span!("ui-main");
 
@@ -138,6 +140,10 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
             .takes_value(true)
             .possible_values(&["trace", "debug", "info", "error", "off"])
         )
+        .arg(Arg::with_name("tracing")
+            .long("tracing")
+            .takes_value(false)
+        )
     .subcommand(SubCommand::with_name("ui")
         .about("start terminal UI")
         .setting(AppSettings::ColoredHelp)
@@ -166,6 +172,9 @@ fn parse_cli<'a>() -> ArgMatches<'a> {
         ).subcommand(SubCommand::with_name("brokers").
             about("list brokers (from metadata, not from seeds)")
             .setting(AppSettings::ColoredHelp)
+        ).subcommand(SubCommand::with_name("offsets")
+            .about("list offsets")
+            
         )
     ).subcommand(
         SubCommand::with_name("publish")

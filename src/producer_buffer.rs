@@ -4,8 +4,8 @@ use tokio::sync::mpsc;
 use crate::protocol::{ProduceResponse3};
 use crate::error::BrokerResult;
 use crate::types::{BrokerId, Partition, QueuedMessage};
-use tracing::{self, event};
-use log::{debug, info, error};
+use tracing;
+use log::{debug, error};
 use crate::producer::Response;
 
 /// Q: should buffer data be shared or copied when sending to broker?

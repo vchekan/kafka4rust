@@ -1,9 +1,8 @@
-use crate::error::{BrokerResult, BrokerFailureSource};
+use crate::error::BrokerResult;
 use bytes::{BytesMut, Bytes};
 use bytes::{Buf, BufMut};
 use std::fmt::Debug;
 use std::marker::Sized;
-use crate::error::InternalError;
 
 #[repr(u16)]
 pub enum ApiKey {
@@ -62,11 +61,6 @@ pub(crate) fn write_request<T>(
     // fix message size
     let size = buff.len() - 4;
     buff.get_mut(0..).unwrap().put_u32(size as u32);
-}
-
-fn test (e: BrokerFailureSource, ei: InternalError) {
-    let e: anyhow::Error = anyhow::Error::new(e);
-    let e = anyhow::Error::new(ei);
 }
 
 pub(crate) fn read_response<T>(buff: &mut Bytes) -> BrokerResult<(u32,T)>

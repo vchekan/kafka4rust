@@ -3,20 +3,13 @@ use crate::{murmur2a, ClusterHandler};
 use crate::protocol::ErrorCode;
 use crate::types::*;
 use crate::utils;
-use async_std::sync::Mutex;
-use std::collections::{HashMap, VecDeque, HashSet};
-use std::convert::TryInto;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Debug;
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio::sync::RwLock;
-use tracing::{self, event, Level};
+use tracing;
 use tracing_attributes::instrument;
-use tracing_futures::Instrument;
-use tokio::task::JoinHandle;
-use futures::stream::{self, StreamExt};
-use tracing::field::debug;
 use crate::producer_buffer::BufferHandler;
 use log::{debug, error};
 use tokio::sync::{mpsc, oneshot};
@@ -352,7 +345,7 @@ impl Producer {
     async fn send(&mut self, msg: QueuedMessage, topic: String) -> BrokerResult<()> {
         // calculate partition by the key
         let partition = match &msg.key {
-            Some(key) => self.partitioner.partition(&key),
+            Some(key) => self.partitioner.partition(key),
             None => {
                 self.null_key_partition_counter += 1;
                 self.null_key_partition_counter

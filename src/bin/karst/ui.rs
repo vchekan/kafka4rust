@@ -304,7 +304,7 @@ async fn eval_loop(
         tokio::select! {
             cmd = kafka_commands.recv(), if !kafka_eof => {
                 match cmd {
-                    Some(ref cmd) => tracing::debug_span!("eval_loop: got kafka command", ?cmd),
+                    Some(ref cmd) => tracing::debug_span!("eval_loop: got kafka command", %cmd),
                     None => {
                         tracing::debug_span!("eval_loop: closed sender. Exiting...")
                     },
