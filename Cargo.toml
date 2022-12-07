@@ -49,7 +49,7 @@ lazy_static = "1.4"
 rand = "0.8.4"
 
 # CLI
-clap = "2.33"
+clap = { version = "4.0", features = ["derive"] }
 regex = "1.4"
 tui = {git = "https://github.com/vchekan/tui-rs", branch="table-render-fix", default-features = false, features = ['crossterm']}
 #{ version = "0.13", default-features = false, features = ['crossterm'] }
