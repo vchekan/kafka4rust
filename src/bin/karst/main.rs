@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
             let meta = cluster.fetch_topic_meta_owned(vec![]).await?;
             match subcommand {
                 ListCommands::Topics {filter, filter_regex} => {
-                    let topics = meta.topics.iter();//.map(|t| t.topic.to_string());
+                    let topics = meta.topics.iter();
                     topics.for_each(|t| {
                         println!("Topic: {}", t.topic);
                         if !t.error_code.is_ok() {
@@ -67,20 +67,16 @@ async fn main() -> Result<()> {
                         .map(|b| format!("id:{} addr: {}:{}", b.node_id, b.host, b.port));
                     brokers.for_each(|t| println!("{}", t));
                 }
-                ListCommands::Offsets => {
-
+                ListCommands::Offsets {topic} => {
+                    let offsets = cluster.fetch_offsets(vec![topic]).await?;
+                    for part in offsets {
+                        println!("{:?}", part);
+                    }
                 }
             }
         }
         KartCommand::Publish {key, topic, single_message, send_timeout_sec, from_file, msg_value} => {
-            let brokers = cli.bootstrap; //args.get_one::<String>("brokers").unwrap();
-            // let key = args.get_one::<String>("key");
-            // let topic = args.get_one::<String>("topic").unwrap();
-            //let _single_message = args.get_one::<String>("single-message");
-            // let send_timeout: Option<u64> = args.get_one::<String>("send-timeout").map(|t| t.parse().expect("Timeout must be integer in seconds"));
-            // let val = args
-            //     .get_one::<String>("MSG-VALUE")
-            //     .expect("Message value is not provided");
+            let brokers = cli.bootstrap;
             let mut producer = ProducerBuilder::new(&brokers);
             if let Some(send_timeout) = send_timeout_sec {
                 producer = producer.send_timeout(Duration::from_secs(send_timeout));
@@ -98,10 +94,8 @@ async fn main() -> Result<()> {
             // producer.close().await?;
         }
         KartCommand::Ui => {
-            //let brokers = cli.bootstrap.get_one::<String>("brokers").unwrap();
             ui::main_ui(&cli.bootstrap).await?;
         }
-        _ => {}
     }
     Ok(())
 }
@@ -116,7 +110,7 @@ struct Cli {
     command: KartCommand,
 
     /// Bootstrap servers, comma separated, port is optional, for example host1.dc.net,192.168.1.1:9092
-    #[arg(short, long, default_missing_value = "localhost:9092")]
+    #[arg(short, long, default_value = "localhost:9092")]
     bootstrap: String,
 
     #[arg(short, long, value_enum, default_value_t = LogLevel::Error)]
@@ -178,7 +172,10 @@ enum ListCommands {
     },
 
     /// list offsets
-    Offsets,
+    Offsets {
+        #[arg(short, long)]
+        topic: String,
+    },
 }
 
 #[derive(ValueEnum, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]

@@ -423,7 +423,7 @@ impl Cluster {
                                             //  max timestamp for message offsets. returns the largest offsets that
                                             //  are before the given time. Pass -2L for TopicHead, and -1L for TopicTail
                                             timestamp: -1,
-                                            max_num_offsets: 1
+                                            max_num_offsets: 2
                                         }
                                         }).collect_vec()
                                 }

@@ -268,7 +268,7 @@ fn draw_topics<T: tui::backend::Backend>(frame: &mut Frame<T>, area: Rect, state
         Constraint::Length(10),
         Constraint::Length(10),
     ])
-    .block(Block::default().title("Partitions").borders(Borders::ALL))
+    .block(Block::default().title("Partitions[# first last]").borders(Borders::ALL))
     // .header_style(Style::default().fg(Color::Yellow))
     .column_spacing(1);
     //.render(&mut f, detail_box);
