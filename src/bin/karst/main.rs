@@ -1,26 +1,28 @@
 mod ui;
 
+use std::path::PathBuf;
 use anyhow::Result;
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
-use kafka4rust::{protocol, Cluster, ProducerBuilder};
-use opentelemetry::api::trace::provider::Provider;
+use clap::{Arg, ArgAction, ArgMatches, ColorChoice, Command, Parser, Subcommand, ValueEnum};
+use kafka4rust::{protocol, ClusterHandler, ProducerBuilder};
 use opentelemetry::{global, sdk};
 use std::process::exit;
-use tracing::dispatcher;
+use tracing::{dispatcher, info_span};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 use tracing_attributes::instrument;
 use std::time::Duration;
+use itertools::Itertools;
+use log::debug;
+use kafka4rust::init_tracer;
+
 
 #[tokio::main]
 #[instrument(level="debug")]
 async fn main() -> Result<()> {
-    init_tracer()?;
     // let span = tracing::info_span!("main");
     // let _guard = span.enter();
 
-    let cli = parse_cli();
-
+    let cli = Cli::parse();
     /*let level = match cli.value_of("log").unwrap_or("info") {
         "trace" => LevelFilter::Trace,
         "debug" => LevelFilter::Debug,
@@ -31,199 +33,157 @@ async fn main() -> Result<()> {
     };*/
     // TODO: logging messes up UI. Think how to redirect into a window in UI?
     // simple_logger::SimpleLogger::new().with_level(level).init().unwrap();
+    //simple_logger::init_with_env()?;
 
-    match cli.subcommand() {
-        ("list", Some(list)) => {
-            let brokers = list.value_of("brokers").unwrap();
-            let mut cluster = Cluster::with_bootstrap(brokers, Some(Duration::from_secs(20)))?;
+
+    let _tracer = if cli.tracing {
+        Some(init_tracer("karst")?)
+    } else {
+        None
+    };
+
+    info_span!("ui-main");
+
+    match cli.command {
+        KartCommand::List {subcommand} => {
+            let mut cluster = ClusterHandler::with_bootstrap(&cli.bootstrap, Some(Duration::from_secs(20)))?;
             // TODO: check for errors
-            let meta = cluster.fetch_topic_meta(&[]).await?;
-            match list.subcommand() {
-                ("topics", Some(_matches)) => {
-                    let topics = meta.topics.iter().map(|t| t.topic.to_string());
-                    topics.for_each(|t| println!("{}", t));
+            let meta = cluster.fetch_topic_meta_owned(vec![]).await?;
+            match subcommand {
+                ListCommands::Topics {filter, filter_regex} => {
+                    let topics = meta.topics.iter();
+                    topics.for_each(|t| {
+                        println!("Topic: {}", t.topic);
+                        if !t.error_code.is_ok() {
+                            println!("Error: {}", t.error_code);
+                        }
+                        println!("Partitions: {:?}",t.partition_metadata)
+                    });
                 }
-                ("brokers", Some(_matches)) => {
+                ListCommands::Brokers => {
                     let brokers = meta
                         .brokers
                         .iter()
-                        .map(|b| format!("{}:{}", b.host, b.port));
+                        .map(|b| format!("id:{} addr: {}:{}", b.node_id, b.host, b.port));
                     brokers.for_each(|t| println!("{}", t));
                 }
-                _ => {
-                    eprintln!("Subcommand required. Don't know what to list");
-                    exit(1);
+                ListCommands::Offsets {topic} => {
+                    let offsets = cluster.fetch_offsets(vec![topic]).await?;
+                    for part in offsets {
+                        println!("{:?}", part);
+                    }
                 }
             }
         }
-        ("publish", Some(args)) => {
-            let brokers = args.value_of("brokers").unwrap();
-            let key = args.value_of("key");
-            let topic = args.value_of("topic").unwrap();
-            let _single_message = args.value_of("single-message");
-            let send_timeout: Option<u64> = args.value_of("send-timeout").map(|t| t.parse().expect("Timeout must be integer in seconds"));
-            let val = args
-                .value_of("MSG-VALUE")
-                .expect("Message value is not provided");
-            let mut producer = ProducerBuilder::new(brokers);
-            if let Some(send_timeout) = send_timeout {
+        KartCommand::Publish {key, topic, single_message, send_timeout_sec, from_file, msg_value} => {
+            let brokers = cli.bootstrap;
+            let mut producer = ProducerBuilder::new(&brokers);
+            if let Some(send_timeout) = send_timeout_sec {
                 producer = producer.send_timeout(Duration::from_secs(send_timeout));
             }
 
-            let (mut producer, _acks) =
-                producer.start().expect("Failed to create publisher");
-            if let Some(key) = key {
-                let msg = (key.to_string(), val.to_string());
-                producer.send(msg, topic).await?;
-            } else {
-                producer.send(val.to_string(), topic).await?;
-            }
-            producer.close().await?;
+            todo!()
+            // let (mut producer, _acks) =
+            //     producer.start().expect("Failed to create publisher");
+            // if let Some(key) = key {
+            //     let msg = (Some(key.to_string()), val.to_string());
+            //     producer.send(msg, topic).await?;
+            // } else {
+            //     producer.send((Option::<&[u8]>::None,val.to_string()), topic).await?;
+            // }
+            // producer.close().await?;
         }
-        ("ui", Some(args)) => {
-            let brokers = args.value_of("brokers").unwrap();
-            ui::main_ui(brokers).await?;
+        KartCommand::Ui => {
+            ui::main_ui(&cli.bootstrap).await?;
         }
-        _ => {}
     }
     Ok(())
 }
 
-fn brokers_arg<'a, 'b>() -> Arg<'a, 'b> {
-    Arg::with_name("brokers").
-        default_value("localhost:9092").
-        short("b").
-        long("brokers").
-        help("Bootstrap servers, comma separated, port is optional, for example host1.dc.net,192.168.1.1:9092").
-        takes_value(true)
+
+#[derive(Parser)]
+#[command(name = "karst", version, author, long_about = None)]
+#[command(about = "Kafka command line and UI tool")]
+#[command(arg_required_else_help = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: KartCommand,
+
+    /// Bootstrap servers, comma separated, port is optional, for example host1.dc.net,192.168.1.1:9092
+    #[arg(short, long, default_value = "localhost:9092")]
+    bootstrap: String,
+
+    #[arg(short, long, value_enum, default_value_t = LogLevel::Error)]
+    log: LogLevel,
+
+    /// Turn on Opentelemetry tracing
+    #[arg(long)]
+    tracing: bool,
 }
 
-fn parse_cli<'a>() -> ArgMatches<'a> {
-    App::new("karst")
-        .settings(&[AppSettings::ArgRequiredElseHelp, AppSettings::ColoredHelp])
-        .version(env!("CARGO_PKG_VERSION"))
-        .about("Kafka command line and UI tool")
-        .arg(Arg::with_name("log")
-            .short("l")
-            .long("log")
-            .takes_value(true)
-            .possible_values(&["trace", "debug", "info", "error", "off"])
-        )
-    .subcommand(SubCommand::with_name("ui")
-        .about("start terminal UI")
-        .setting(AppSettings::ColoredHelp)
-        .arg(brokers_arg())
-    ).subcommand(
-        SubCommand::with_name("list")
-        .about("list items (topics, brokers, partitions)")
-        .setting(AppSettings::ColoredHelp)
-        .arg(brokers_arg())
-            .subcommand(SubCommand::with_name("topics").
-            about("List topics").
-            arg(
-                Arg::with_name("filter").
-                short("f").
-                long("filter").
-                help("filter topics which have given substring anywhere in name").
-                takes_value(true)
-            ).arg(
-                Arg::with_name("filter-regex").
-                short("r").
-                long("filter-regex").
-                help("filter topics which match given regex. See https://docs.rs/regex/1.3.4/regex/#syntax").
-                takes_value(true)
-            )
-        ).subcommand(SubCommand::with_name("brokers").
-            about("list brokers (from metadata, not from seeds)")
-            .setting(AppSettings::ColoredHelp)
-        )
-    ).subcommand(
-        SubCommand::with_name("publish")
-            .about("Publish message")
-            .setting(AppSettings::ColoredHelp)
-            // .arg_from_usage("-k --key=<KEY> 'publish message with given key'")
-            .arg(brokers_arg())
-            .arg(Arg::with_name("key")
-                .takes_value(true)
-                .short("k")
-                .long("key")
-                .help("publish message with given key")
-            ).arg(
-                Arg::with_name("topic")
-                    .short("t")
-                    .long("topic")
-                    .help("topic")
-                    .required(true)
-                    .takes_value(true)
-            ).arg(
-                    Arg::with_name("single-message")
-                        .short("s")
-                        .long("single-message")
-                        .help("Interpret input file as a single message or as a message per line")
-            ).arg(Arg::with_name("file")
-                .short("f")
-                .long("file")
-                .help("Read values from file. By default, one message per line, but can change with --single-message")
-                .takes_value(true)
-            ).arg(Arg::with_name("send-timeout")
-                .long("send-timeout")
-                .help("Sending a batch timeout in seconds")
-                .takes_value(true)
-            ).arg(
-                Arg::with_name("MSG-VALUE")
-                    .conflicts_with("from-file")
-                    .index(1)
-            )
-            // .arg_from_usage("-f --from-file=<FILE> 'file as a value (one message per line by default)'")
-            // TODO: timeout
-    ).get_matches()
+#[derive(Subcommand)]
+enum KartCommand {
+    /// list items (topics, brokers, partitions)
+    List {
+        #[command(subcommand)]
+        subcommand: ListCommands,
+    },
+
+    /// Publish message
+    Publish {
+        #[arg(short, long)]
+        key: Option<String>,
+
+        #[arg(short, long)]
+        topic: String,
+
+        /// Interpret input file as a single message as opposite to default a message per line
+        #[arg(long)]
+        single_message: bool,
+
+        /// Read values from file. By default, one message per line, but can change with --single-message
+        #[arg(short, long)]
+        from_file: Option<PathBuf>,
+
+        /// Sending a batch timeout in seconds
+        #[arg(long)]
+        send_timeout_sec: Option<u64>,
+
+        /// Message to be published. Conflicts with --from-file
+        #[arg(conflicts_with = "from_file", index = 1)]
+        msg_value: Option<String>,
+    },
+    Ui,
 }
 
-async fn get_offsets(
-    cluster: &Cluster,
-    topics_partition_count: &[(&str, u32)],
-) -> Result<protocol::ListOffsetsResponse0> {
-    let req = protocol::ListOffsetsRequest0 {
-        replica_id: -1,
-        topics: topics_partition_count
-            .iter()
-            .map(|t| protocol::Topics {
-                topic: t.0.to_string(),
-                partitions: (0..t.1)
-                    .map(|partition| protocol::Partition {
-                        partition,
-                        timestamp: -1,
-                        max_num_offsets: 2,
-                    })
-                    .collect(),
-            })
-            .collect(),
-    };
-    Ok(cluster.request(req).await?)
+#[derive(Subcommand)]
+enum ListCommands {
+    /// list brokers (from metadata, not from seeds)
+    Brokers,
+    /// list topics
+    Topics {
+        /// filter topics which have given substring anywhere in name
+        #[arg(short, long)]
+        filter: Option<String>,
+
+        /// filter topics which match given regex. See https://docs.rs/regex/1.3.4/regex/#syntax
+        #[arg(long, short = 'r')]
+        filter_regex: Option<String>,
+    },
+
+    /// list offsets
+    Offsets {
+        #[arg(short, long)]
+        topic: String,
+    },
 }
 
-pub fn init_tracer() -> Result<()> {
-    let exporter = opentelemetry_jaeger::Exporter::builder()
-        .with_process(opentelemetry_jaeger::Process {
-            service_name: "karst-tui".to_string(),
-            tags: vec![],
-        })
-        .init()?;
-    let provider = sdk::Provider::builder()
-        .with_simple_exporter(exporter)
-        .with_config(sdk::Config {
-            default_sampler: Box::new(sdk::Sampler::Always),
-            max_events_per_span: 500,
-            ..Default::default()
-        })
-        .build();
-    global::set_provider(provider);
-
-    let tracer = global::trace_provider().get_tracer("component1");
-    let otl = tracing_opentelemetry::layer().with_tracer(tracer);
-    let subscriber = Registry::default().with(otl);
-    let dispatch = dispatcher::Dispatch::new(subscriber);
-    dispatcher::set_global_default(dispatch)?;
-
-    Ok(())
+#[derive(ValueEnum, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum LogLevel {
+    None,
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace
 }

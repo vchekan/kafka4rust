@@ -19,7 +19,7 @@ pub fn hash32(data: &[u8]) -> u32 {
 
     for i in 0..len / 4 {
         let i4 = i * 4;
-        let mut k = data[i4] as u32 + (data[i4 + 1] as u32)
+        let mut k = (data[i4] as u32) + (data[i4 + 1] as u32)
             << 8 + (data[i4 + 2] as u32)
             << 16 + (data[i4 + 3] as u32)
             << 24;

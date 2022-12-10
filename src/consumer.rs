@@ -4,7 +4,6 @@
 //!
 //!
 
-use crate::broker::Broker;
 use crate::cluster::Cluster;
 use crate::error::KafkaError;
 use crate::protocol;
@@ -20,6 +19,8 @@ use tracing::{debug_span, event, Level};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use std::future::Future;
+use tokio::sync::RwLock;
+use std::sync::Arc;
 
 // TODO: offset start: -2, end: -1
 pub enum StartOffset {
@@ -78,13 +79,12 @@ impl Batch {
 pub(crate) struct Consumer {
     config: ConsumerBuilder,
     cluster: Cluster,
-    topic_meta: protocol::MetadataResponse0,
     partition_routing: HashMap<BrokerId, Vec<Partition>>,
 }
 
 impl Consumer {
     #[instrument]
-    pub async fn new(builder: ConsumerBuilder) -> Result<Receiver<Batch>> {
+    async fn new(builder: ConsumerBuilder) -> Result<Receiver<Batch>> {
         let bootstrap = builder.bootstrap.as_ref().map(|s| s.clone()).unwrap_or("localhost:9092".to_string());
         let seed_list = utils::resolve_addr(&bootstrap);
         debug!("Resolved bootstrap list: {:?}", seed_list);
@@ -96,14 +96,13 @@ impl Consumer {
         }
 
         let mut cluster = Cluster::new(seed_list, None);
-        let topic_meta = cluster.fetch_topic_meta(&[&builder.topic]).await?;
-        debug!("Resolved topic: {:?}", topic_meta);
-        assert_eq!(1, topic_meta.topics.len());
+        // let topic_meta = cluster.fetch_topic_meta_and_update(&[&builder.topic]).await?;
+        // debug!("Resolved topic: {:?}", topic_meta);
+        // assert_eq!(1, topic_meta.topics.len());
 
         let (tx, rx) = channel(1);
-
         tokio::spawn(async move {
-            if let Err(error) = fetch_loop(cluster, tx, topic_meta, builder).await {
+            if let Err(error) = fetch_loop(cluster, tx, builder).await {
                 error!("Fetch loop failed. Error: {}", error);
                 event!(tracing::Level::ERROR, %error, "Fetch loop failed")
             }
@@ -112,40 +111,36 @@ impl Consumer {
     }
 }
 
-#[instrument(level = "debug", err, skip(cluster, tx, topic_meta, config))]
+#[instrument(level = "debug", err, skip(cluster, tx, config))]
 async fn fetch_loop(
-    mut cluster: Cluster,
+    cluster: Cluster,
     tx: Sender<Batch>,
-    topic_meta: protocol::MetadataResponse0,
     config: ConsumerBuilder,
 ) -> Result<()> {
-    let mut offsets = vec![0_u64; topic_meta.topics[0].partition_metadata.len()];
-    loop {
-        // group partitions by leader broker
-        let mut grouped_partitions: Vec<(u32, i32)> = topic_meta.topics[0]
-            .partition_metadata
-            .iter()
-            .map(|p| (p.partition, p.leader))
-            .collect();
-        grouped_partitions.sort_by_key(|(_p, leader)| *leader);
-        let grouped_partitions = grouped_partitions
-            .into_iter()
-            .group_by(|(_p, leader)| *leader);
 
-        let fetch_requests: Vec<_> = grouped_partitions.into_iter().map(|(leader, partition_meta_group)| {
+    // Need to resolve topic before setting start positions
+    // Can not use `cluster.get_or_request_leader_map` because it returns count of resolved partitions only.
+    let topic_partition_count = todo!(); //cluster.get_or_request_leader_map(&[&config.topic]).await?.len();
+    // TODO: init offsets. For now it always starts from 0
+    let mut offsets = vec![0_u64; topic_partition_count];
+
+    loop {
+        let mut topic_meta = cluster.get_or_request_leader_map(&[&config.topic]).await?;
+
+        let fetch_requests: Vec<_> = topic_meta.into_iter().map(|(leader, leader_group)| {
             let request = protocol::FetchRequest5 {
                 replica_id: -1,
                 max_wait_time: 1000,    // TODO: config
                 min_bytes: 0,           // TODO: config
                 max_bytes: 1_000_000,    // TODO: config
                 isolation_level: 0,     // 0: READ_UNCOMMITTED; TODO: config, enum
-                topics: vec![
+                topics: leader_group.into_iter().map(|(topic, partitions)| {
                     protocol::FetchTopic {
                         // TODO: use ref
-                        topic: config.topic.clone(),
+                        topic: topic.to_string(),
                         // TODO: all partitions for now, make configurable in the future
                         // TODO: track position
-                        partitions: partition_meta_group.into_iter().map(|(partition, _leader)| {
+                        partitions: partitions.into_iter().map(|partition| {
                             event!(Level::DEBUG, %leader, partition = %partition, fetch_offset = %offsets[partition as usize]);
                             protocol::FetchPartition {
                                 partition,
@@ -155,16 +150,15 @@ async fn fetch_loop(
                             }
                         }).collect()
                     }
-                ]
+                }).collect()
             };
             (leader, request)
         }).collect();
 
         for (leader, request) in fetch_requests.into_iter() {
             event!(Level::DEBUG, %leader, "sending");
-
-            let broker: Result<&Broker> = cluster.broker_get_or_connect(leader).await;
-            let broker: &Broker = broker?;
+            let broker = cluster.broker_get_or_connect(leader).await?;
+            // let broker: &Broker = broker?;
             event!(Level::DEBUG, %leader, "got_broker");
 
             let response = broker.send_request(&request).await;

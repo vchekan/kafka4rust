@@ -38,13 +38,31 @@
     * eyre
     * snafu
 
+## TODO
+- [ ] tokio-console
+- [ ] Validate that BytesMut has always enough reserve bytes. Or switch to Vec?
+- [ ] Remove ByteOrder because `bytes` already have it  
+- [ ] Make sure that command send anr response are corresponding even in parallel scenario.
+- [ ] Producer sent message size limit
+- [ ] Evaluate `select!` usage for cancellation safety: https://tomaka.medium.com/a-look-back-at-asynchronous-rust-d54d63934a1c
+  - Joshua's `Stream::merge`: https://blog.yoshuawuyts.com/futures-concurrency-3/#issues-with-futures-select 
+- [ ] Implement BufferPool to minimize large vectors allocations  
+- [ ] Use crossbeam::epoch::Pointable to store list of known brokers and metadata. Allows for lock-free walks over brokers.
+- [ ] Try actors approach: https://ryhl.io/blog/actors-with-tokio/
+- [ ] Test when topic partition count changes (topic re-create)
+- [ ] Are topics case-sensitive?
+- [ ] Tracing conventions https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/messaging.md
+- [ ] `async-backtrace` crate
+
 ## Techniques
 * Try parallel-streams
-* Consider Cow<> when deserializing.
+* Consider `Cow<>` when deserializing.
 * Consider `flume` for channels
 * Considr `dashmap` for mutithreading access.
+* Consider `slotmap` https://docs.rs/slotmap/1.0.1/slotmap/
 * Consider `parking_lot` for non-poisoning locks.
 * Consider `tinyvec` and `smolstr` for stack-optimized strings/arrays
+* Consider using arena: https://manishearth.github.io/blog/2021/03/15/arenas-in-rust/  
 * Audit that `copy` is used whenever possible, instead of `clone`
 * Tcp: nodelay, experiment with tx,rx buffer size
 * Adaptive buffer size
@@ -53,8 +71,6 @@
 * CI: do `cargo audit`
 * Failure model: fail up to connection reset instead of panic.
 * Use hashmap's raw_entry
-* Validate that BytesMut has always enough reserve bytes. Or switch to Vec?
-* Consider Slotmap https://docs.rs/slotmap/1.0.1/slotmap/
 
 ## Projects
 * CLI tools
@@ -71,3 +87,5 @@
 ## Resources:
 https://matklad.github.io/2020/10/15/study-of-std-io-error.html
 https://willcrichton.net/rust-api-type-patterns/
+https://aturon.github.io/blog/2015/08/27/epoch/
+https://ryhl.io/blog/actors-with-tokio/

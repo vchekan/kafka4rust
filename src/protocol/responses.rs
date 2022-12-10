@@ -1,7 +1,7 @@
 use super::api::*;
 use crate::protocol::primitives::Recordset;
-use anyhow::Result;
-use bytes::Buf;
+use crate::error::BrokerResult;
+use bytes::Bytes;
 
 // 0
 response!(ProduceResponse3 {
@@ -47,21 +47,21 @@ response!(FetchAbortedTransactions {
 });
 
 // 3
-response!(MetadataResponse0 {
+response!(#[derive(Clone)] MetadataResponse0 {
     brokers: [Broker],
     topics: [TopicMetadata]
 });
-response!(Broker {
+response!(#[derive(Clone)] Broker {
     node_id: i32,
     host: String,
     port: i32
 });
-response!(TopicMetadata {
+response!(#[derive(Clone)] TopicMetadata {
     error_code: ErrorCode,
     topic: String,
     partition_metadata: [PartitionMetadata]
 });
-response!(PartitionMetadata {
+response!(#[derive(Clone)] PartitionMetadata {
     error_code: ErrorCode,
     partition: u32,
     leader: i32,
@@ -100,7 +100,7 @@ response!(ApiVersions {
     max_version: i16
 });
 
-response!(Result<ApiVersionsResponse1> {
+response!(BrokerResult<ApiVersionsResponse1> {
     error_code: ErrorCode,
     api_versions: [ApiVersions],
     throttle_time_ms: u32

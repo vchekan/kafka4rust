@@ -6,7 +6,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use kafka4rust::protocol::Broker;
-use kafka4rust::{protocol, Cluster};
+use kafka4rust::{protocol, ClusterHandler};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io::{stdout, Write};
@@ -124,24 +124,32 @@ pub async fn main_ui(bootstrap: &str) -> Result<()> {
     let bootstrap = bootstrap.to_string();
     // kafka client runs in tokio future and communicates with UI main thread via channel
     let (tx, rx) = tokio::sync::mpsc::channel(2);
+    // start connecting in background
     tokio::spawn(
         async move {
             let res = async {
                 tracing::event!(tracing::Level::DEBUG, %bootstrap, "Connecting");
                 tx.send(Cmd::ConnState(ConnState::Connecting)).await?;
-                let mut cluster = Cluster::with_bootstrap(&bootstrap, Some(Duration::from_secs(20)))?;
-                let topics_meta = cluster.fetch_topic_meta(&[]).await?;
+                let mut cluster = ClusterHandler::with_bootstrap(&bootstrap, Some(Duration::from_secs(20)))?;
+                let topics_meta = cluster.fetch_topic_meta_owned(vec![]).await?;
                 tracing::debug_span!("Connected");
                 tx.send(Cmd::ConnState(ConnState::Connected)).await?;
+                tx.send(Cmd::TopicMeta(topics_meta.clone())).await?;
                 let topics: Vec<_> = topics_meta
                     .topics
                     .iter()
-                    .map(|t| (t.topic.as_str(), t.partition_metadata.len() as u32))
+                    //.map(|t| (t.topic.as_str(), t.partition_metadata.len() as u32))
+                    .map(|t| t.topic.clone())
                     .collect();
-                let offsets = crate::get_offsets(&cluster, &topics).await.unwrap();
-                tracing::debug_span!("Sending topic meta");
-                tx.send(Cmd::TopicMeta(topics_meta)).await?;
-                tx.send(Cmd::Offsets(offsets)).await?;
+                //let offsets = crate::get_offsets(&cluster, &topics).await.unwrap();
+                let offsets = cluster.fetch_offsets(topics).await?;
+                // tracing::debug_span!("Sending topic meta");
+                for meta in offsets {
+                    if let Ok(offsets) = meta {
+                        tx.send(Cmd::Offsets(offsets)).await?;
+                    }
+                }
+                //tx.send(Cmd::TopicMeta(topics_meta)).await?;
 
                 Ok::<_, anyhow::Error>(())
             }.await;
@@ -260,7 +268,7 @@ fn draw_topics<T: tui::backend::Backend>(frame: &mut Frame<T>, area: Rect, state
         Constraint::Length(10),
         Constraint::Length(10),
     ])
-    .block(Block::default().title("Partitions").borders(Borders::ALL))
+    .block(Block::default().title("Partitions[# first last]").borders(Borders::ALL))
     // .header_style(Style::default().fg(Color::Yellow))
     .column_spacing(1);
     //.render(&mut f, detail_box);
@@ -291,12 +299,15 @@ async fn eval_loop(
     let mut term_events = EventStream::new();
 
     // Await for 2 event sources: kafka events and keyboard events
+    let mut kafka_eof = false;
     loop {
         tokio::select! {
-            cmd = kafka_commands.recv() => {
+            cmd = kafka_commands.recv(), if !kafka_eof => {
                 match cmd {
                     Some(ref cmd) => tracing::debug_span!("eval_loop: got kafka command", %cmd),
-                    None => tracing::debug_span!("eval_loop: got kafka command 'None'"),
+                    None => {
+                        tracing::debug_span!("eval_loop: closed sender. Exiting...")
+                    },
                 };
 
                 match cmd {
@@ -304,7 +315,7 @@ async fn eval_loop(
                     Some(Cmd::TopicMeta(topics_meta)) => {
                         state.topics = topics_meta.topics.iter().map(|t| t.topic.clone()).collect();
                         state.brokers = topics_meta.brokers;
-                        tracing::debug_span!("Got Cmd::TopicMeta", "topics" = state.topics.join(",").as_str());
+                        //tracing::debug_span!("Got Cmd::TopicMeta", "topics" = state.topics.join(",").as_str());
                     }
                     // Changes in offsets
                     Some(Cmd::Offsets(offsets)) => {
@@ -324,7 +335,7 @@ async fn eval_loop(
                         state.conn_state = ConnState::Error(e)
                     }
                     None => {
-                        //break
+                        kafka_eof = true;
                         // TODO:
                         let _ = draw(term, &state);
                     }

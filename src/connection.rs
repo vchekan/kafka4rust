@@ -19,209 +19,269 @@
 //!
 //! Write channel: how to implement sender's pushback?
 
-use byteorder::BigEndian;
-use bytes::{ByteOrder, BytesMut};
+use std::time::Duration;
+use bytes::{BytesMut, BufMut, Bytes, Buf};
 use std::net::SocketAddr;
 
-use anyhow::{anyhow, Context, Result};
+use crate::error::{BrokerFailureSource, BrokerResult};
 use async_std::net::TcpStream;
 use async_std::prelude::*;
-use async_std::sync::Mutex;
-use std::sync::Arc;
 use tracing_attributes::instrument;
+use tracing_futures::Instrument;
+use std::fmt::{Debug, Formatter};
+use crate::protocol;
+use crate::protocol::{write_request, read_response};
+use tokio::sync::{mpsc, oneshot};
+use log::{debug, trace, info};
 
 pub(crate) const CLIENT_ID: &str = "k4rs";
 
-#[derive(Debug, Clone)]
-pub struct BrokerConnection {
-    addr: SocketAddr,
-    inner: Arc<Mutex<Inner>>,
+pub(crate) enum Msg {
+    Request(BytesMut, oneshot::Sender<BrokerResult<BytesMut>>),
 }
 
-#[derive(Debug)]
-struct Inner {
-    // TODO: move correlation here
-    //correlation_id: u32,
+struct BrokerConnection {
+    addr: SocketAddr,
+    /// (api_key, agreed_version)
+    negotiated_api_version: Vec<(i16, i16)>,
+    // TODO: is this decision sound? Could we write 2 messages from 2 threads and read them out of order?
+    //inner: Arc<Mutex<Inner>>,
     tcp: TcpStream,
+    rx: mpsc::Receiver<Msg>,
+    // TODO: handle overflow
+    correlation_id: u32,
+}
+
+#[derive(Clone)]
+pub struct ConnectionHandle {
+    sender: mpsc::Sender<Msg>,
+    addr: SocketAddr    // No functionality, just for display
+}
+
+impl ConnectionHandle {
+    pub fn new(addr: SocketAddr) -> Self {
+        let (tx, rx) = mpsc::channel(1);
+        tokio::spawn(run(addr.clone(), rx));
+        ConnectionHandle {sender: tx, addr}
+    }
+
+    pub async fn query(&self, request: BytesMut) -> BrokerResult<Bytes> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = self.sender.send(Msg::Request(request, tx)).await {
+            return Err(BrokerFailureSource::ConnectionChannelClosed);
+        }
+
+        match rx.await {
+            Ok(response) => Ok(Bytes::from(response?)),
+            Err(e) => Err(BrokerFailureSource::ConnectionChannelClosed)
+        }
+    }
+
+    /// Allocate buffer, serialize request, send query, deserialize response.
+    #[instrument(level = "debug", ret, err)]
+    pub async fn exchange<RQ: protocol::Request>(&self, request: &RQ) -> BrokerResult<RQ::Response> {
+        // TODO: buffer management
+        // TODO: ensure capacity (BytesMut will panic if out of range)
+        let mut buff = BytesMut::with_capacity(200 * 1024); //Vec::with_capacity(1024);
+        //let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
+        // let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
+        // TODO: remove correnation_id parameter because it is fixed later in handler?
+        protocol::write_request(request, None, &mut buff, 0);
+
+        let mut buff = self.query(buff).await?;
+        let (_corr_id, response) = read_response(&mut buff)?;
+        // TODO: check correlationId
+        // TODO: check for response error
+        Ok(response)
+    }
+
+
+    #[instrument(level="debug")]
+    pub async fn fetch_topic_with_broker(&self, topics: Vec<String>, timeout: Duration) -> BrokerResult<protocol::MetadataResponse0> {
+        debug!("fetch_topic_with_broker");
+        let req = protocol::MetadataRequest0 {
+            topics,
+        };
+        match tokio::time::timeout(timeout, self.exchange(&req)).await {
+            Err(_) => Err(BrokerFailureSource::Timeout),
+            Ok(res) => res
+        }
+    }
+}
+
+impl Debug for Msg {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Msg::Request(..) => f.write_str("Msg::Request")
+        }
+    }
 }
 
 impl BrokerConnection {
-    /// Connect to address but do not perform any check beyond successful tcp connection.
-    pub async fn connect(addr: SocketAddr) -> Result<Self> {
-        let tcp = TcpStream::connect(&addr)
-            .await
-            .with_context(|| format!("BrokerConnection failed to connect to {:?}", addr))?;
+    /// Connect to address and issue ApiVersion request, build compatible Api Versions for all Api
+    /// Keys
+    #[instrument(level="debug")]
+    async fn connect(addr: SocketAddr, rx: mpsc::Receiver<Msg>) -> BrokerResult<Self> {
+        let tcp = TcpStream::connect(&addr).await?;
+        debug!("Connected to {}", addr);
+        let mut conn = BrokerConnection { addr, negotiated_api_version: vec![], tcp, rx, correlation_id: 0};
+        let req = protocol::ApiVersionsRequest0 {};
+        //let mut buf = Vec::with_capacity(1024);
+        let mut buf = BytesMut::with_capacity(1024);
+        // TODO: This is special case, we need correlationId and clientId before broker is created...
+        let correlation_id = 0;
+        write_request(&req, None, &mut buf, correlation_id);
+        trace!("Requesting Api versions");
+        conn.exchange_with_buf(&mut buf).await?;
 
-        let conn = BrokerConnection {
-            addr,
-            inner: Arc::new(Mutex::new(Inner {
-                //correlation_id: 0,
-                tcp,
-            })),
-        };
+        let mut buf = buf.freeze();
+        let (corr_id, response): (u32, protocol::ApiVersionsResponse0) = read_response(&mut buf)?;
+        debug!("Got ApiVersionResponse {:?}; correlation_id: {}, buf: {:?}", response, corr_id, buf);
+        response.error_code.as_result()?;
+        let negotiated_api_version = build_api_compatibility(&response);
 
-        Ok(conn)
+        Ok(BrokerConnection {
+            addr: conn.addr,
+            negotiated_api_version,
+            tcp: conn.tcp,
+            rx: conn.rx,
+            correlation_id: 1,
+        })
     }
 
+    #[instrument(name="connection-handle")]
+    async fn handle(&mut self, msg: Msg) {
+        match msg {
+            Msg::Request(mut msg, respond) => {
+                // correlation has offest 8 bytes
+                msg.get_mut(8..)
+                    .expect("Corrupt message, cant write correnationId")
+                    .put_u32(self.correlation_id);
+                self.correlation_id += 1;
+                let res = match self.exchange_with_buf(&mut msg).await {
+                    Ok(()) => respond.send(Ok(msg)),
+                    Err(e) => respond.send(Err(e))
+                };
+            }
+        };
+    }
+
+    /// Write request from buffer into tcp and reuse the buffer to read response.
+    /// Message size is read from the buffer, so buffer will position to the correlation_id
     #[instrument(level = "debug", err, skip(self, buf))]
-    pub async fn request(&self, buf: &mut BytesMut) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-        let tcp = &mut inner.tcp;
-        trace!("Sending request[{}] to {:?}", buf.len(), tcp.peer_addr());
-        tcp.write_all(&buf).await.context(anyhow!(
-            "writing {} bytes to socket {:?}",
-            buf.len(),
-            tcp.peer_addr()
-        ))?;
-        //debug!("Sent request");
+    pub async fn exchange_with_buf(&mut self, buf: &mut BytesMut) -> BrokerResult<()> {
+        trace!("Sending request[{}] to {:?}", buf.len(), self.tcp.peer_addr());
+        self.tcp.write_all(&buf).instrument(tracing::debug_span!("writing request")).await
+            .map_err(|e| BrokerFailureSource::Write(format!("writing {} bytes to socket {:?}", buf.len(), self.tcp.peer_addr()), e))?;
 
         // TODO: buffer reuse
-        //let mut buf = vec![];
         buf.clear();
-        //debug!("Reading length...");
         // Read length into buffer
         buf.resize(4, 0_u8);
         // TODO: ensure length is sane
-        tcp.read_exact(buf).await.context("Reading buff size")?;
-        let len = BigEndian::read_u32(&buf);
+        self.tcp.read_exact(buf).instrument(tracing::info_span!("reading msg len")).await
+            .map_err(|e| BrokerFailureSource::Read(buf.len(), e))?;
+        let len = buf.get_u32();
         //debug!("Response len: {}, reading body...", len);
         buf.resize(len as usize, 0_u8);
-        tcp.read_exact(buf).await?;
-        //debug!("Read body [{}]", buf.len());
+        self.tcp.read_exact(buf).instrument(tracing::info_span!("reading msg body")).await
+            .map_err(|e| BrokerFailureSource::Read(buf.len(), e))?;
 
         // TODO: validate correlation_id
-        let _correlation_id = byteorder::LittleEndian::read_u32(&buf);
+        // TODO: why little endian???
+        // let correlation_id = buf.get_u32(); //byteorder::LittleEndian::read_u32(&buf);
+        // debug!("Read correlation_id: {}", correlation_id);
         Ok(())
     }
-}
 
-/*
-impl Future for RequestFuture {
-    type Output = Vec<u8>;
+    #[instrument(level = "debug", err, skip(self, request))]
+    pub async fn exchange<R>(&mut self, request: &R) -> BrokerResult<R::Response>
+    where
+        R: protocol::Request,
+    {
+        // TODO: buffer management
+        // TODO: ensure capacity (BytesMut will panic if out of range)
+        let mut buff = BytesMut::with_capacity(20 * 1024); //Vec::with_capacity(1024);
+        //let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
+        // let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
+        protocol::write_request(request, None, &mut buff, self.correlation_id);
+        self.correlation_id += 1;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-
-        Poll::Pending
-
-        //
-        // Take lock
-        //
-        let mut locked_queue : MutexLockFuture<WakerQueue> = self.futures_queue.lock();
-        // TODO: write up safety invariants
-        // TODO: make it part of state?
-        let pin = unsafe {Pin::new_unchecked(&mut locked_queue)};
-        let mut guard = match pin.poll(cx) {
-            Poll::Pending => {
-                debug!("Awaiting for lock");
-                return Poll::Pending
-            },
-            Poll::Ready(guard) => guard,
-        };
-
-
-        // TODO: do not forget to update waker (or check it is the same)
-        // as per `poll` requirements.
-        match &self.state {
-            State::Init => {
-                debug!("Enqueued waker");
-                guard.queue.push_back(Box::new(cx.waker().clone()));
-                // Even if this is the only request, enqueue it in order for following requests
-                // to know not to start reading until this one is complete.
-                if guard.queue.len() == 1 {
-                    debug!("First request in queue, start reading immediately");
-                    let mut buf = vec![];
-                    let read_future = read_response(&mut buf);
-                    match read_future.poll(cx) {
-                        Poll::Pending => {
-                            debug!("Read not ready, Pending");
-                            self.state = State::Read(read_future);
-                            Poll::Pending
-                        },
-                        Poll::Ready((correlation_id, data)) => {
-                            debug!("Read ready {}/[{}]", correlation_id, data.len());
-                            self.state = State::Done;
-                            // TODO: wake up the next one
-                            Poll::Ready(data)
-                        },
-                    }
-                } else {
-                    // Some requests is already in the queue, just enqueue myself and wait for wake
-                    self.state = State::Queued;
-                    Poll::Pending
-                }
-            },
-            /*State::Queued => {
-                if waker.will_wake(guard.queue.peek_front()) {
-
-                }
-                debug!("Spurious wake")
-            }*/
-            /*Status::Read => {
-
-            }*/
-            State::Done => {
-                panic!("Poll called after Done")
-            }
-
-            /*State::Queued => {
-                match &guard.current_response {
-                    None => {}
-                    Some((correlation_id, data)) => {
-                        if self.correlation_id == *correlation_id {
-                            debug!("Correlation Id matched");
-                            guard.current_response = None;
-                            // TODO: design buffer lifetime
-                            Poll::Ready(vec![])
-                        } else {
-                            // Got somebody's else correlation_id!
-                            // TODO: do something less dramatic then panic
-                            panic!("Mismatched correlation id. Expected: {} but got: {}", self.correlation_id, correlation_id);
-                        }
-                    }
-                }
-            }, State::Read => {
-
-            }
-            */
-            _ => Poll::Pending
-        }
+        self.exchange_with_buf(&mut buff).await?;
+        //let mut cursor = Cursor::new(buff);
+        let (_corr_id, response) = read_response(&mut buff.freeze())?;
+        // TODO: check correlationId
+        // TODO: check for response error
+        Ok(response)
     }
-}
-*/
 
-/*
-struct SequentialReader {
-    inner: ReadHalf<TcpStream>,
-    queue: VecDeque<Waker>,
-    on_new_item : Option<Waker>,
 }
 
-impl AsyncRead for SequentialReader {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<Result<usize, io::Error>> {
-        self.queue.push_back(cx.waker().clone());
-        if self.queue.len() == 1 {
+fn build_api_compatibility(them: &protocol::ApiVersionsResponse0) -> Vec<(i16, i16)> {
+    //
+    // them:  mn----mx
+    // me  :             mn-------mx
+    // join:        mx < mn
+    //
+    // Empty join: max<min. For successful join: min<=max
+    //
+    let my_versions = protocol::supported_versions();
+    trace!(
+        "build_api_compatibility my_versions: {:?} them: {:?}",
+        my_versions,
+        them
+    );
 
-            match self.inner.poll_read(cx, buf) {
-                Poll::Ready(res) => {
-                    self.queue.pop_front();
-                    // Wake next item
-                    if let Some(next) = self.queue.front_mut() {
-                        next.wake();
+    them.api_versions
+        .iter()
+        .map(
+            |them| match my_versions.iter().find(|(k, _, _)| them.api_key == *k) {
+                Some((k, mn, mx)) => {
+                    let agreed_min = mn.max(&them.min_version);
+                    let agreed_max = mx.min(&them.max_version);
+                    if agreed_min <= agreed_max {
+                        Some((*k, *agreed_max))
                     } else {
-                        self.on_new_item = Some(cx.waker().clone());
+                        None
                     }
-                    Poll::Ready(res)
-                },
-                Poll::Pending => {
-                    Poll::Pending
                 }
+                None => None,
+            },
+        )
+        .flatten()
+        .collect()
+}
+
+#[instrument(name="connection-handler")]
+async fn run(addr: SocketAddr, rx: mpsc::Receiver<Msg>) {
+    let conn = BrokerConnection::connect(addr, rx).await;
+    match conn {
+        Ok(mut conn) => {
+            debug!("run: connected, starting message loop");
+            while let Some(msg) = conn.rx.recv().await {
+                conn.handle(msg).await;
             }
-        } else {
-            Poll::Pending
+        }
+        Err(e) => {
+            info!("Failed to connect broker: {}", e);
         }
     }
 }
-*/
+
+// TODO: try to show local socket info too
+impl Debug for BrokerConnection {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrokerConnection")
+            .field("addr", &self.addr)
+            .finish()
+    }
+}
+
+impl Debug for ConnectionHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        f.debug_struct("ConnectionHandle").field("addr", &self.addr).finish()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -229,41 +289,25 @@ mod tests {
     use crate::protocol::{
         read_response, write_request, ApiVersionsRequest0, ApiVersionsResponse0,
     };
-    use async_std::task;
     use std::env;
-    use std::io::Cursor;
     use std::net::ToSocketAddrs;
-    use std::sync::Arc;
 
-    #[test]
-    fn it_works() {
-        simple_logger::init_with_level(log::Level::Debug).unwrap();
+    #[tokio::test]
+    async fn it_works() -> anyhow::Result<()> {
+        simple_logger::SimpleLogger::from_env().with_level(log::LevelFilter::Debug).init().unwrap();
+        debug!("test");
 
-        let bootstrap = env::var("kafka-bootstrap").unwrap_or("localhost:9092".to_string());
+        let bootstrap = env::var("kafka-bootstrap").unwrap_or("127.0.0.1:9092".to_string());
         let addr = bootstrap
             .to_socket_addrs()
             .unwrap()
             .next()
             .expect(format!("Host '{}' not found", bootstrap).as_str());
 
-        task::block_on(async move {
-            let conn = Arc::new(BrokerConnection::connect(addr).await.unwrap());
-            info!("conn: {:?}", conn);
-            for _ in 0..2 {
-                let conn = conn.clone();
-                task::spawn(async move {
-                    let request = ApiVersionsRequest0 {};
-                    let mut buff = BytesMut::with_capacity(1024); //Vec::new();
-                    write_request(&request, 0, None, &mut buff);
-                    conn.request(&mut buff).await.unwrap();
-                    let (correlation_id, versions): (_, Result<ApiVersionsResponse0>) =
-                        read_response(&mut Cursor::new(buff));
-                    debug!(
-                        "correlationId: {}, versions: {:?}",
-                        correlation_id, versions
-                    );
-                });
-            }
-        });
+        let conn = ConnectionHandle::new(addr);
+        let meta = conn.fetch_topic_with_broker(vec!["test1".to_string()], Duration::from_secs(10)).await?;
+        println!("Meta: {:?}", meta);
+
+        Ok(())
     }
 }

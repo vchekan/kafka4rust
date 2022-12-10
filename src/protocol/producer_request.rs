@@ -1,10 +1,11 @@
-use crate::producer::QueuedMessage;
+use crate::types::QueuedMessage;
 use crate::protocol::{ApiKey, HasApiKey, HasApiVersion, ProduceResponse3, Request, ToKafka};
 use crate::zigzag::{put_zigzag64, zigzag_len};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use crc32c::crc32c;
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 
 const ZERO32: [u8; 4] = [0, 0, 0, 0];
 const ZERO64: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
@@ -33,7 +34,7 @@ pub(crate) struct ProduceRequest3<'a> {
     pub acks: i16, // 0 for no acknowledgments, 1 for only the leader and -1 for the full ISR.
     pub timeout: i32, // The time to await a response in ms
     pub topic_data:
-        &'a HashMap<&'a String, HashMap<u32, (&'a [QueuedMessage], &'a [QueuedMessage])>>,
+        &'a HashMap<&'a str, HashMap<u32, (&'a [QueuedMessage], &'a [QueuedMessage])>>,
 }
 
 impl HasApiKey for ProduceRequest3<'_> {
@@ -63,21 +64,21 @@ impl ProduceRequest3<'_> {
         serialize_string_opt(&self.transactional_id, buf);
 
         buf.reserve(2 + 4);
-        buf.put_i16_be(self.acks);
-        buf.put_i32_be(self.timeout);
+        buf.put_i16(self.acks);
+        buf.put_i32(self.timeout);
 
         buf.reserve(4);
-        buf.put_u32_be(self.topic_data.len() as u32);
+        buf.put_u32(self.topic_data.len() as u32);
         for (topic, data) in self.topic_data {
             buf.reserve(2);
-            buf.put_u16_be(topic.len() as u16);
+            buf.put_u16(topic.len() as u16);
             buf.extend_from_slice(topic.as_bytes());
 
             buf.reserve(4);
-            buf.put_u32_be(data.len() as u32);
+            buf.put_u32(data.len() as u32);
             for (partition, (recordset1, recordset2)) in data {
                 buf.reserve(4);
-                buf.put_u32_be(*partition);
+                buf.put_u32(*partition);
 
                 //
                 // Record batch
@@ -99,7 +100,7 @@ impl ProduceRequest3<'_> {
                 );
 
                 let recordset_bookmark = buf.len();
-                buf.put_u32_be(0);
+                buf.put_u32(0);
 
                 buf.put_slice(&ZERO64); // base offset
                 let batch_len_bookmark = buf.len();
@@ -108,11 +109,11 @@ impl ProduceRequest3<'_> {
                 buf.put_u8(2); // magic
                 let crc_bookmark = buf.len();
                 buf.put_slice(&ZERO32); // crc, will calculate at the end
-                buf.put_u16_be(
+                buf.put_u16(
                     CompressionType::None as u16    // TODO
                     | TimestampType::Create as u16,
                 );
-                buf.put_u32_be((recordset1.len() + recordset2.len()) as u32 - 1); // last offset delta
+                buf.put_u32((recordset1.len() + recordset2.len()) as u32 - 1); // last offset delta
 
                 // TODO: timestamp messages and get timestamp from the first one
                 // TODO: if timestamp is client generated, it is possible it will be negative.
@@ -123,16 +124,16 @@ impl ProduceRequest3<'_> {
                     .or_else(|| recordset2.first())
                     .expect("Empty recordset")
                     .timestamp;
-                buf.put_u64_be(first_timestamp);
+                buf.put_u64(first_timestamp);
                 // TODO: max timestamp
-                buf.put_u64_be(first_timestamp);
+                buf.put_u64(first_timestamp);
                 buf.put_slice(&MINUS_ONE64); // producer id
                 buf.put_slice(&MINUS_ONE16); // producer epoch
                 buf.put_slice(&MINUS_ONE32); // base sequence
 
                 // records array
                 let rs_len = recordset1.len() + recordset2.len();
-                buf.put_u32_be(rs_len as u32);
+                buf.put_u32(rs_len as u32);
                 assert!(rs_len > 0, "Empty recordset");
                 for (i, record) in recordset1.iter().enumerate() {
                     write_record(buf, i as u64, record.timestamp - first_timestamp, &record)
@@ -155,6 +156,18 @@ impl ProduceRequest3<'_> {
     }
 }
 
+impl Debug for ProduceRequest3<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        // write!(f, "ProduceRequest3 [transactional_id: {:?}], asks: {:?}", self.transactional_id, self.acks)
+        f.debug_struct("ProduceRequest3")
+            .field("transactional_id", &self.transactional_id)
+            .field("asks", &self.acks)
+            .field("timeout", &self.timeout)
+            .field("topics_data(length)", &self.topic_data.len())
+            .finish()
+    }
+}
+
 fn write_record(buf: &mut BytesMut, offset_delta: u64, timestamp_delta: u64, msg: &QueuedMessage) {
     let mut varint_buf = [0_u8; 9];
     let key_len = match &msg.key {
@@ -174,11 +187,9 @@ fn write_record(buf: &mut BytesMut, offset_delta: u64, timestamp_delta: u64, msg
     buf.put_slice(put_zigzag64(timestamp_delta, &mut varint_buf));
     buf.put_slice(put_zigzag64(offset_delta, &mut varint_buf));
     match &msg.key {
-        Some(_key) => {
-            //buf.put_slice(zigzag64(key_len as u64, &mut varint_buf));
-            //buf.put_slice(key);
-            // TODO: fix key
-            buf.put_u8(VARINT_MINUS_ONE);
+        Some(key) => {
+            buf.put_slice(put_zigzag64(key_len as u64, &mut varint_buf));
+            buf.put_slice(key);
         }
         None => buf.put_u8(VARINT_MINUS_ONE),
     }
@@ -191,7 +202,7 @@ fn serialize_string_opt(s: &Option<&str>, buf: &mut BytesMut) {
     match s {
         Some(tx) => {
             buf.reserve(2 + tx.len());
-            buf.put_u16_be(tx.len() as u16);
+            buf.put_u16(tx.len() as u16);
             buf.put_slice(tx.as_bytes());
         }
         None => {

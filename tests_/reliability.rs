@@ -1,3 +1,6 @@
+extern crate kafka4rust;
+mod utils;
+
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 // use tokio_stream::{self as stream, StreamExt};
@@ -13,6 +16,7 @@ use std::iter::FromIterator;
 use std::matches;
 use std::thread::sleep;
 use std::time::Duration;
+use crate::utils::*;
 
 mod docker;
 
@@ -53,9 +57,9 @@ async fn producer_creates_topic() -> Result<()> {
     let (mut p, rx) = ProducerBuilder::new("localhost").start()?;
     for i in &[1, 2, 3, 4, 5] {
         let msg = format!("msg-{}", i);
-        p.send(msg, &topic).await;
+        p.send((Option::<&str>::None,msg), &topic).await?;
     }
-    p.close().await;
+    p.close().await?;
 
     let mut consumer = ConsumerBuilder::new(topic)
         .bootstrap("localhost")
@@ -89,33 +93,49 @@ Mutithreading save
 #[tokio::test]
 async fn leader_down_producer_and_consumer_recovery() -> Result<()> {
     init_log();
+    init_tracer()?;
+    let seeds = "localhost:9092,localhost:9093";
+    let count = 50;
     info!("Starting leader_down_producer_and_consumer_recovery()");
     let _d = docker::up();
     let topic = format!("test_topic_{}", random_string(5));
     let (mut p, rx) =
-        ProducerBuilder::new("localhost").hasher(Box::new(FixedPartitioner { 0: 0_u32 })).start()?;
-    for i in 1..10 {
+        ProducerBuilder::new(seeds).hasher(Box::new(FixedPartitioner { 0: 0_u32 })).start()?;
+    debug!("Created producer: {:?}", p);
+    for i in 1..=count {
+        debug!("Sending {}", i);
         if i == 5 {
+            p.flush().await?;
+
             let meta = admin::get_topic_metadata("localhost", &topic).await?;
             let leader = meta.topics[0].partition_metadata[0].leader;
             let leader = &meta.brokers.iter().find(|b| b.node_id == leader).unwrap();
-            debug!("Sending {}", i);
             docker::hard_kill_kafka(leader.port);
         }
         let msg = format!("msg-{}", i);
-        p.send(msg, &topic).await;
+        p.send((Some("key-const"), msg), &topic).await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    p.close().await?;
 
-    // let mut consumer = Consumer::builder().bootstrap("localhost").topic(topic).build().await.unwrap();
-    // let res: Vec<_> = consumer.flat_map(|batch| stream::iter(batch.messages))
-    //     .map(|msg| String::from_utf8(msg.value).unwrap())
-    //     .take(50).collect().await;
+    let mut consumer = ReceiverStream::new(ConsumerBuilder::new(topic).bootstrap(seeds).build().await.unwrap());
+    let res: Vec<_> = consumer.flat_map(|batch| stream::iter(batch.messages))
+        .map(|msg| String::from_utf8(msg.value).unwrap())
+        .take(count).collect().await;
 
-    p.close().await;
+    assert_eq!(count, res.len());
+
 
     Ok(())
 }
+
+/*
+Keyed message can be sent
+ */
+
+/*
+Failure to flush is propagated to the client
+*/
 
 // Timeout if no service
 
@@ -312,5 +332,5 @@ JavaCanReadCompressedMessages
 fn init_log() {
     simple_logger::SimpleLogger::default()
         .with_level(LevelFilter::Debug)
-        .init();
+        .init().unwrap();
 }
