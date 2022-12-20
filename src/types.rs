@@ -42,3 +42,15 @@ pub(crate) struct QueuedMessage {
     pub value: Vec<u8>,
     pub timestamp: u64,
 }
+
+impl QueuedMessage {
+    pub fn size(&self) -> usize {
+        self.value.len() + 4 +
+            match &self.key {
+                Some(key) => key.len() + 4,
+                None => 4
+            }
+            + 8 // timestpamp
+
+    }
+}

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::fmt::{Debug, Formatter};
 use crate::{ClusterHandler, protocol};
 use tokio::sync::mpsc;
 use crate::protocol::{ProduceResponse3};
@@ -6,6 +7,7 @@ use crate::error::BrokerResult;
 use crate::types::{BrokerId, Partition, QueuedMessage};
 use tracing;
 use log::{debug, error};
+use tracing_attributes::instrument;
 use crate::producer::Response;
 
 /// Q: should buffer data be shared or copied when sending to broker?
@@ -28,12 +30,15 @@ use crate::producer::Response;
 ///                                |
 ///                                | topic 3 --| partition 0; recordset
 ///
+/// 
+///
+///
 #[derive(Debug)]
 struct Buffer {
     topic_queues: HashMap<String, Vec<PartitionQueue>>,
     // Current buffer size, in bytes
-    size: u32,
-    size_limit: u32,
+    size: usize,
+    size_limit: usize,
     cluster: ClusterHandler,
 }
 
@@ -44,8 +49,14 @@ struct PartitionQueue {
     sending: u32,
 }
 
+#[derive(Debug)]
 enum Msg {
-
+    Add {
+        msg: QueuedMessage,
+        topic: String,
+        partition: Partition,
+        partition_count: u32,
+    }
 }
 
 pub(crate) struct BufferHandler {
@@ -59,7 +70,8 @@ impl BufferHandler {
         BufferHandler { tx }
     }
 
-    pub async fn add(&self, msg: QueuedMessage, topic: String, partition: Partition, partition_count: u32) {
+    #[instrument]
+    pub async fn add(&self, msg: QueuedMessage, topic: String, partition: Partition) {
         todo!()
     }
 }
@@ -68,6 +80,12 @@ async fn run(cluster: ClusterHandler, mut rx: mpsc::Receiver<Msg>) {
     let mut buffer = Buffer::new(cluster);
     while let Some(msg) = rx.recv().await {
         buffer.handle(msg).await;
+    }
+}
+
+impl Debug for BufferHandler {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "BufferHandler({:?})", &self as *const _)
     }
 }
 
@@ -83,13 +101,19 @@ impl Buffer {
         }
     }
 
+    #[instrument(skip(msg))]
     async fn handle(&mut self, msg: Msg) {
-        todo!()
+        match msg {
+            Msg::Add {msg, topic, partition, partition_count} => {
+                self.add(msg, topic, partition, partition_count).await;
+            }
+        }
     }
 
     /// Is async because topic metadata might require resolving.
     /// At the same time, we do not want to blow memory with awaiting tasks
     /// if resolving takes time and message velocity is high.
+    #[instrument]
     pub async fn add(
         &mut self,
         msg: QueuedMessage,
@@ -98,19 +122,17 @@ impl Buffer {
         partitions_count: u32
     ) {
         todo!()
-        // if self.size + msg.value.len() as u32 > self.size_limit {
+        // if self.size + msg.size() > self.size_limit {
         //     debug!("Overflow");
         //     // TODO: await instead
         //     return BufferingResult::Overflow;
         // }
         //
         // let partitions = self.topic_queues.entry(topic).or_insert_with(|| {
-        //     (0..partitions_count)
-        //         .map(|_| PartitionQueue::default())
-        //         .collect()
+        //     vec![PartitionQueue::default(); partitions_count as usize]
         // });
         //
-        // self.size += (msg.value.len() + msg.key.as_ref().map(|k| k.len()).unwrap_or(0)) as u32;
+        // self.size += msg.size();
         //
         // partitions[partition as usize].queue.push_back(msg);
         // BufferingResult::Ok
@@ -118,7 +140,7 @@ impl Buffer {
 
     /// TODO: rust BC to become smarter. Parameter `cluster` is member of `self` but I have to pass it separately because borrow checker
     /// complains about `self` being borrowed 2 times mutably.
-    //#[instrument(level = "debug", err, skip(self, acks, cluster))]
+    #[instrument(level = "debug", err, skip(self, acks, cluster))]
     pub async fn flush(&mut self, acks: &mpsc::Sender<Response>, cluster: &ClusterHandler) -> BrokerResult<()> {
         // Have to clone to break immutable and mutable (self.group_queue_by_leader) reference
         let topics: Vec<_> = self.topic_queues.keys().cloned().collect();
@@ -376,4 +398,5 @@ impl Buffer {
         //broker_partitioned
     }
 }
+
 

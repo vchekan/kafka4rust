@@ -30,7 +30,7 @@
 use crate::error::{BrokerResult, BrokerFailureSource};
 use crate::protocol;
 use crate::types::*;
-use crate::utils::resolve_addr;
+use crate::utils::{resolve_addr, TracedMessage};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use tokio::time::Duration;
@@ -38,8 +38,9 @@ use tracing_attributes::instrument;
 use tokio::sync::{mpsc, oneshot};
 use crate::connection::ConnectionHandle;
 use std::fmt::{Debug, Formatter};
+use anyhow::anyhow;
 use itertools::Itertools;
-use tracing::{debug_span, Instrument};
+use tracing::{debug_span, Instrument, Level, span};
 use crate::protocol::{MetadataResponse0, MetadataRequest0, ListOffsetsRequest0};
 use log::{debug, warn, error};
 use crate::resolver::ResolverHandle;
@@ -48,7 +49,7 @@ type LeaderMap = Vec<(BrokerId, Vec<(String, Vec<Partition>)>)>;
 
 #[derive(Clone)]
 pub struct ClusterHandler {
-    tx: mpsc::Sender<Msg>,
+    tx: mpsc::Sender<TracedMessage<Msg>>,
 }
 
 #[derive(Debug)]
@@ -63,7 +64,7 @@ enum Msg {
 struct Cluster {
     bootstrap: Vec<SocketAddr>,
     operation_timeout: Duration,
-    rx: mpsc::Receiver<Msg>,
+    rx: mpsc::Receiver<TracedMessage<Msg>>,
     pub resolver: ResolverHandle,
     brokers_maps: BrokersMaps,
 }
@@ -97,7 +98,7 @@ impl ClusterHandler {
     #[instrument(level="debug")]
     pub async fn resolve(&self, topics: Vec<String>) -> LeaderMap {
         let (req, resp) = oneshot::channel::<LeaderMap>();
-        let _ = self.tx.send(Msg::GetLeaderMap(topics, req))
+        let _ = self.tx.send(TracedMessage::new(Msg::GetLeaderMap(topics, req)))
             .instrument(debug_span!("send")).await;
         match resp.instrument(debug_span!("read")).await {
             Ok(resp) => resp,
@@ -107,11 +108,12 @@ impl ClusterHandler {
         }
     }
 
-    #[instrument]
+    #[instrument(res, err)]
     pub async fn get_or_fetch_partition_count(&self, topic: String) -> BrokerResult<usize> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(Msg::GetOrFetchPartitionCount(topic, tx)).await;
-        match rx.await {
+        self.tx.send(TracedMessage::new(Msg::GetOrFetchPartitionCount(topic, tx))).await
+            .map_err(|e| { BrokerFailureSource::Internal(e.into()) })?;
+        match rx.instrument(span!(Level::DEBUG, "awaiting for partition count response")).await {
             Ok(res) => res,
             Err(e) => {
                 error!("failed to receive result");
@@ -123,7 +125,7 @@ impl ClusterHandler {
     #[instrument]
     pub async fn broker_by_id(&self, id: BrokerId) -> Option<ConnectionHandle> {
         let (req, resp) = oneshot::channel();
-        self.tx.send(Msg::BrokerById(id, req));
+        self.tx.send(TracedMessage::new(Msg::BrokerById(id, req)));
         match resp.await {
             Ok(c) => c,
             Err(e) => {
@@ -136,7 +138,7 @@ impl ClusterHandler {
     pub async fn fetch_offsets(&self, topics: Vec<String>) -> BrokerResult<Vec<BrokerResult<protocol::ListOffsetsResponse0>>>
     {
         let (req, resp) = oneshot::channel();
-        if let Err(e) = self.tx.send(Msg::ListOffsets(topics, req)).await {
+        if let Err(e) = self.tx.send(TracedMessage::new(Msg::ListOffsets(topics, req))).await {
             return Err(BrokerFailureSource::Internal(e.into()));
         }
         match resp.await {
@@ -149,7 +151,7 @@ impl ClusterHandler {
     #[instrument]
     pub async fn fetch_topic_meta_owned(&self, topics: Vec<String>) -> BrokerResult<MetadataResponse0> {
         let (req, resp) = oneshot::channel();
-        if let Err(e) = self.tx.send(Msg::FetchTopics(topics, req)).await {
+        if let Err(e) = self.tx.send(TracedMessage::new(Msg::FetchTopics(topics, req))).await {
             return Err(BrokerFailureSource::Internal(e.into()));
         }
 
@@ -203,7 +205,7 @@ impl Debug for Cluster {
 
 impl Cluster {
     /// Connect to at least one broker successfully .
-    pub fn new(bootstrap: Vec<SocketAddr>, rx: mpsc::Receiver<Msg>, operation_timeout: Option<Duration>) -> Self {
+    pub fn new(bootstrap: Vec<SocketAddr>, rx: mpsc::Receiver<TracedMessage<Msg>>, operation_timeout: Option<Duration>) -> Self {
         /*let connect_futures = bootstrap.iter()
             // TODO: log bad addresses which did not parse
             //.filter_map(|addr| addr.parse().ok())
@@ -240,9 +242,9 @@ impl Cluster {
         cluster
     }
 
-    #[instrument]
-    async fn handle(&mut self, msg: Msg) {
-        match msg {
+    //#[instrument]
+    async fn handle(&mut self, msg: TracedMessage<Msg>) {
+        match msg.get() {
             // TODO: make sure that consumer keeps its copy of leader map and does not request it every time produce message is sent
             Msg::GetLeaderMap(topics, response) => {
                 let leaders = self.get_known_broker_map();
@@ -325,7 +327,7 @@ impl Cluster {
         }
     }
 
-    #[instrument(level="debug", skip(broker_id, self))]
+    #[instrument(level="debug", skip(broker_id, self), err)]
     pub(crate) async fn broker_get_no_connect(&self, broker_id: BrokerId) -> BrokerResult<&ConnectionHandle> {
         match self.brokers_maps.connections.get(&broker_id) {
             Some(broker) => Ok(broker),
@@ -363,7 +365,7 @@ impl Cluster {
 
     /// Get partitions count from cache or listen in background fore resolution
     #[instrument]
-    async fn get_or_fetch_partition_count(&self, topic: String, respond_to: oneshot::Sender<BrokerResult<usize>>) {
+    async fn get_or_fetch_partition_count(&mut self, topic: String, respond_to: oneshot::Sender<BrokerResult<usize>>) {
         if let Some(meta) = self.brokers_maps.topics_meta.get(&topic) {
             if let Err(e) = respond_to.send(Ok(meta.partitions.len())) {
                 // TODO: should panic?
@@ -372,32 +374,47 @@ impl Cluster {
             return
         }
 
+        tracing::debug!("No meta in cache, fetching it");
+        if let Err(e) = self.get_or_request_meta_many(&vec![topic.clone()]).await {
+            let _ = respond_to.send(Err(e));
+            return;
+        }
 
-        let mut listener = self.resolver.listener();
-        // TODO: race condition, what if answer comes before listening happen?
-        self.resolver.start_resolve(vec![topic.clone()]).await;
-        // TODO: configure timeout
-        tokio::spawn(tokio::time::timeout(Duration::from_secs(3*60),async move {
-            loop {
-                match listener.recv().await {
-                    Ok(meta) => {
-                         if let Some(meta) = meta.topics.iter().find(|t| t.topic == topic) {
-                             if let Err (e) = respond_to.send(Ok(topic.len())) {
-                                 error!("get_or_fetch_partition_count: failed to send response");
-                             }
-                             break;
-                         }
-                    }
-                    Err(e) => {
-                        respond_to.send(Err(BrokerFailureSource::Internal(e.into())));
-                        break;
-                    }
-                }
-            }
-        }.instrument(debug_span!("reading resolver"))));
+        tracing::debug!("Fetched topic");
+        let res = match self.brokers_maps.topics_meta.get(&topic) {
+            Some(meta) => Ok(meta.partitions.len()),
+            None => Err(BrokerFailureSource::Internal(anyhow!("Failed to get meta after resolution")))
+        };
+        tracing::debug!("Sending response meta");
+        if let Err(_) = respond_to.send(res) {
+            tracing::error!("The requester dropped");
+        }
+
+        // let mut listener = self.resolver.listener();
+        // // TODO: race condition, what if answer comes before listening happen?
+        // self.resolver.start_resolve(vec![topic.clone()]).await;
+        // // TODO: configure timeout
+        // tokio::spawn(tokio::time::timeout(Duration::from_secs(3*60),async move {
+        //     loop {
+        //         match listener.recv().await {
+        //             Ok(meta) => {
+        //                  if let Some(meta) = meta.topics.iter().find(|t| t.topic == topic) {
+        //                      if let Err (e) = respond_to.send(Ok(topic.len())) {
+        //                          error!("get_or_fetch_partition_count: failed to send response");
+        //                      }
+        //                      break;
+        //                  }
+        //             }
+        //             Err(e) => {
+        //                 respond_to.send(Err(BrokerFailureSource::Internal(e.into())));
+        //                 break;
+        //             }
+        //         }
+        //     }
+        // }.instrument(debug_span!("reading resolver"))));
     }
 
-    #[instrument(ret)]
+    #[instrument(ret, err)]
     async fn list_offsets(&mut self, topics: Vec<String>) -> BrokerResult<Vec<BrokerResult<protocol::ListOffsetsResponse0>>> {
         let mut res = vec![];
         self.get_or_request_meta_many(&topics).await?;
@@ -407,8 +424,8 @@ impl Cluster {
             self.ensure_broker_connected(broker_id);
         }
 
-        for (brokerId, topics) in broker_topics {
-            if let Some(conn) = self.brokers_maps.connections.get(&brokerId) {
+        for (broker_id, topics) in broker_topics {
+            if let Some(conn) = self.brokers_maps.connections.get(&broker_id) {
                 let offset_request = ListOffsetsRequest0 {
                     replica_id: -1,
                     topics: topics.into_iter()
@@ -434,7 +451,7 @@ impl Cluster {
                 let response =  conn.exchange(&offset_request).await;
                 res.push(response)
             } else {
-                tracing::warn!("Can't find connection with brokerId: {}. Known brokers: {:?}", brokerId, self.brokers_maps.broker_addr_map);
+                tracing::warn!("Can't find connection with brokerId: {}. Known brokers: {:?}", broker_id, self.brokers_maps.broker_addr_map);
             }
         }
 
@@ -553,7 +570,7 @@ impl Cluster {
     //     }
     // }
 
-    #[instrument(ret)]
+    #[instrument(ret, err)]
     async fn get_or_request_meta_many(&mut self, topics: &Vec<String>) -> BrokerResult<()> {
         // let maps = self.brokers_maps.read().await;
         let missing = topics.into_iter()
@@ -583,9 +600,9 @@ impl Cluster {
         Ok(meta.clone())
     }
 
-    #[instrument(ret)]
+    #[instrument(ret, err)]
     async fn fetch_topic_meta_no_update(&self, topics: Vec<String>) -> BrokerResult<MetadataResponse0> {
-
+        // TODO: use resolver?
         let request = MetadataRequest0 { topics };
         self.request_any(request).await
     }
@@ -599,7 +616,7 @@ impl Cluster {
     //     todo!()
     // }
 
-    #[instrument]
+    #[instrument(res)]
     async fn update_meta(&mut self, meta: &protocol::MetadataResponse0) {
         for topic in &meta.topics {
             if !topic.error_code.is_ok() {

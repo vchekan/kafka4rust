@@ -33,6 +33,7 @@ use crate::protocol;
 use crate::protocol::{write_request, read_response};
 use tokio::sync::{mpsc, oneshot};
 use log::{debug, trace, info};
+use crate::utils::TracedMessage;
 
 pub(crate) const CLIENT_ID: &str = "k4rs";
 
@@ -47,14 +48,14 @@ struct BrokerConnection {
     // TODO: is this decision sound? Could we write 2 messages from 2 threads and read them out of order?
     //inner: Arc<Mutex<Inner>>,
     tcp: TcpStream,
-    rx: mpsc::Receiver<Msg>,
+    rx: mpsc::Receiver<TracedMessage<Msg>>,
     // TODO: handle overflow
     correlation_id: u32,
 }
 
 #[derive(Clone)]
 pub struct ConnectionHandle {
-    sender: mpsc::Sender<Msg>,
+    sender: mpsc::Sender<TracedMessage<Msg>>,
     addr: SocketAddr    // No functionality, just for display
 }
 
@@ -67,7 +68,7 @@ impl ConnectionHandle {
 
     pub async fn query(&self, request: BytesMut) -> BrokerResult<Bytes> {
         let (tx, rx) = oneshot::channel();
-        if let Err(e) = self.sender.send(Msg::Request(request, tx)).await {
+        if let Err(e) = self.sender.send(TracedMessage::new(Msg::Request(request, tx))).await {
             return Err(BrokerFailureSource::ConnectionChannelClosed);
         }
 
@@ -121,7 +122,7 @@ impl BrokerConnection {
     /// Connect to address and issue ApiVersion request, build compatible Api Versions for all Api
     /// Keys
     #[instrument(level="debug")]
-    async fn connect(addr: SocketAddr, rx: mpsc::Receiver<Msg>) -> BrokerResult<Self> {
+    async fn connect(addr: SocketAddr, rx: mpsc::Receiver<TracedMessage<Msg>>) -> BrokerResult<Self> {
         let tcp = TcpStream::connect(&addr).await?;
         debug!("Connected to {}", addr);
         let mut conn = BrokerConnection { addr, negotiated_api_version: vec![], tcp, rx, correlation_id: 0};
@@ -149,9 +150,9 @@ impl BrokerConnection {
         })
     }
 
-    #[instrument(name="connection-handle")]
-    async fn handle(&mut self, msg: Msg) {
-        match msg {
+    //#[instrument(name="connection-handle")]
+    async fn handle(&mut self, msg: TracedMessage<Msg>) {
+        match msg.get() {
             Msg::Request(mut msg, respond) => {
                 // correlation has offest 8 bytes
                 msg.get_mut(8..)
@@ -253,7 +254,7 @@ fn build_api_compatibility(them: &protocol::ApiVersionsResponse0) -> Vec<(i16, i
 }
 
 #[instrument(name="connection-handler")]
-async fn run(addr: SocketAddr, rx: mpsc::Receiver<Msg>) {
+async fn run(addr: SocketAddr, rx: mpsc::Receiver<TracedMessage<Msg>>) {
     let conn = BrokerConnection::connect(addr, rx).await;
     match conn {
         Ok(mut conn) => {
@@ -294,7 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_works() -> anyhow::Result<()> {
-        simple_logger::SimpleLogger::from_env().with_level(log::LevelFilter::Debug).init().unwrap();
+        simple_logger::SimpleLogger::new().env().with_level(log::LevelFilter::Debug).init().unwrap();
         debug!("test");
 
         let bootstrap = env::var("kafka-bootstrap").unwrap_or("127.0.0.1:9092".to_string());

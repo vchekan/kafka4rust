@@ -83,3 +83,36 @@ pub fn init_tracer(name: &str) -> anyhow::Result<TraceGuard> {
     // global::set_provider(provider);
     // Ok(())
 }
+
+#[derive(Debug)]
+pub(crate) struct TracedMessage<T> {
+    msg: T,
+    trace: Option<tracing::Id>
+}
+
+impl <T> TracedMessage<T> {
+    pub fn new(msg: T) -> Self {
+        TracedMessage {
+            msg,
+            trace: tracing::Span::current().id()
+        }
+    }
+
+    // pub fn follows_from(&self) {
+    //     tracing::Span::current().follows_from(&self.trace);
+    // }
+
+    pub fn get(self) -> T {
+        tracing::Span::current().follows_from(self.trace);
+        self.msg
+    }
+}
+
+// impl <T> Deref for TracedMessage<T> {
+//     type Target = T;
+//
+//     fn deref(&self) -> &Self::Target {
+//         tracing::Span::current().follows_from(&self.trace);
+//         &self.msg
+//     }
+// }

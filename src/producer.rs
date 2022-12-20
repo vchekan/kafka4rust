@@ -1,11 +1,11 @@
-use crate::error::{KafkaError,  BrokerResult};
+use crate::error::{KafkaError, BrokerResult, BrokerFailureSource};
 use crate::{murmur2a, ClusterHandler};
 use crate::protocol::ErrorCode;
 use crate::types::*;
 use crate::utils;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter};
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tracing;
@@ -13,6 +13,7 @@ use tracing_attributes::instrument;
 use crate::producer_buffer::BufferHandler;
 use log::{debug, error};
 use tokio::sync::{mpsc, oneshot};
+use crate::utils::TracedMessage;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -156,6 +157,7 @@ enum BuffCmd {
     FlushAndClose,
 }
 
+#[derive(Debug)]
 enum Msg {
     Produce(QueuedMessage, String),
     Flush(oneshot::Sender<BrokerResult<()>>),
@@ -179,12 +181,13 @@ impl<'a> ProducerBuilder<'a> {
     pub fn build(self) -> anyhow::Result<ProducerHandler> { ProducerHandler::new(self) }
 }
 
+#[derive(Clone)]
 pub struct ProducerHandler {
-    tx: mpsc::Sender<Msg>,
+    tx: mpsc::Sender<TracedMessage<Msg>>,
 }
 
 struct Producer {
-    rx: mpsc::Receiver<Msg>,
+    rx: mpsc::Receiver<TracedMessage<Msg>>,
     bootstrap: String,
     buffer: BufferHandler,
     cluster: ClusterHandler,
@@ -213,7 +216,8 @@ impl ProducerHandler {
         Ok(ProducerHandler { tx })
     }
 
-    pub async fn send<M: ToMessage + 'static>(&self, msg: M, topic: &str) {
+    #[instrument(skip(msg))]
+    pub async fn send<M: ToMessage + 'static>(&self, msg: M, topic: &str) -> BrokerResult<()> {
         let msg = QueuedMessage {
             key: msg.key(),
             value: msg.value(),
@@ -223,21 +227,36 @@ impl ProducerHandler {
                 .as_millis() as u64,
         };
 
-        if self.tx.send(Msg::Produce(msg, topic.to_string())).await.is_err() {
-            error!("ProducerHandler: failed to send message to Producer");
-        }
+        self.tx.send(TracedMessage::new(Msg::Produce(msg, topic.to_string())))
+            .await.map_err(|e| BrokerFailureSource::Internal(e.into()))?;
+        Ok(())
     }
 
+    #[instrument(err)]
     pub async fn close(self) -> anyhow::Result<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.tx.send(Msg::Flush(tx)).await;
-        rx.await?;
+        self.tx.send(TracedMessage::new(Msg::Flush(tx))).await?;
+        rx.await??;
         Ok(())
     }
 }
 
+// impl Clone for ProducerHandler {
+//     fn clone(&self) -> Self {
+//         ProducerHandler { tx: self.tx.clone() }
+//     }
+// }
+
+impl Debug for ProducerHandler {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.tx.fmt(f)
+    }
+}
+
 async fn run(mut producer: Producer) {
+    tracing::debug!("Starting producer msg listener loop");
     while let Some(msg) = producer.rx.recv().await {
+        tracing::debug!("Producer msg listener loop: got message: {:?}", msg);
         producer.handle(msg).await;
     }
     debug!("producer:run finished");
@@ -257,7 +276,7 @@ impl Producer {
     /// Resolves bootstrap addresses and creates producer.
     /// Broker connection and topology resolution will be started upon first `send` request.
     #[instrument(level = "debug", err)]
-    pub fn new(builder: ProducerBuilder, rx: mpsc::Receiver<Msg>) -> anyhow::Result<(Self, Receiver<Response>)> {
+    pub fn new(builder: ProducerBuilder, rx: mpsc::Receiver<TracedMessage<Msg>>) -> anyhow::Result<(Self, Receiver<Response>)> {
         // TODO: resolve names async and account for connect timeout
         let seed_list = utils::resolve_addr(builder.brokers);
         if seed_list.is_empty() {
@@ -268,7 +287,7 @@ impl Producer {
         }
         let cluster = ClusterHandler::new(seed_list, builder.send_timeout);
         let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(1);
-        let (buff_tx, mut buff_rx) = channel::<BuffCmd>(2);
+        let (buff_tx, buff_rx) = channel::<BuffCmd>(2);
 
         let buffer = BufferHandler::new(cluster.clone());
         // let buffer2 = buffer.clone();
@@ -296,10 +315,13 @@ impl Producer {
         Ok((producer, ack_rx))
     }
 
-    async fn handle(&mut self, msg: Msg) {
+    //#[instrument(skip(msg))]
+    async fn handle(&mut self, msg: TracedMessage<Msg>) {
         // TODO: handle result
-        let _res = match msg {
-            Msg::Produce(msg, topic) => self.send(msg, topic).await,
+        let _res = match msg.get() {
+            Msg::Produce(msg, topic) => {
+                self.send(msg, topic).await
+            },
             Msg::Flush(respond_to) => self.flush().await,
         };
     }
@@ -341,7 +363,7 @@ impl Producer {
     }
     */
 
-    #[instrument(level = "debug", err, skip(msg, self))]
+    #[instrument(err, skip(msg, self))]
     async fn send(&mut self, msg: QueuedMessage, topic: String) -> BrokerResult<()> {
         // calculate partition by the key
         let partition = match &msg.key {
@@ -351,28 +373,42 @@ impl Producer {
                 self.null_key_partition_counter
             }
         };
-        // TODO: no long-time blocking should exist
-        let partition_count = self.get_or_fetch_partition_count(&topic).await?;
-        let partition = partition % partition_count as u32;
 
-        match self.topic_partitions_count.get(&topic) {
-            Some(partition_count) => {
-                // TODO: await instead of returning buffering result
-                self.buffer.add(msg, topic, partition, *partition_count as u32).await;
-            }
+        let partition_count = match self.topic_partitions_count.get(&topic) {
+            Some(count) => *count,
             None => {
-                // TODO:
-                panic!();
+                // TODO: no long-time blocking should exist
+                let partition_count = self.cluster.get_or_fetch_partition_count(topic.to_string()).await?; //self.get_or_fetch_partition_count(&topic).await?;
+                self.topic_partitions_count.insert(topic.clone(), partition_count);
+                partition_count
             }
-        }
+        };
+
+        let partition = partition % partition_count as u32;
+        tracing::debug!("partition: {}", partition);
+
+        // self.buffer.add(msg, topic, partition, partition_count as u32).await;
+        todo!();
+
+        // match self.topic_partitions_count.get(&topic) {
+        //     Some(partition_count) => {
+        //         // TODO: await instead of returning buffering result
+        //         self.buffer.add(msg, topic, partition, *partition_count as u32).await;
+        //     }
+        //     None => {
+        //         // TODO: failed to receive partition count
+        //         panic!();
+        //     }
+        // }
 
         Ok(())
     }
 
-    /// Get partitions count from cache or fetch from
-    async fn get_or_fetch_partition_count(&self, topic: &str) -> BrokerResult<usize> {
-        self.cluster.get_or_fetch_partition_count(topic.to_string()).await
-    }
+    /// Get partitions count from cache or fetch from broker
+    #[instrument(err)]
+    // async fn get_or_fetch_partition_count(&self, topic: &str) -> BrokerResult<usize> {
+    //     self.cluster.get_or_fetch_partition_count(topic.to_string()).await
+    // }
 
     #[instrument(level="debug", err, skip(self))]
     pub async fn flush(&mut self) -> BrokerResult<()> {
@@ -614,94 +650,30 @@ impl ToMessage for &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-    use opentelemetry::trace::Tracer;
-    use crate::ProducerBuilder;
-    use opentelemetry::trace::TraceContextExt;
-    use tracing_subscriber::layer::SubscriberExt;
+    use super::*;
+    use log::LevelFilter;
+    use crate::init_tracer;
     use tracing;
-    use tracing::{info_span, instrument};
-    use tracing_subscriber::Registry;
-
-    #[test]
-    fn test3() -> anyhow::Result<()> {
-        use opentelemetry::global;
-        use opentelemetry::trace::Tracer;
-        use instrument::Instrument;
-
-        global::set_text_map_propagator(opentelemetry_jaeger::Propagator::default());
-        let tracer =
-            opentelemetry_jaeger::new_agent_pipeline()
-            .with_service_name("test3")
-            .install_simple()?;
-
-        let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-        let subscriber = Registry::default().with(telemetry);
-        tracing::subscriber::set_global_default(subscriber)?;
-        //tracing::subscriber::with_default(subscriber, || {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(async {
-                    tracing::info!("thread 2");
-                }.instrument(info_span!("thread")));
-        //});
-
-
-        global::shutdown_tracer_provider(); // sending remaining spans
-
-        Ok(())
-    }
+    use tracing::{Instrument, span, Level};
 
     #[tokio::test]
-    async fn test() -> anyhow::Result<()> {
-        simple_logger::init_with_level(log::Level::Trace)?;
-        opentelemetry::global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
-        let tracer = opentelemetry_jaeger::new_agent_pipeline()
-            .with_service_name("producer-test")
-            .install_batch(opentelemetry::runtime::Tokio)?;
-            // .install_simple()?;
-        tracer.in_span("test", |cx| {
-            tracing::info!("root");
-        });
+    async fn test3() -> anyhow::Result<()> {
+        simple_logger::SimpleLogger::new().with_level(LevelFilter::Debug).init().unwrap();
+        let _trace = init_tracer("producer-test")?;
+        //tokio::time::timeout(Duration::from_secs(10), async move {
 
-        tracing::info!("root");
+            let producer = ProducerBuilder::new("localhost").build()?;
+            let producer2 = producer.clone();
+            tokio::spawn(async move {
+                for i in 0..10_000 {
+                    producer.send(format!("msg {}", i), "test1").await?;
+                }
+                BrokerResult::Ok(())
+            }).instrument(span!(Level::INFO, "send loop task")).await??;
 
-        opentelemetry::global::shutdown_tracer_provider();
-        Ok(())
+            producer2.close().await?;
+
+            Ok(())
+        //}).await?
     }
-
-    #[tokio::test]
-    async fn test1() -> anyhow::Result<()> {
-        simple_logger::init_with_level(log::Level::Trace)?;
-        // let tracer = opentelemetry_jaeger::new_pipeline()
-        //     .with_service_name("producer-test")
-        //     .install_simple()?;
-        let subscriber_fmt = tracing_subscriber::fmt::fmt().with_level(true).finish();
-        // let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-        // let subscriber = tracing_subscriber::Registry::default().with(telemetry);
-        tracing::subscriber::set_global_default(subscriber_fmt).unwrap();
-
-        let root_span = tracing::span!(tracing::Level::INFO, "root-span", work_units = 2);
-        let guard = root_span.enter();
-        tracing::info!("info-1");
-        tracing::event!(tracing::Level::INFO, "event-1");
-        call_instrumented();
-        tracing::info!("info-2");
-
-        //tokio::time::sleep(Duration::from_secs(5)).await;
-
-        //std::mem::drop(guard);
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        opentelemetry::global::shutdown_tracer_provider();
-        Ok(())
-    }
-
-    #[tracing::instrument]
-    fn call_instrumented() {
-        tracing::info!("call_instrumented called");
-    }
-
-
 }

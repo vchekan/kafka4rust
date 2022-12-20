@@ -2,18 +2,11 @@ mod ui;
 
 use std::path::PathBuf;
 use anyhow::Result;
-use clap::{Arg, ArgAction, ArgMatches, ColorChoice, Command, Parser, Subcommand, ValueEnum};
-use kafka4rust::{protocol, ClusterHandler, ProducerBuilder};
-use opentelemetry::{global, sdk};
-use std::process::exit;
-use tracing::{dispatcher, info_span};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::Registry;
+use clap::{Parser, Subcommand, ValueEnum};
+use kafka4rust::{ClusterHandler, ProducerBuilder};
+use tracing::info_span;
 use tracing_attributes::instrument;
 use std::time::Duration;
-use itertools::Itertools;
-use log::debug;
-use kafka4rust::init_tracer;
 
 
 #[tokio::main]
