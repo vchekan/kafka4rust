@@ -49,20 +49,6 @@ struct PartitionQueue {
     sending: u32,
 }
 
-#[derive(Debug)]
-enum Msg {
-    Add {
-        msg: QueuedMessage,
-        topic: String,
-        partition: Partition,
-        partition_count: u32,
-    }
-}
-
-pub(crate) struct BufferHandler {
-    tx: mpsc::Sender<Msg>
-}
-
 impl BufferHandler {
     pub fn new(cluster: ClusterHandler) -> Self {
         let(tx, rx) = mpsc::channel(8);
@@ -73,13 +59,6 @@ impl BufferHandler {
     #[instrument]
     pub async fn add(&self, msg: QueuedMessage, topic: String, partition: Partition) {
         todo!()
-    }
-}
-
-async fn run(cluster: ClusterHandler, mut rx: mpsc::Receiver<Msg>) {
-    let mut buffer = Buffer::new(cluster);
-    while let Some(msg) = rx.recv().await {
-        buffer.handle(msg).await;
     }
 }
 
@@ -98,15 +77,6 @@ impl Buffer {
             size_limit: 100 * 1024 * 1024,
             // meta_cache: HashMap::new(),
             cluster,
-        }
-    }
-
-    #[instrument(skip(msg))]
-    async fn handle(&mut self, msg: Msg) {
-        match msg {
-            Msg::Add {msg, topic, partition, partition_count} => {
-                self.add(msg, topic, partition, partition_count).await;
-            }
         }
     }
 
@@ -399,4 +369,20 @@ impl Buffer {
     }
 }
 
+mod test {
+    use std::future::Future;
+    use futures::future::Fuse;
+    use super::*;
+
+    #[tokio::test]
+    async fn test() -> anyhow::Result<()> {
+        // let cluster = ClusterHandler::with_bootstrap("localhost", None)?;
+        // let mut buff = Buffer::new(cluster);
+
+        // buff.add("").await;
+
+        Ok(())
+    }
+
+}
 

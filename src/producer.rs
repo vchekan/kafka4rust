@@ -650,6 +650,7 @@ impl ToMessage for &[u8] {
 
 #[cfg(test)]
 mod tests {
+    use futures::future::Fuse;
     use super::*;
     use log::LevelFilter;
     use crate::init_tracer;
