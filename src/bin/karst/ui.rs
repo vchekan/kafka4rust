@@ -6,7 +6,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use kafka4rust::protocol::Broker;
-use kafka4rust::{protocol, ClusterHandler};
+use kafka4rust::protocol;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io::{stdout, Write};

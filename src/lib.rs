@@ -1,7 +1,9 @@
+//#![feature(type_alias_impl_trait)]
+
 pub mod protocol;
 mod connection;
-// mod resolver;
 mod cluster;
+mod metadiscover;
 //mod consumer;
 // mod producer_buffer;
 // mod producer;

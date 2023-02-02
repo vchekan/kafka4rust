@@ -46,12 +46,11 @@ struct RequestFuture<F> {
 // }
 
 impl MetaDiscover {
-    pub fn new(bootstrap: &str, topic_requests: mpsc::Receiver<String>) -> Self {
+    pub fn new(bootstrap: Vec<SocketAddr>, topic_requests: mpsc::Receiver<String>) -> Self {
         MetaDiscover {
             state: State::Disconnected,
             broker_idx: 0,
-            bootstrap: resolve_addr(bootstrap),
-            // conn: None,
+            bootstrap,
             topic_requests,
         }
     }
@@ -131,9 +130,8 @@ impl MetaDiscover {
     }
 
     async fn fetching_meta(topics: Vec<String>, mut conn: BrokerConnection) -> (BrokerResult<protocol::MetadataResponse0>, BrokerConnection) {
-        //let topics = topics.iter().cloned().collect();
         let req = protocol::MetadataRequest0 { topics };
-        let res = conn.exchange(req).await;
+        let res = conn.exchange(&req).await;
         (res, conn)
     }
 }
@@ -155,7 +153,8 @@ mod tests {
 
             let (tx, rx) = tokio::sync::mpsc::channel(1);
             let tx2 = tx.clone();   // to keep it open until end of test
-            let mut discover = MetaDiscover::new("localhost", rx);
+            let bootstrap = resolve_addr("localhost");
+            let mut discover = MetaDiscover::new(bootstrap, rx);
             let stream = discover.stream();
             pin_mut!(stream);
             tokio::task::spawn(async move {

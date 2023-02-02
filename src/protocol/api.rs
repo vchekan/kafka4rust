@@ -68,9 +68,6 @@ where
     T: FromKafka,
 {
     let corr_id = buff.get_u32();
-    let response = T::from_kafka(buff)?;//.map_err(|e| {
-        // let e: anyhow::Error = anyhow::Error::new(e);
-        // InternalError::Serialization(e)
-    // });
+    let response = T::from_kafka(buff)?;
     Ok((corr_id, response))
 }

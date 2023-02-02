@@ -41,6 +41,9 @@ pub(crate) const CLIENT_ID: &str = "k4rs";
 //     Request(BytesMut, oneshot::Sender<BrokerResult<BytesMut>>),
 // }
 
+//pub(crate) type ConnectionFuture = impl Future<Output=BrokerResult<BrokerConnection>>;
+
+
 pub(crate) struct BrokerConnection {
     addr: SocketAddr,
     /// (api_key, agreed_version)
@@ -137,6 +140,8 @@ impl BrokerConnection {
             correlation_id: 1,
         })
     }
+
+    pub fn addr(&self) -> SocketAddr {self.addr}
 
     // //#[instrument(name="connection-handle")]
     // async fn handle(&mut self, msg: TracedMessage<Msg>) {

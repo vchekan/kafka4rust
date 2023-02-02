@@ -3,7 +3,7 @@ mod ui;
 use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use kafka4rust::{ClusterHandler, ProducerBuilder};
+use kafka4rust::{init_tracer};
 use tracing::info_span;
 use tracing_attributes::instrument;
 use std::time::Duration;
