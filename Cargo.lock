@@ -337,17 +337,6 @@ dependencies = [
 
 [[package]]
 name = "colored"
-version = "1.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4ffc801dacf156c5854b9df4f425a626539c3a6ef7893cc0c5084a23f0b6c59"
-dependencies = [
- "atty",
- "lazy_static",
- "winapi",
-]
-
-[[package]]
-name = "colored"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3616f750b84d8f0de8a58bda93e08e2a81ad3f523089b05f1dffecab48c6cbd"
@@ -834,9 +823,9 @@ checksum = "fad582f4b9e86b6caa621cabeb0963332d92eea04729ab12892c2533951e6440"
 
 [[package]]
 name = "jni"
-version = "0.19.0"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6df18c2e3db7e453d3c6ac5b3e9d5182664d28788126d39b91f2d1e22b017ec"
+checksum = "039022cdf4d7b1cf548d31f60ae783138e5fd42013f6271049d7df7afadef96c"
 dependencies = [
  "cesu8",
  "combine",
@@ -887,7 +876,7 @@ dependencies = [
  "pin-project-lite",
  "rand",
  "regex",
- "simple_logger 2.3.0",
+ "simple_logger",
  "thiserror",
  "thrift 0.17.0",
  "tokio",
@@ -910,7 +899,7 @@ dependencies = [
  "lazy_static",
  "log",
  "pin-utils",
- "simple_logger 1.16.0",
+ "simple_logger",
  "tokio",
  "waker-fn",
 ]
@@ -944,7 +933,7 @@ dependencies = [
  "kafka4rust",
  "lazy_static",
  "log",
- "simple_logger 1.16.0",
+ "simple_logger",
  "tokio",
 ]
 
@@ -1608,28 +1597,15 @@ dependencies = [
 
 [[package]]
 name = "simple_logger"
-version = "1.16.0"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45b60258a35dc3cb8a16890b8fd6723349bfa458d7960e25e633f1b1c19d7b5e"
+checksum = "e190a521c2044948158666916d9e872cbb9984f755e9bb3b5b75a836205affcd"
 dependencies = [
  "atty",
- "colored 1.9.3",
+ "colored",
  "log",
  "time",
- "winapi",
-]
-
-[[package]]
-name = "simple_logger"
-version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48047e77b528151aaf841a10a9025f9459da80ba820e425ff7eb005708a76dc7"
-dependencies = [
- "atty",
- "colored 2.0.0",
- "log",
- "time",
- "winapi",
+ "windows-sys 0.42.0",
 ]
 
 [[package]]

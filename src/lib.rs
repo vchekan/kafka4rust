@@ -4,7 +4,7 @@ pub mod protocol;
 mod connection;
 mod cluster;
 mod metadiscover;
-mod consumer;
+// mod consumer;
 // mod producer_buffer;
 // mod producer;
 // pub mod admin;

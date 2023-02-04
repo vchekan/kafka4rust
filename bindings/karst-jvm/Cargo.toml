@@ -6,9 +6,9 @@ edition = "2018"
 
 [dependencies]
 kafka4rust = {path = "../../"}
-jni = "0.19"
+jni = "0"
 log = "0.4"
-simple_logger = "1.11"
+simple_logger = "4"
 tokio = {version = "1.23", features = ["full"] }
 lazy_static = "1.4"
 waker-fn = "1.1"
