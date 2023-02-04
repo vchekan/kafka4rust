@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Formatter};
-use crate::{ClusterHandler, protocol};
+use crate::cluster::Cluster;
 use tokio::sync::mpsc;
 use crate::protocol::{ProduceResponse3};
 use crate::error::BrokerResult;
@@ -9,6 +9,7 @@ use tracing;
 use log::{debug, error};
 use tracing_attributes::instrument;
 use crate::producer::Response;
+use crate::protocol;
 
 /// Q: should buffer data be shared or copied when sending to broker?
 /// A:
@@ -34,37 +35,41 @@ use crate::producer::Response;
 ///
 ///
 #[derive(Debug)]
-struct Buffer {
+pub struct Buffer {
     topic_queues: HashMap<String, Vec<PartitionQueue>>,
     // Current buffer size, in bytes
     size: usize,
     size_limit: usize,
-    cluster: ClusterHandler,
+    cluster: Cluster,
 }
 
 #[derive(Debug, Default)]
 struct PartitionQueue {
     queue: VecDeque<QueuedMessage>,
     // How many message are being sent
-    sending: u32,
+    sending_count: u32,
 }
 
-impl BufferHandler {
-    pub fn new(cluster: ClusterHandler) -> Self {
-        let(tx, rx) = mpsc::channel(8);
-        tokio::spawn(run(cluster, rx));
-        BufferHandler { tx }
-    }
+// impl Buffer {
+//     pub fn new(cluster: Cluster) -> Self {
+//         let(tx, rx) = mpsc::channel(8);
+//         tokio::spawn(run(cluster, rx));
+//         BufferHandler { tx }
+//     }
+//
+//     #[instrument]
+//     pub async fn add(&self, msg: QueuedMessage, topic: String, partition: Partition) {
+//         todo!()
+//     }
+// }
 
-    #[instrument]
-    pub async fn add(&self, msg: QueuedMessage, topic: String, partition: Partition) {
-        todo!()
-    }
-}
-
-impl Debug for BufferHandler {
+impl Debug for Buffer {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "BufferHandler({:?})", &self as *const _)
+        f.debug_struct("Buffer")
+            .field("topic_queues", &self.topic_queues.len())
+            .field("size", &self.size)
+            .field("size_limit", &self.size_limit)
+            .finish()
     }
 }
 
@@ -75,7 +80,6 @@ impl Buffer {
             size: 0,
             // TODO: make configurable
             size_limit: 100 * 1024 * 1024,
-            // meta_cache: HashMap::new(),
             cluster,
         }
     }
@@ -232,7 +236,9 @@ impl Buffer {
         // }
 
 
+        //
         // Discard messages which were sent successfully.
+        //
         for (leader, response) in responses {
             match response {
                 Some(response) => {

@@ -1,5 +1,6 @@
 use crate::error::{KafkaError, BrokerResult, BrokerFailureSource};
-use crate::{murmur2a, ClusterHandler};
+use crate::murmur2a;
+use crate::cluster::Cluster;
 use crate::protocol::ErrorCode;
 use crate::types::*;
 use crate::utils;
@@ -10,7 +11,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tracing;
 use tracing_attributes::instrument;
-use crate::producer_buffer::BufferHandler;
+use crate::producer_buffer::Buffer;
 use log::{debug, error};
 use tokio::sync::{mpsc, oneshot};
 use crate::utils::TracedMessage;

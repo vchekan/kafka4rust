@@ -17,6 +17,7 @@ panic = 'abort'
 itertools = "0.10"
 anyhow = "1.0"
 thiserror = "1.0"
+indexmap = "1"
 
 futures = "0.3"
 # TODO: remove and leave tokio only
@@ -25,6 +26,9 @@ tokio = { version = "1.23", features = ["full"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
 futures-lite = "1"
+tower = { version = "0.4", features = ["timeout","retry","discover","util"] }
+futures-util = "0.3"
+pin-project-lite = "0.2"
 
 bytes = "1.0"
 # TODO: remove bytesorder because bytes have endian support

@@ -6,7 +6,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use kafka4rust::protocol::Broker;
-use kafka4rust::{protocol, ClusterHandler};
+use kafka4rust::{Cluster, protocol};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io::{stdout, Write};
@@ -130,8 +130,8 @@ pub async fn main_ui(bootstrap: &str) -> Result<()> {
             let res = async {
                 tracing::event!(tracing::Level::DEBUG, %bootstrap, "Connecting");
                 tx.send(Cmd::ConnState(ConnState::Connecting)).await?;
-                let mut cluster = ClusterHandler::with_bootstrap(&bootstrap, Some(Duration::from_secs(20)))?;
-                let topics_meta = cluster.fetch_topic_meta_owned(vec![]).await?;
+                let mut cluster = Cluster::new(bootstrap, Some(Duration::from_secs(20)));
+                let topics_meta = cluster.fetch_topic_meta_no_update(vec![]).await?;
                 tracing::debug_span!("Connected");
                 tx.send(Cmd::ConnState(ConnState::Connected)).await?;
                 tx.send(Cmd::TopicMeta(topics_meta.clone())).await?;
@@ -142,7 +142,7 @@ pub async fn main_ui(bootstrap: &str) -> Result<()> {
                     .map(|t| t.topic.clone())
                     .collect();
                 //let offsets = crate::get_offsets(&cluster, &topics).await.unwrap();
-                let offsets = cluster.fetch_offsets(topics).await?;
+                let offsets = cluster.list_offsets(topics).await?;
                 // tracing::debug_span!("Sending topic meta");
                 for meta in offsets {
                     if let Ok(offsets) = meta {
