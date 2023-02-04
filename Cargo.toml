@@ -21,7 +21,7 @@ thiserror = "1.0"
 futures = "0.3"
 # TODO: remove and leave tokio only
 async-std = { version = "1.7.0", features = ["unstable"] }
-tokio = { version = "1.23", features = ["full"] }
+tokio = { version = "1.24", features = ["full"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
 futures-lite = "1"
