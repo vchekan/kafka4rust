@@ -25,7 +25,7 @@ use crate::metadiscover::MetaDiscover;
 
 type LeaderMap = Vec<(BrokerId, Vec<(String, Vec<Partition>)>)>;
 
-struct Cluster {
+pub struct Cluster {
     bootstrap: Vec<SocketAddr>,
     operation_timeout: Duration,
     connections: IndexMap<BrokerId, BrokerConnection>,
@@ -68,7 +68,7 @@ impl Cluster {
 
     /// Return leader map of known brokers. Unknown brokers will be requested in background.
     #[instrument(level="debug")]
-    fn get_known_broker_map(&self) -> LeaderMap {
+    pub(crate) fn get_known_broker_map(&self) -> LeaderMap {
         let mut res: HashMap<BrokerId, HashMap<String,Vec<Partition>>> = HashMap::new();
         for (topic, partitions) in &self.leader_cache {
             for (partition, leaderId) in partitions.iter().enumerate() {
@@ -124,27 +124,27 @@ impl Cluster {
         }
     }
 
-    fn update_brokers_map(&mut self, meta: &protocol::MetadataResponse0) {
-        debug!("Updated brokers map");
-        for topic in &meta.topics {
-            *(self.leader_cache.entry(topic.topic.clone()).or_default()) = topic.partition_metadata.iter().map(|p|
-                    if p.error_code.is_ok() { Some(p.leader) } else { None }
-                ).collect();
-        }
-
-
-        for broker in &meta.brokers {
-            match (broker.host.as_str(), broker.port as u16).to_socket_addrs() {
-                Ok(addr) => {
-                    let addr: Vec<SocketAddr> = addr.collect();
-                    if !addr.is_empty() {
-                        self.broker_addr_map.insert(broker.node_id, addr[0]);
-                    }
-                }
-                Err(e) => error!("Resolve broker error: {}", e),
-            }
-        }
-    }
+    // fn update_brokers_map(&mut self, meta: &protocol::MetadataResponse0) {
+    //     debug!("Updated brokers map");
+    //     for topic in &meta.topics {
+    //         *(self.leader_cache.entry(topic.topic.clone()).or_default()) = topic.partition_metadata.iter().map(|p|
+    //                 if p.error_code.is_ok() { Some(p.leader) } else { None }
+    //             ).collect();
+    //     }
+    //
+    //
+    //     for broker in &meta.brokers {
+    //         match (broker.host.as_str(), broker.port as u16).to_socket_addrs() {
+    //             Ok(addr) => {
+    //                 let addr: Vec<SocketAddr> = addr.collect();
+    //                 if !addr.is_empty() {
+    //                     self.broker_addr_map.insert(broker.node_id, addr[0]);
+    //                 }
+    //             }
+    //             Err(e) => error!("Resolve broker error: {}", e),
+    //         }
+    //     }
+    // }
 
     #[instrument]
     pub(crate) async fn reset_broker(&mut self, broker_id: BrokerId) {
@@ -154,57 +154,26 @@ impl Cluster {
 
     /// Get partitions count from cache or listen in background fore resolution
     #[instrument]
-    async fn get_or_fetch_partition_count(&mut self, topic: String, respond_to: oneshot::Sender<BrokerResult<usize>>) {
+    pub(crate) async fn get_or_fetch_partition_count(&mut self, topic: String) -> BrokerResult<usize> {
         if let Some(meta) = self.topics_meta.get(&topic) {
-            if let Err(e) = respond_to.send(Ok(meta.partitions.len())) {
-                // TODO: should panic?
-                error!("get_or_fetch_partition_count: failed to send response");
-            }
-            return
+            return Ok(meta.partitions.len());
         }
 
         tracing::debug!("No meta in cache, fetching it");
         if let Err(e) = self.get_or_request_meta_many(&vec![topic.clone()]).await {
-            let _ = respond_to.send(Err(e));
-            return;
+            // let _ = respond_to.send(Err(e));
+            return Err(e);
         }
 
         tracing::debug!("Fetched topic");
-        let res = match self.topics_meta.get(&topic) {
+        match self.topics_meta.get(&topic) {
             Some(meta) => Ok(meta.partitions.len()),
             None => Err(BrokerFailureSource::Internal(anyhow!("Failed to get meta after resolution")))
-        };
-        tracing::debug!("Sending response meta");
-        if let Err(_) = respond_to.send(res) {
-            tracing::error!("The requester dropped");
         }
-
-        // let mut listener = self.resolver.listener();
-        // // TODO: race condition, what if answer comes before listening happen?
-        // self.resolver.start_resolve(vec![topic.clone()]).await;
-        // // TODO: configure timeout
-        // tokio::spawn(tokio::time::timeout(Duration::from_secs(3*60),async move {
-        //     loop {
-        //         match listener.recv().await {
-        //             Ok(meta) => {
-        //                  if let Some(meta) = meta.topics.iter().find(|t| t.topic == topic) {
-        //                      if let Err (e) = respond_to.send(Ok(topic.len())) {
-        //                          error!("get_or_fetch_partition_count: failed to send response");
-        //                      }
-        //                      break;
-        //                  }
-        //             }
-        //             Err(e) => {
-        //                 respond_to.send(Err(BrokerFailureSource::Internal(e.into())));
-        //                 break;
-        //             }
-        //         }
-        //     }
-        // }.instrument(debug_span!("reading resolver"))));
     }
 
     #[instrument(ret, err)]
-    async fn list_offsets(&mut self, topics: Vec<String>) -> BrokerResult<Vec<BrokerResult<protocol::ListOffsetsResponse0>>> {
+    pub async fn list_offsets(&mut self, topics: Vec<String>) -> BrokerResult<Vec<BrokerResult<protocol::ListOffsetsResponse0>>> {
         let mut res = vec![];
         self.get_or_request_meta_many(&topics).await?;
         let broker_topics = self.group_leader_by_topic(&topics);
@@ -344,7 +313,6 @@ impl Cluster {
 
     #[instrument(ret, err)]
     async fn get_or_request_meta_many(&mut self, topics: &Vec<String>) -> BrokerResult<()> {
-        // let maps = self.read().await;
         let missing = topics.into_iter()
             .filter(|topic| !self.topics_meta.contains_key(*topic))
             .map(|topic| topic.to_owned())
@@ -367,7 +335,7 @@ impl Cluster {
     // }
 
     #[instrument(ret, err)]
-    async fn fetch_topic_meta_no_update(&mut self, topics: Vec<String>) -> BrokerResult<MetadataResponse0> {
+    pub async fn fetch_topic_meta_no_update(&mut self, topics: Vec<String>) -> BrokerResult<MetadataResponse0> {
         // TODO: use resolver?
         let request = MetadataRequest0 { topics };
         self.request_any(request).await
@@ -452,7 +420,7 @@ mod tests {
 
     #[tokio::test]
     #[instrument]
-    async fn fetch_offsets() {
+    async fn fetch_offsets() -> anyhow::Result<()> {
         let _tracer = init_tracer("test");
         simple_logger::SimpleLogger::new().with_level(LevelFilter::Debug).init().unwrap();
         let bootstrap = "127.0.0.1:9092".to_string();
@@ -464,5 +432,10 @@ mod tests {
         let some_offsets = cluster.list_offsets(vec!["topic2".to_owned()]).await;
         println!("zero_offsets: {:?}", zero_offsets);
         println!("some_offsets: {:?}", some_offsets);
+
+        let count = cluster.get_or_fetch_partition_count("test1".to_string()).await?;
+        println!("count: {count}");
+
+        Ok(())
     }
 }

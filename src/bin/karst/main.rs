@@ -3,7 +3,7 @@ mod ui;
 use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use kafka4rust::{init_tracer};
+use kafka4rust::{Cluster, init_tracer};
 use tracing::info_span;
 use tracing_attributes::instrument;
 use std::time::Duration;
@@ -39,9 +39,9 @@ async fn main() -> Result<()> {
 
     match cli.command {
         KartCommand::List {subcommand} => {
-            let mut cluster = ClusterHandler::with_bootstrap(&cli.bootstrap, Some(Duration::from_secs(20)))?;
+            let mut cluster = Cluster::new(cli.bootstrap, Some(Duration::from_secs(20)));
             // TODO: check for errors
-            let meta = cluster.fetch_topic_meta_owned(vec![]).await?;
+            let meta = cluster.fetch_topic_meta_no_update(vec![]).await?;
             match subcommand {
                 ListCommands::Topics {filter, filter_regex} => {
                     let topics = meta.topics.iter();
@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
                     brokers.for_each(|t| println!("{}", t));
                 }
                 ListCommands::Offsets {topic} => {
-                    let offsets = cluster.fetch_offsets(vec![topic]).await?;
+                    let offsets = cluster.list_offsets(vec![topic]).await?;
                     for part in offsets {
                         println!("{:?}", part);
                     }
@@ -70,10 +70,10 @@ async fn main() -> Result<()> {
         }
         KartCommand::Publish {key, topic, single_message, send_timeout_sec, from_file, msg_value} => {
             let brokers = cli.bootstrap;
-            let mut producer = ProducerBuilder::new(&brokers);
-            if let Some(send_timeout) = send_timeout_sec {
-                producer = producer.send_timeout(Duration::from_secs(send_timeout));
-            }
+            // let mut producer = ProducerBuilder::new(&brokers);
+            // if let Some(send_timeout) = send_timeout_sec {
+            //     producer = producer.send_timeout(Duration::from_secs(send_timeout));
+            // }
 
             todo!()
             // let (mut producer, _acks) =

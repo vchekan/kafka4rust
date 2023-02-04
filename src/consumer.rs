@@ -1,8 +1,4 @@
 //! # Design considerations
-//!  
-//!
-//!
-//!
 
 use crate::cluster::Cluster;
 use crate::error::KafkaError;
@@ -15,7 +11,7 @@ use itertools::Itertools;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tracing::{debug_span, event, Level};
+use tracing::{debug_span, event, Level, debug, error};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use std::future::Future;
@@ -32,13 +28,15 @@ pub enum StartOffset {
 pub struct ConsumerBuilder {
     bootstrap: Option<String>,
     topic: String,
+    timeout: Duration,
 }
 
 impl ConsumerBuilder {
     pub fn new(topic: impl AsRef<str>) -> Self {
         ConsumerBuilder {
             bootstrap: None,
-            topic: topic.as_ref().to_string()
+            topic: topic.as_ref().to_string(),
+            timeout: Duration::from_secs(20)
         }}
 
     pub fn bootstrap(mut self, bootstrap: &str) -> Self {
@@ -95,16 +93,19 @@ impl Consumer {
             )).into());
         }
 
-        let mut cluster = Cluster::new(seed_list, None);
+        let mut cluster = Cluster::new(bootstrap, Some(builder.timeout));
         // let topic_meta = cluster.fetch_topic_meta_and_update(&[&builder.topic]).await?;
         // debug!("Resolved topic: {:?}", topic_meta);
         // assert_eq!(1, topic_meta.topics.len());
 
         let (tx, rx) = channel(1);
         tokio::spawn(async move {
-            if let Err(error) = fetch_loop(cluster, tx, builder).await {
-                error!("Fetch loop failed. Error: {}", error);
-                event!(tracing::Level::ERROR, %error, "Fetch loop failed")
+            match fetch_loop(cluster, tx, builder).await {
+                Ok(()) => debug!("Consumer fetch loop complete"),
+                Err(error) => {
+                    error!("Fetch loop failed. Error: {}", error);
+                    event!(tracing::Level::ERROR, %error, "Fetch loop failed")
+                }
             }
         });
         Ok(rx)
@@ -113,14 +114,14 @@ impl Consumer {
 
 #[instrument(level = "debug", err, skip(cluster, tx, config))]
 async fn fetch_loop(
-    cluster: Cluster,
+    mut cluster: Cluster,
     tx: Sender<Batch>,
     config: ConsumerBuilder,
 ) -> Result<()> {
 
     // Need to resolve topic before setting start positions
     // Can not use `cluster.get_or_request_leader_map` because it returns count of resolved partitions only.
-    let topic_partition_count = todo!(); //cluster.get_or_request_leader_map(&[&config.topic]).await?.len();
+    let topic_partition_count = cluster.get_or_fetch_partition_count(config.topic.to_string()).await?;
     // TODO: init offsets. For now it always starts from 0
     let mut offsets = vec![0_u64; topic_partition_count];
 
@@ -197,7 +198,7 @@ async fn fetch_loop(
                                     .await;
 
                                 if send_res.is_err() {
-                                    info!("Listener closed. Exiting fetch loop");
+                                    debug!("Listener closed. Exiting fetch loop");
                                     return Ok(());
                                 }
                             }
