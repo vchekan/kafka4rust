@@ -136,10 +136,10 @@ impl ProduceRequest3<'_> {
                 buf.put_u32(rs_len as u32);
                 assert!(rs_len > 0, "Empty recordset");
                 for (i, record) in recordset1.iter().enumerate() {
-                    write_record(buf, i as u64, record.timestamp - first_timestamp, &record)
+                    write_record(buf, i as u64, record.timestamp - first_timestamp, record)
                 }
                 for (i, record) in recordset2.iter().enumerate() {
-                    write_record(buf, i as u64, record.timestamp - first_timestamp, &record)
+                    write_record(buf, i as u64, record.timestamp - first_timestamp, record)
                 }
 
                 // write data and batch size

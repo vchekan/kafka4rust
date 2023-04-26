@@ -17,12 +17,17 @@ use tracing::info;
 use futures::future::Fuse;
 use futures_lite::pin;
 use futures_util::FutureExt;
+use std::time::Duration;
+use log::debug;
+use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::time::Instant;
+use tower::ServiceExt;
+use futures_lite::StreamExt;
 
 pub(crate) struct MetaDiscover {
     state: State,
     bootstrap: Vec<SocketAddr>,
     broker_idx: usize,
-    // conn: Option<BrokerConnection>,
     topic_requests: mpsc::Receiver<String>,
 }
 
@@ -31,99 +36,145 @@ enum State {
     Disconnected,
     Connected,
     Connecting,
+    RetrySleep,
     FetchingMeta,
 }
 
-// struct OptionBrokerConnection(Option<BrokerConnection>);
-
-// pin_project! {
 struct RequestFuture<F> {
-    //#[pin]
     conn: BrokerConnection,
     exchange: F,
-    //req: R,
 }
-// }
 
 impl MetaDiscover {
-    pub fn new(bootstrap: Vec<SocketAddr>, topic_requests: mpsc::Receiver<String>) -> Self {
-        MetaDiscover {
+    pub fn new(bootstrap: Vec<SocketAddr>) -> (Sender<String>, Receiver<Result<protocol::MetadataResponse0,BrokerFailureSource>>) {
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (response_tx, response_rx) = mpsc::channel(1);
+
+        let discover = MetaDiscover {
             state: State::Disconnected,
             broker_idx: 0,
             bootstrap,
-            topic_requests,
-        }
-    }
-    fn stream(&mut self) -> impl TryStream<Ok = Change<BrokerId,protocol::Broker>, Error = BrokerFailureSource, Item=Result<Change<BrokerId,protocol::Broker>,BrokerFailureSource>> + '_ {
+            topic_requests: command_rx,
+        }.stream();
 
+        tokio::task::spawn(async move {
+            pin!(discover);
+            loop {
+                match discover.next().await {
+                    Some(Ok(meta)) => {
+                        if let Err(_) = response_tx.send(Ok(meta)).await {
+                            break;
+                        }
+                    },
+                    Some(Err(e)) => {
+                        if let Err(e) = response_tx.send(Err(e)).await {
+                            tracing::debug!("Discover consumer closed channel, exiting");
+                            break;
+                        }
+                    },
+                    None => {
+                        tracing::debug!("Discover stream closed, exiting the loop");
+                        break;
+                    }
+                }
+            }
+
+            tracing::debug!("MetaDiscover loop exited");
+        });
+
+        (command_tx, response_rx)
+    }
+
+    fn stream(mut self) -> impl TryStream<Ok = protocol::MetadataResponse0, Error = BrokerFailureSource, Item=Result<protocol::MetadataResponse0,BrokerFailureSource>> {
         let stream = try_stream! {
             let mut topics = HashSet::new();
-            // let timeout = tokio::time::sleep(Duration::from_secs(10));
-            // tokio::pin!(timeout);
+            let timeout = tokio::time::sleep(Duration::from_secs(5));
+            tokio::pin!(timeout);
             let mut connected_broker = None;
             let fetching_meta = Fuse::terminated();
             tokio::pin!(fetching_meta);
 
             'outer: loop {
-                    if self.broker_idx >= self.bootstrap.len() {
-                        self.broker_idx = 0;
-                    }
-                    tracing::debug!("Awaiting in state: {:?}", self.state);
-                    select! {
-                        // Even disconnected, keep accepting new topics to be resolved
-                        topic = self.topic_requests.recv() => {
-                            match topic {
-                                Some(topic) => {
-                                    tracing::debug!("Added topic to be resolved: {topic}");
-                                    topics.insert(topic);
-                                    if let State::Connected = self.state {
-                                        tracing::debug!("Starting fetching");
-                                        let topics = topics.iter().cloned().collect();
-                                        fetching_meta.set(Self::fetching_meta(topics, connected_broker.take().unwrap()).fuse());
-                                        self.state = State::FetchingMeta;
-                                    }
-                                },
-                                None => {
-                                    tracing::debug!("Topics input stram closed, exiting discovery loop");
-                                    break 'outer
+                if self.broker_idx >= self.bootstrap.len() {
+                    self.broker_idx = 0;
+                }
+                tracing::debug!("Awaiting in state: {:?}, topics[{}]", self.state, topics.len());
+                select! {
+                    // Even disconnected, keep accepting new topics to be resolved
+                    topic = self.topic_requests.recv() => {
+                        match topic {
+                            Some(topic) => {
+                                tracing::debug!("Added topic to be resolved: {topic}");
+                                topics.insert(topic);
+                                if let State::Connected = self.state {
+                                    tracing::debug!("Starting fetching");
+                                    let topics = topics.iter().cloned().collect();
+                                    fetching_meta.set(Self::fetching_meta(topics, connected_broker.take().unwrap()).fuse());
+                                    self.state = State::FetchingMeta;
                                 }
+                            },
+                            None => {
+                                tracing::debug!("Topics input stram closed, exiting discovery loop");
+                                break 'outer
                             }
                         }
+                    }
 
-                        // Always try to connect when disconnected
-                        conn = BrokerConnection::connect(self.bootstrap[self.broker_idx]), if self.state == State::Disconnected => {
-                            match conn {
-                                Ok(conn) => {
-                                    tracing::debug!("Connected");
+                    // Always try to connect when disconnected
+                    conn = BrokerConnection::connect(self.bootstrap[self.broker_idx]), if self.state == State::Disconnected => {
+                        match conn {
+                            Ok(conn) => {
+                                tracing::debug!("Connected");
+                                if topics.is_empty() {
                                     connected_broker.insert(conn);
-                                    self.state = State::Connected;
-                                    self.broker_idx += 1;
-                                    continue;
+                                } else {
+                                    let topics = topics.iter().cloned().collect();
+                                    fetching_meta.set(Self::fetching_meta(topics, conn).fuse());
                                 }
-                                Err(e) => {
-                                    tracing::debug!("Failed to connect, will try again: {e}");
-                                }
+                                self.state = State::Connected;
+                                self.broker_idx += 1;
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::debug!("Failed to connect, will try again: {e}");
+                                timeout.as_mut().reset(Instant::now() + Duration::from_secs(5));
+                                self.state = State::RetrySleep;
                             }
                         }
+                    }
 
-                        //
-                        (meta, conn) = &mut fetching_meta =>
-                        {
-                            match meta {
-                                Ok(meta) => {
-                                    self.state = State::Connected;
-                                    for broker in meta.brokers {
-                                        yield(Change::Insert(broker.node_id, broker));
+                    //
+                    (meta, conn) = &mut fetching_meta =>
+                    {
+                        match meta {
+                            Ok(meta) => {
+                                debug!("Resolved successfully. Topics[{}]", meta.topics.len());
+                                self.state = State::Connected;
+
+                                for topic in &meta.topics {
+                                    if topic.error_code.is_ok() {
+                                        topics.remove(&topic.topic);
+                                        debug!("Resolved topic {}", topic.topic);
                                     }
                                 }
-                                Err(e) => info!("Error fetching topics metadata: {e}")
-                            }
 
+                                if !topics.is_empty() {
+                                    timeout.as_mut().reset(Instant::now() + Duration::from_secs(5));
+                                    self.state = State::RetrySleep;
+                                }
+                                let _ = connected_broker.replace(conn);
+
+                                yield(meta);
+                            }
+                            Err(e) => info!("Error fetching topics metadata: {e}")
                         }
-                        // _ = &mut timeout, if !topics.is_empty() => {
-                        //
-                        // }
+
                     }
+
+                    _ = &mut timeout, if self.state == State::RetrySleep => {
+                        self.state = State::Disconnected;
+                    }
+                }
             }
         };
         stream
@@ -143,32 +194,38 @@ mod tests {
     use super::*;
     use tokio::time::timeout;
     use futures_lite::stream::StreamExt;
+    use crate::init_tracer;
 
     #[tokio::test]
     async fn test() -> anyhow::Result<()> {
+        let _tracer = init_tracer("test");
         simple_logger::SimpleLogger::new().env().with_level(log::LevelFilter::Debug).init().unwrap();
 
-        timeout(Duration::from_secs(10), async move {
-            let _trace = crate::utils::init_tracer("metadiscover-test").unwrap();
+        timeout(Duration::from_secs(15), async move {
 
-            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let (tx, rx) = mpsc::channel(1);
             let tx2 = tx.clone();   // to keep it open until end of test
             let bootstrap = resolve_addr("localhost");
-            let mut discover = MetaDiscover::new(bootstrap, rx);
-            let stream = discover.stream();
-            pin_mut!(stream);
+            let (discover_tx, mut discover_rx) = MetaDiscover::new(bootstrap);
+            //let stream = discover.stream();
+            //pin_mut!(stream);
+
+            let topics = vec!["topic1", "topic2", "topic2"];
+            let topic_count = topics.len();
             tokio::task::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                tx.send("topic1".to_string()).await.unwrap();
+                for topic in topics {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    tx.send(topic.to_string()).await.unwrap();
+                }
             });
 
             let mut broker_resolved = 0;
             loop {
-                match stream.next().await {
+                match discover_rx.recv().await {
                     Some(Ok(conn)) => {
                         println!("> {conn:?}");
                         broker_resolved += 1;
-                        if broker_resolved == 3 {
+                        if broker_resolved == topic_count {
                             break;
                         }
                     },
@@ -179,7 +236,7 @@ mod tests {
                     }
                 }
             }
-        }).await.unwrap();
+        }).await?;
         Ok(())
     }
 }

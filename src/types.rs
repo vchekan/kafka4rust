@@ -3,11 +3,13 @@ pub(crate) type BrokerId = i32;
 pub(crate) type Partition = u32;
 pub(crate) type Offset = u64;
 
+#[derive(Clone, Debug)]
 pub(crate) struct TopicMeta {
     pub topic: String,
     pub partitions: Vec<Option<PartitionMeta>>
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct PartitionMeta {
     leader: BrokerId,
 }

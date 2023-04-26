@@ -165,7 +165,7 @@ impl BrokerConnection {
     #[instrument(level = "debug", err, skip(self, buf))]
     pub async fn exchange_with_buf(&mut self, buf: &mut BytesMut) -> BrokerResult<()> {
         trace!("Sending request[{}] to {:?}", buf.len(), self.tcp.peer_addr());
-        self.tcp.write_all(&buf).instrument(tracing::debug_span!("writing request")).await
+        self.tcp.write_all(buf).instrument(tracing::debug_span!("writing request")).await
             .map_err(|e| BrokerFailureSource::Write(format!("writing {} bytes to socket {:?}", buf.len(), self.tcp.peer_addr()), e))?;
 
         // TODO: buffer reuse
