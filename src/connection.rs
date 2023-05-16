@@ -56,60 +56,6 @@ pub(crate) struct BrokerConnection {
     correlation_id: u32,
 }
 
-// #[derive(Clone)]
-// pub struct ConnectionHandle {
-//     sender: mpsc::Sender<TracedMessage<Msg>>,
-//     addr: SocketAddr    // No functionality, just for display
-// }
-
-// impl ConnectionHandle {
-    // pub fn new(addr: SocketAddr) -> Self {
-    //     let (tx, rx) = mpsc::channel(1);
-    //     tokio::spawn(run(addr.clone(), rx));
-    //     ConnectionHandle {sender: tx, addr}
-    // }
-    //
-    // pub async fn query(&self, request: BytesMut) -> BrokerResult<Bytes> {
-    //     let (tx, rx) = oneshot::channel();
-    //     if let Err(e) = self.sender.send(TracedMessage::new(Msg::Request(request, tx))).await {
-    //         return Err(BrokerFailureSource::ConnectionChannelClosed);
-    //     }
-    //
-    //     match rx.await {
-    //         Ok(response) => Ok(Bytes::from(response?)),
-    //         Err(e) => Err(BrokerFailureSource::ConnectionChannelClosed)
-    //     }
-    // }
-    //
-    // /// Allocate buffer, serialize request, send query, deserialize response.
-    // #[instrument(level = "debug", ret, err)]
-    // pub async fn exchange<RQ: protocol::Request>(&self, request: &RQ) -> BrokerResult<RQ::Response> {
-    //     // TODO: buffer management
-    //     // TODO: ensure capacity (BytesMut will panic if out of range)
-    //     let mut buff = BytesMut::with_capacity(200 * 1024); //Vec::with_capacity(1024);
-    //     //let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
-    //     // let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
-    //     // TODO: remove correnation_id parameter because it is fixed later in handler?
-    //     protocol::write_request(request, None, &mut buff, 0);
-    //
-    //     let mut buff = self.query(buff).await?;
-    //     let (_corr_id, response) = read_response(&mut buff)?;
-    //     // TODO: check correlationId
-    //     // TODO: check for response error
-    //     Ok(response)
-    // }
-    //
-    //
-// }
-
-// impl Debug for Msg {
-//     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-//         match self {
-//             Msg::Request(..) => f.write_str("Msg::Request")
-//         }
-//     }
-// }
-
 impl BrokerConnection {
     /// Connect to address and issue ApiVersion request, build compatible Api Versions for all Api
     /// Keys
@@ -143,22 +89,6 @@ impl BrokerConnection {
 
     pub fn addr(&self) -> SocketAddr {self.addr}
 
-    // //#[instrument(name="connection-handle")]
-    // async fn handle(&mut self, msg: TracedMessage<Msg>) {
-    //     match msg.get() {
-    //         Msg::Request(mut msg, respond) => {
-    //             // correlation has offest 8 bytes
-    //             msg.get_mut(8..)
-    //                 .expect("Corrupt message, cant write correnationId")
-    //                 .put_u32(self.correlation_id);
-    //             self.correlation_id += 1;
-    //             let res = match self.exchange_with_buf(&mut msg).await {
-    //                 Ok(()) => respond.send(Ok(msg)),
-    //                 Err(e) => respond.send(Err(e))
-    //             };
-    //         }
-    //     };
-    // }
 
     /// Write request from buffer into tcp and reuse the buffer to read response.
     /// Message size is read from the buffer, so buffer will position to the correlation_id

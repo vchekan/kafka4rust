@@ -5,7 +5,7 @@ mod connection;
 mod cluster;
 mod metadiscover;
 mod meta_cache;
-// mod consumer;
+mod consumer;
 // mod producer_buffer;
 // mod producer;
 // pub mod admin;

@@ -16,7 +16,6 @@ use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use std::future::Future;
 use tokio::sync::RwLock;
-use std::sync::Arc;
 
 // TODO: offset start: -2, end: -1
 pub enum StartOffset {
@@ -47,6 +46,7 @@ impl ConsumerBuilder {
     pub fn build(self) -> impl Future<Output = Result<Receiver<Batch>>> { Consumer::new(self) }
 }
 
+#[derive(Debug)]
 pub struct Batch {
     pub partition: u32,
     pub high_watermark: u64,
@@ -81,6 +81,10 @@ pub(crate) struct Consumer {
 }
 
 impl Consumer {
+    pub fn builder(topic: &str) -> ConsumerBuilder {
+        ConsumerBuilder::new(topic)
+    }
+
     #[instrument]
     async fn new(builder: ConsumerBuilder) -> Result<Receiver<Batch>> {
         let bootstrap = builder.bootstrap.as_ref().map(|s| s.clone()).unwrap_or("localhost:9092".to_string());
@@ -118,15 +122,17 @@ async fn fetch_loop(
     tx: Sender<Batch>,
     config: ConsumerBuilder,
 ) -> Result<()> {
+    debug!("Starting consumer fetch loop");
 
     // Need to resolve topic before setting start positions
     // Can not use `cluster.get_or_request_leader_map` because it returns count of resolved partitions only.
     let topic_partition_count = cluster.get_or_fetch_partition_count(config.topic.to_string()).await?;
+    debug!("Got partitions count: {topic_partition_count}");
     // TODO: init offsets. For now it always starts from 0
     let mut offsets = vec![0_u64; topic_partition_count];
 
     loop {
-        let mut topic_meta = cluster.get_known_broker_map().await?;
+        let mut topic_meta = cluster.get_known_broker_map().await;
 
         let fetch_requests: Vec<_> = topic_meta.into_iter().map(|(leader, leader_group)| {
             let request = protocol::FetchRequest5 {
@@ -156,13 +162,20 @@ async fn fetch_loop(
             (leader, request)
         }).collect();
 
+        // TODO: fetch in parallel
         for (leader, request) in fetch_requests.into_iter() {
             event!(Level::DEBUG, %leader, "sending");
-            let broker = cluster.broker_get_or_connect(leader).await?;
+            let broker = match cluster.broker_get_or_connect(leader).await {
+                Ok(broker) => broker,
+                Err(e) => {
+                    debug!("Address for broker_id={leader} failed: {e}, skipping");
+                    continue
+                }
+            };
             // let broker: &Broker = broker?;
             event!(Level::DEBUG, %leader, "got_broker");
 
-            let response = broker.send_request(&request).await;
+            let response = broker.exchange(&request).await;
             event!(Level::INFO, %leader, "got response");
             match response {
                 Ok(response) => {
@@ -171,6 +184,8 @@ async fn fetch_loop(
                         tokio::time::sleep(Duration::from_millis(response.throttle_time as u64))
                             .await;
                     }
+
+                    debug!("response[{:?}]", response);
                     for response in response.responses {
                         // TODO: return topic in message
                         for fetch_partition in response.partitions {
@@ -229,26 +244,21 @@ async fn fetch_loop(
     }
 }
 
-/*
 #[cfg(test)]
 mod test {
+    use log::LevelFilter;
+    use crate::init_tracer;
     use super::*;
-    use failure::Error;
 
-    #[test]
-    fn test() -> std::result::Result<(), failure::Error> {
-        Ok(utils::init_test()?.block_on(async {
-            let mut  consumer = Consumer::builder().
-                bootstrap("127.0.0.1").
-                // TODO: how to make topic mandatory?
-                topic("test1".to_string()).
-                build().await?;
-            let msg = consumer.recv().await;
-            debug!("Got msg {:?}", msg);
-            Ok::<(),failure::Error>(())
-        }).expect("Executed with error"))
+    #[tokio::test]
+    async fn test() -> anyhow::Result<()> {
+        let _tracer = init_tracer("test");
+        simple_logger::SimpleLogger::new().with_level(LevelFilter::Debug).init().unwrap();
 
-        //Ok(())
+        let mut  consumer = Consumer::builder("test1").
+            bootstrap("127.0.0.1").build().await?;
+        let msg = consumer.recv().await;
+        debug!("Got msg {:?}", msg);
+        Ok(())
     }
 }
-*/

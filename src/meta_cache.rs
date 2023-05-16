@@ -13,8 +13,7 @@ use tokio::sync::{Mutex, RwLock};
 use crate::protocol;
 use crate::types::{BrokerId, Partition, TopicMeta};
 use tracing::{debug, error, instrument};
-
-type LeaderMap = Vec<(BrokerId, Vec<(String, Vec<Partition>)>)>;
+use crate::cluster::LeaderMap;
 
 pub struct MetaCache {
     data: Arc<RwLock<Data>>,    // TODO: replace with std::sync::RWLock to avoid `await`s?
@@ -101,13 +100,17 @@ impl MetaCache {
                 debug!("Get value in cache");
                 return Some(v);
             }
-            None => data.updates.subscribe()
+            None => {
+                debug!("Cache miss, awaiting for result");
+                data.updates.subscribe()
+            }
         };
         std::mem::drop(data);
 
-        debug!("Cache miss, awaiting for result");
         loop {
+            debug!("Awaiting for metadata change");
             let _ = subscription.recv().await;
+            debug!("Got change in metadata");
             let data = self.data.read().await;
             match getter(&data) {
                 Some(v) => {
@@ -177,6 +180,8 @@ impl Data {
             tracing::warn!("failed to parse broker host: {}", &broker.host);
         }
 
+        debug!("Updated meta cache: {self:#?}");
+
         self.trigger_wakers();
     }
 
@@ -188,4 +193,12 @@ impl Data {
     }
 }
 
-
+impl Debug for Data {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetaCache::Data")
+            .field("broker_addr_map", &self.broker_addr_map)
+            .field("leader_cache", &self.leader_cache)
+            .field("topic_meta", &self.topics_meta)
+            .finish()
+    }
+}
