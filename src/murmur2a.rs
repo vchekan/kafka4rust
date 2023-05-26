@@ -40,7 +40,7 @@ pub fn hash32(data: &[u8]) -> u32 {
         h ^= (data[(len & !3) + 1] as u32) << 8;
     }
     if remaining >= 1 {
-        h ^= data[(len & !3)] as u32;
+        h ^= data[len & !3] as u32;
         h *= M;
     }
 

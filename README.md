@@ -48,7 +48,7 @@
   - Joshua's `Stream::merge`: https://blog.yoshuawuyts.com/futures-concurrency-3/#issues-with-futures-select 
 - [ ] Implement BufferPool to minimize large vectors allocations  
 - [ ] Use crossbeam::epoch::Pointable to store list of known brokers and metadata. Allows for lock-free walks over brokers.
-- [ ] Try actors approach: https://ryhl.io/blog/actors-with-tokio/
+- [ ] ~~Try actors approach: https://ryhl.io/blog/actors-with-tokio/~~
 - [ ] Test when topic partition count changes (topic re-create)
 - [ ] Are topics case-sensitive?
 - [ ] Tracing conventions https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/messaging.md
@@ -70,7 +70,8 @@
 * Stats about producer/consumer buffers waiting, server throttling
 * CI: do `cargo audit`
 * Failure model: fail up to connection reset instead of panic.
-* Use hashmap's raw_entry
+* ~~Use hashmap's raw_entry~~
+  * Is unstable 
 
 ## Projects
 * CLI tools

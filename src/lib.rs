@@ -1,13 +1,11 @@
-//#![feature(type_alias_impl_trait)]
-
 pub mod protocol;
 mod connection;
 mod cluster;
 mod metadiscover;
 mod meta_cache;
 mod consumer;
-// mod producer_buffer;
-// mod producer;
+mod producer_buffer;
+mod producer;
 // pub mod admin;
 
 mod types;
