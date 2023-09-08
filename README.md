@@ -71,7 +71,9 @@
 * CI: do `cargo audit`
 * Failure model: fail up to connection reset instead of panic.
 * ~~Use hashmap's raw_entry~~
-  * Is unstable 
+  * Is unstable
+* Try Async Local Executors
+  * https://maciej.codes/2022-06-09-local-async.html
 
 ## Projects
 * CLI tools
