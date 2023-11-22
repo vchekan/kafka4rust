@@ -16,6 +16,7 @@ mod zigzag;
 mod retry_policy;
 mod futures;
 mod murmur2a;
+mod connections_pool;
 
 pub use self::cluster::Cluster;
 //pub use self::consumer::{ConsumerBuilder};

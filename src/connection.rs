@@ -37,22 +37,11 @@ use crate::utils::TracedMessage;
 
 pub(crate) const CLIENT_ID: &str = "k4rs";
 
-// pub(crate) enum Msg {
-//     Request(BytesMut, oneshot::Sender<BrokerResult<BytesMut>>),
-// }
-
-//pub(crate) type ConnectionFuture = impl Future<Output=BrokerResult<BrokerConnection>>;
-
-
 pub(crate) struct BrokerConnection {
     addr: SocketAddr,
     /// (api_key, agreed_version)
     negotiated_api_version: Vec<(i16, i16)>,
-    // TODO: is this decision sound? Could we write 2 messages from 2 threads and read them out of order?
-    //inner: Arc<Mutex<Inner>>,
     tcp: TcpStream,
-    // rx: mpsc::Receiver<TracedMessage<Msg>>,
-    // TODO: handle overflow
     correlation_id: u32,
 }
 
@@ -129,7 +118,7 @@ impl BrokerConnection {
         //let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
         // let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
         protocol::write_request(request, None, &mut buff, self.correlation_id);
-        self.correlation_id += 1;
+        self.correlation_id = self.correlation_id.wrapping_add(1);
 
         self.exchange_with_buf(&mut buff).await?;
         //let mut cursor = Cursor::new(buff);

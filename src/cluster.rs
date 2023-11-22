@@ -8,10 +8,12 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use tokio::time::Duration;
 use tracing_attributes::instrument;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot};
 use std::fmt::{Debug, Formatter};
+use std::future::Future;
 use std::ops::IndexMut;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::sync::mpsc::{Receiver, Sender, SendError};
 use anyhow::anyhow;
 use futures_util::AsyncWriteExt;
 use indexmap::IndexMap;
@@ -35,7 +37,18 @@ pub struct Cluster {
     /// topic -> partition[] -> leader (if known). Leader is None if it is down and requires re-discovery
     meta_cache: MetaCache,
     meta_discover_tx: mpsc::Sender<String>,     // TODO: send `Vec<String> to ensure batching resolution?
-    
+}
+
+pub struct ClusterActor {
+    cluster: Cluster,
+}
+
+pub enum Cmd {
+
+}
+
+pub enum Response {
+
 }
 
 impl Debug for Cluster {
@@ -67,6 +80,33 @@ impl Cluster {
         }
     }
 
+    pub fn spawn_cluster(self) -> (mpsc::Sender<Cmd>, mpsc::Receiver<Response>) {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(2);
+        let (response_tx, response_rx) = mpsc::channel(2);
+        tokio::spawn(async move {
+            while let Some(msg) = cmd_rx.recv().await {
+                todo!()
+                // match msg {
+                //
+                // }
+            }
+        });
+
+        (cmd_tx, response_rx)
+    }
+
+    pub fn get_meta_cache(&self) -> MetaCache {
+        self.meta_cache.clone()
+    }
+
+    pub async fn request_meta_refresh(&self, topic: String) -> Result<(), mpsc::error::SendError<String>> {
+        self.meta_discover_tx.send(topic).await
+    }
+
+    pub fn meta_discover_sender_clone(&self) -> mpsc::Sender<String> {
+        self.meta_discover_tx.clone()
+    }
+
     fn spawn_discover(data: Arc<RwLock<Data>>, mut meta_discover_rx: mpsc::Receiver<BrokerResult<protocol::MetadataResponse0>>) {
         tokio::task::spawn(async move {
             loop {
@@ -74,7 +114,7 @@ impl Cluster {
                 match meta_discover_rx.recv().await {
                     Some(meta) => {
                         debug!("Got meta update");
-                        let mut data = (*data).write().await;
+                        let mut data = (*data).write().expect("Lock failed");
                         match meta {
                             Ok(meta) => {
                                 data.update_meta(&meta);
@@ -91,8 +131,8 @@ impl Cluster {
 
     /// Return leader map of known brokers. Unknown brokers will be requested in background.
     #[instrument(level="debug")]
-    pub(crate) async fn get_known_broker_map(&self) -> LeaderMap {
-        self.meta_cache.get_known_broker_map().await
+    pub(crate) fn get_known_broker_map(&self) -> LeaderMap {
+        self.meta_cache.get_known_broker_map()
     }
 
     /// Get partitions count from cache or listen in background fore resolution
@@ -157,7 +197,7 @@ impl Cluster {
         let idx = match self.connections.get_index_of(&broker_id) {
             Some(idx) => idx,
             None => {
-                match self.meta_cache.get_addr_by_broker(&broker_id).await {
+                match self.meta_cache.get_addr_by_broker(&broker_id) {
                     Some(addr) => {
                         match BrokerConnection::connect(addr).await {
                             Ok(broker) => {
@@ -181,7 +221,7 @@ impl Cluster {
         }
 
         // TODO: if broker does not exist, return error?
-        if let Some(addr) = self.meta_cache.get_addr_by_broker(broker_id).await {
+        if let Some(addr) = self.meta_cache.get_addr_by_broker(broker_id) {
             let conn = BrokerConnection::connect(addr).await?;
             self.connections.insert(*broker_id, conn);
         }
@@ -231,7 +271,7 @@ impl Cluster {
     #[instrument(ret, err)]
     async fn get_or_request_brokers_and_meta(&mut self, topics: &Vec<String>) -> BrokerResult<(HashMap<BrokerId, Vec<String>>, HashMap<String, TopicMeta>)> {
         // TODO: extract resolving missing topics into a separate function
-        let mut topics_meta = self.meta_cache.get_topics_meta(topics).await;
+        let mut topics_meta = self.meta_cache.get_topics_meta(topics);
 
         let missings: Vec<_> = topics.into_iter()
             //.partition(self.topics_meta.contains_key(*topic));
@@ -245,15 +285,15 @@ impl Cluster {
 
         debug!("Awaiting for missing topics to resolve");
         for missing in missings {
-            let meta = self.meta_cache.get_or_await(|data| data.topics_meta.get(missing).cloned()).await;
+            let meta = self.meta_cache.get_or_await(move |data| data.topics_meta.get(missing).cloned()).await;
             match meta {
-                Some(meta) => {topics_meta.insert(meta.topic.clone(), meta.clone()); },
+                Some(meta) => {topics_meta.insert(meta.topic.clone(), meta); },
                 // TODO: get_or_await should return `Err`
                 None => return Err(BrokerFailureSource::Internal(anyhow!("Can't resolve topic: {}", missing)))
             }
         }
 
-        let brokers_topic = self.meta_cache.group_leader_by_topics(topics).await;
+        let brokers_topic = self.meta_cache.group_leader_by_topics(topics);
 
         Ok((brokers_topic, topics_meta))
     }

@@ -5,7 +5,7 @@ use crate::protocol::ErrorCode;
 use crate::types::*;
 use crate::utils;
 use std::collections::HashMap;
-use std::fmt;
+use std::{fmt, mem};
 use std::fmt::{Debug, Formatter};
 use std::future::Future;
 use std::ops::Add;
@@ -13,16 +13,24 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, UNIX_EPOCH};
+use futures::pin_mut;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tracing;
 use tracing_attributes::instrument;
 use crate::producer_buffer::Buffer;
 use log::{debug, error};
 use tokio::pin;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::Instant;
+use tracing::field::debug;
+use tracing::{debug_span, info, Instrument};
 use tracing_subscriber::fmt::time;
+use crate::meta_cache::{Data, MetaCache};
 use crate::utils::TracedMessage;
+use futures::future::{Fuse, FusedFuture, FutureExt};
+use futures_util::stream::FuturesUnordered;
+use crate::connections_pool::ConnectionPool;
+use futures_util::StreamExt;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
 /// internal timer sends messages accumulated in buffer to kafka broker.
@@ -160,125 +168,244 @@ impl Partitioner for FixedPartitioner {
     }
 }
 
-#[derive(Debug)]
-enum BuffCmd {
-    Flush,
-    FlushAndClose,
-}
-
 // #[derive(Debug)]
-// enum Msg {
-//     Produce(QueuedMessage, String),
-//     Flush(oneshot::Sender<BrokerResult<()>>),
+// pub struct Message {
+//     pub key: Option<Vec<u8>>,
+//     pub value: Vec<u8>,
+//     pub topic: String,
+//     pub timestamp: u64
 // }
 
 #[derive(Debug)]
-pub struct ProducerBuilder<'a> {
-    bootstrap: &'a str,
+pub struct ProducerBuilder {
+    bootstrap: String,
     hasher: Option<Box<dyn Partitioner>>,
     send_timeout: Option<Duration>,
 }
 
-impl<'a> ProducerBuilder<'a> {
-    pub fn new(brokers: &'a str) -> Self {
+impl ProducerBuilder {
+    pub fn new(brokers: String) -> Self {
         ProducerBuilder { bootstrap: brokers, hasher: None, send_timeout: None}
     }
     pub fn hasher(mut self, hasher: Box<dyn Partitioner>) -> Self { self.hasher = Some(hasher); self }
     pub fn send_timeout(self, timeout: Duration) -> Self { ProducerBuilder {send_timeout: Some(timeout), ..self} }
     
     /// If bootstrap address does not resolve, return error
-    pub fn build(self) -> anyhow::Result<Producer> { Producer::new(self) }
+    pub fn build(self) -> Producer { Producer::new(self) }
 }
-
-// #[derive(Clone)]
-// pub struct ProducerHandler {
-//     tx: mpsc::Sender<TracedMessage<Msg>>,
-// }
 
 pub struct Producer {
-    inner: Arc<Mutex<Inner>>
+    //inner: Arc<Mutex<Inner>>
+    //rx: mpsc::Receiver<TracedMessage<Msg>>,
+    // bootstrap: String,
+    // buffer: Buffer,
+    // cluster: Cluster,
+    // partitioner: Box<dyn Partitioner>,
+    // /// Async response (ack/nack) to the caller
+    // // acks: Sender<Response>,
+    // /// Channel to the buffer
+    // // buffer_commands: Sender<BuffCmd>,
+    // //flush_loop_handle: tokio::task::JoinHandle<BrokerResult<()>>,
+    // send_timeout: Option<Duration>,
+    // /// Counter use to round-robin messages with null key
+    // null_key_partition_counter: u32,
+    // topic_partitions_count: HashMap<String,usize>,
+    //
+    request_tx: Sender<Request>,
+    response_rx: Receiver<Response>,
+    close_event: oneshot::Sender<()>
 }
 
-struct Inner {
-    //rx: mpsc::Receiver<TracedMessage<Msg>>,
-    bootstrap: String,
-    buffer: Buffer,
-    cluster: Cluster,
-    partitioner: Box<dyn Partitioner>,
-    /// Async response (ack/nack) to the caller
-    // acks: Sender<Response>,
-    /// Channel to the buffer
-    // buffer_commands: Sender<BuffCmd>,
-    //flush_loop_handle: tokio::task::JoinHandle<BrokerResult<()>>,
-    send_timeout: Option<Duration>,
-    /// Counter use to round-robin messages with null key
-    null_key_partition_counter: u32,
-    topic_partitions_count: HashMap<String,usize>,
+enum State {
+    None,
+    WaitingMetadata(Request),
+    WaitingBuffer(Request),
 }
+
+struct Request {
+    msg: QueuedMessage,
+    topic: String,
+}
+
+async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Response>, mut close_event_receiver: oneshot::Receiver<()>, builder: ProducerBuilder) {
+    let flush_frequency = Duration::from_secs(5);
+    let mut state = State::None;
+    let mut cluster = Cluster::new(builder.bootstrap.to_string(), builder.send_timeout);
+    let meta_cache:MetaCache = cluster.get_meta_cache();
+    let mut meta_updates = cluster.get_meta_cache().subscribe_to_updates();
+    let mut null_key_partition_counter: u32 = 0;
+    let hasher = builder.hasher.unwrap_or_else(|| Box::new(Murmur2Partitioner{}));
+    let mut buffer = Buffer::new(cluster.meta_discover_sender_clone(), cluster.get_meta_cache());
+    let (cluster_tx, cluster_rx) = Cluster::new(builder.bootstrap, None).spawn_cluster();
+    let flush_timer = tokio::time::sleep(flush_frequency);
+    pin!(flush_timer);
+    let mut conns = ConnectionPool::new();
+    let mut flushes = FuturesUnordered::new();
+    loop {
+        tokio::select! {
+            //
+            // Read messages to be published
+            //
+            request = request_rx.recv(), if state.msg_allowed()  => {
+                let request = match request {
+                    Some(msg) => msg,
+                    None => {
+                        debug!("request_rx channel close");
+                        break;
+                    }
+                };
+                let msg = request.msg;
+                let topic = request.topic;
+
+                debug!("Got msg: {:?}", msg);
+                // calculate partition by the key
+                let key_hash = match &msg.key {
+                    Some(key) => hasher.partition(key),
+                    None => null_key_partition_counter.wrapping_add(1)
+                };
+
+                // let meta_cache = meta_cache.read().await;
+                let meta = meta_cache.get_topic_meta(&topic);
+                let partition_count = match meta {
+                    Some(meta) => meta.partitions.len() as u32,
+                    None => {
+                        if let Err(_) = cluster.request_meta_refresh(topic.clone()).await {
+                            info!("Cluster request_meta_refresh() failed");
+                            break;
+                        }
+                        debug!("Awaiting for meta resolution for topic: '{}'", topic);
+                        state = State::WaitingMetadata(Request {msg, topic});
+                        continue;
+                    }
+                };
+
+                let partition = calculate_partition(&msg, partition_count, &hasher, &mut null_key_partition_counter);
+                state = match buffer.add(msg, &topic, partition, partition_count) {
+                    Some(msg) => State::WaitingBuffer(Request{ msg, topic }),
+                    None => State::None
+                }
+            }
+
+            //
+            // Read meta updates
+            //
+            meta = meta_updates.recv() => {
+                if let Err(_) = meta {
+                    debug!("meta_updates closed");
+                    break;
+                };
+                debug!("Got meta update");
+
+                // If there is a message waiting for topic resolution, retry it
+                if let State::WaitingMetadata(request) = &mut state {
+                    // let meta_cache = meta_cache.read().await;
+                    let Request {msg, topic} = request;
+                    match meta_cache.get_topic_meta(topic) {
+                        // Topic found, can send message to buffer now
+                        Some(meta) => {
+                            debug!("Resolved topic for awaited message");
+                            let partitions = meta.partitions.len() as u32;
+                            let partition = calculate_partition(&msg, partitions, &hasher, &mut null_key_partition_counter);
+
+                            // extract message from state
+                            let state2 = mem::replace(&mut state, State::None);
+                            let (msg, topic) = match state2 {
+                                State::WaitingMetadata(Request {msg, topic}) => (msg, topic),
+                                _ => unreachable!()
+                            };
+
+                            match buffer.add(msg, &topic, partition, partitions) {
+                                // Buffer overflow, wait for buffer to be available
+                                Some(msg) => state = State::WaitingBuffer(Request {msg, topic}),
+                                // Buffer accepted the message, continue with no more awaiting
+                                None => state = State::None
+                            }
+                        },
+                        // Still no meta for the topic, keep waiting
+                        None => continue,
+                    }
+                }
+
+                conns.update_meta(&meta_cache);
+            }
+
+            //
+            // Producer close event
+            //
+            _ = &mut close_event_receiver => {
+                info!("Close event received");
+                // buffer.flush();
+                break;
+            }
+
+            //
+            // Flush timer
+            //
+            _ = &mut flush_timer => {
+                debug!("Start flushing");
+                let requests = match buffer.flush_request(&mut conns).instrument(debug_span!("buffer.flush_request()")).await {
+                    Ok(requests) => requests,
+                    Err(e) => {
+                        info!("Failed to flush buffer");
+                        break;
+                    }
+                };
+                for (request, conn) in requests {
+                    let request = Buffer::serialize(request);
+                    panic!("flush timer");
+                    flushes.push(Buffer::flush_exec(request, conn));
+                }
+                flush_timer.as_mut().reset(Instant::now().add(flush_frequency));
+            }
+
+            //
+            // Flushing is complete
+            //
+            x = &mut flushes.next(), if !flushes.is_empty() => {
+                debug!("Flush complete: {:?}", x);
+            }
+        }
+    }
+    debug!("Exiting producer loop");
+}
+
+fn calculate_partition(message: &QueuedMessage, partition_count: u32, hasher: &Box<dyn Partitioner>,
+                       null_key_partition_counter: &mut u32) -> u32
+{
+    let hash = match &message.key {
+        Some(key) => hasher.partition(key),
+        None => wrapping_get_and_inc(null_key_partition_counter),
+    };
+    hash % partition_count
+}
+
+fn wrapping_get_and_inc(h: &mut u32) -> u32 {
+    let res = *h;
+    *h = h.wrapping_add(1);
+    res
+}
+
 
 impl Producer {
-    pub fn builder(brokers: &str) -> ProducerBuilder {
+    pub fn builder(brokers: String) -> ProducerBuilder {
         ProducerBuilder::new(brokers)
     }
 
-    fn new(builder: ProducerBuilder) -> anyhow::Result<Producer> {
-        let inner = Inner::new(builder)?;
-        Ok(Producer {
-            inner: Arc::new(Mutex::new(inner))
-        })
-    }
-}
-
-impl Debug for Inner {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Producer: {{seed: '{}', partitioner: {:?}}}",
-            self.bootstrap, self.partitioner
-        )
-    }
-}
-
-impl Inner {
-    /// Resolves bootstrap addresses and creates producer.
-    /// Broker connection and topology resolution will be started upon first `send` request.
-    #[instrument(level = "debug", err)]
-    fn new(builder: ProducerBuilder) -> anyhow::Result<Self> {
-        // TODO: resolve names async and account for connect timeout
-
-        let cluster = Cluster::new(builder.bootstrap.to_string(), builder.send_timeout);
-
-        let producer = Inner {
-            bootstrap: builder.bootstrap.to_string(),
-            buffer: Buffer::new(),
-            cluster,
-            partitioner: builder.hasher.unwrap_or_else(|| Box::new(Murmur2Partitioner{})),
-            // acks: ack_tx,
-            // buffer_commands: buff_tx,
-            send_timeout: builder.send_timeout,
-            null_key_partition_counter: 0,
-            topic_partitions_count: HashMap::new(),
-        };
-
-        Ok(producer)
-    }
-
-    async fn eval_loop(producer: Arc<Mutex<Inner>>) {
-        let mut timer = tokio::time::sleep(publish_interval);
-
-        loop {
-            timer.await;
-
-            let leader_map = producer.cluster.get_known_broker_map().await;
-            let producer = producer.lock().expect("Failed to lock producer in eval_loop");
-            producer.buffer.flush();
-
-            timer.reset(Instant::now().add(publish_interval));
+    #[instrument(level = "debug")]
+    fn new(builder: ProducerBuilder) -> Self {
+        let (response_tx, response_rx) = channel(2);
+        let (request_tx, request_rx) = channel(2);
+        let (close_event, close_event_receiver) = oneshot::channel();
+        tokio::spawn(eval_loop(request_rx, response_tx, close_event_receiver, builder));
+        Producer {
+            request_tx,
+            response_rx,
+            close_event
         }
     }
 
     #[instrument(err, skip(msg, self))]
-    pub async fn send<M: ToMessage + 'static>(&mut self, msg: M, topic: &str) -> BrokerResult<()> {
+    pub async fn send<M: ToMessage + 'static>(&mut self, msg: M, topic: String) -> BrokerResult<()> {
         let msg = QueuedMessage {
             key: msg.key(),
             value: msg.value(),
@@ -288,43 +415,87 @@ impl Inner {
                 .as_millis() as u64,
         };
 
-        // calculate partition by the key
-        let partition = match &msg.key {
-            Some(key) => self.partitioner.partition(key),
-            None => {
-                self.null_key_partition_counter += 1;
-                self.null_key_partition_counter
-            }
-        };
+        self.request_tx.send(Request{msg, topic}).await.map_err(|e| {
+            info!("Broker channel closed, send failed");
+            BrokerFailureSource::ConnectionChannelClosed
+        })
 
-        let partition_count = match self.topic_partitions_count.get(topic) {
-            Some(count) => *count,
-            None => {
-                // TODO: no long-time blocking should exist
-                let partition_count = self.cluster.get_or_fetch_partition_count(topic.to_string()).await?; //self.get_or_fetch_partition_count(&topic).await?;
-                self.topic_partitions_count.insert(topic.to_string(), partition_count);
-                partition_count
-            }
-        };
-
-        let partition = partition % partition_count as u32;
-        tracing::debug!("partition: {}", partition);
-
-        let mut buffer = self.buffer.lock().expect("Failed to lock producer buffer");
-        buffer.add(msg, topic, partition, partition_count as u32);
-
-        Ok(())
+        // // calculate partition by the key
+        // c
+        //
+        // let partition_count = match self.topic_partitions_count.get(topic) {
+        //     Some(count) => *count,
+        //     None => {
+        //         // TODO: no long-time blocking should exist
+        //         let partition_count = self.cluster.get_or_fetch_partition_count(topic.to_string()).await?; //self.get_or_fetch_partition_count(&topic).await?;
+        //         self.topic_partitions_count.insert(topic.to_string(), partition_count);
+        //         partition_count
+        //     }
+        // };
+        //
+        // let partition = partition % partition_count as u32;
+        // tracing::debug!("partition: {}", partition);
+        //
+        // let mut buffer = self.buffer.lock().expect("Failed to lock producer buffer");
+        // buffer.add(msg, topic, partition, partition_count as u32);
+        //
+        // Ok(())
     }
 
-    #[instrument(level="debug", err, skip(self))]
-    pub async fn flush(&mut self) -> BrokerResult<()> {
-        todo!()
-        // debug!("Flushing buffer before close");
-        // // let mut cluster = self.cluster.write().await;
-        // let res = self.buffer.flush(&mut self.acks, &self.cluster).await;
-        // debug!("Flushing result: {:#?}", res);
-        // res
+    pub async fn close(self) {
+        
     }
+}
+
+// impl Inner {
+    /// Resolves bootstrap addresses and creates producer.
+    /// Broker connection and topology resolution will be started upon first `send` request.
+    // #[instrument(level = "debug", err)]
+    // fn new(builder: ProducerBuilder) -> anyhow::Result<Self> {
+    //     // TODO: resolve names async and account for connect timeout
+    //
+    //     let cluster = Cluster::new(builder.bootstrap.to_string(), builder.send_timeout);
+    //
+    //     let producer = Inner {
+    //         bootstrap: builder.bootstrap.to_string(),
+    //         buffer: Buffer::new(),
+    //         cluster,
+    //         partitioner: builder.hasher.unwrap_or_else(|| Box::new(Murmur2Partitioner{})),
+    //         // acks: ack_tx,
+    //         // buffer_commands: buff_tx,
+    //         send_timeout: builder.send_timeout,
+    //         null_key_partition_counter: 0,
+    //         topic_partitions_count: HashMap::new(),
+    //     };
+    //
+    //     Ok(producer)
+    // }
+
+    // async fn eval_loop(producer: Arc<Mutex<Inner>>) {
+    //     let mut timer = tokio::time::sleep(publish_interval);
+    //
+    //     loop {
+    //         timer.await;
+    //
+    //         let leader_map = producer.cluster.get_known_broker_map().await;
+    //         let producer = producer.lock().expect("Failed to lock producer in eval_loop");
+    //         producer.buffer.flush();
+    //
+    //         timer.reset(Instant::now().add(publish_interval));
+    //     }
+    // }
+
+
+    //
+    // #[instrument(level="debug", err, skip(self))]
+    // pub async fn flush(&mut self) -> BrokerResult<()> {
+    //     todo!()
+    //     // debug!("Flushing buffer before close");
+    //     // // let mut cluster = self.cluster.write().await;
+    //     // let res = self.buffer.flush(&mut self.acks, &self.cluster).await;
+    //     // debug!("Flushing result: {:#?}", res);
+    //     // res
+    // }
 
     /// Get topic's meta from cache or request from broker.
     /// Result will be cached.
@@ -410,17 +581,17 @@ impl Inner {
     //     // }
     // }
 
-    #[instrument(level="debug", err, skip(self))]
-    pub async fn close(self) -> anyhow::Result<()> {
-        todo!()
-        // debug!("Closing producer...");
-        // self.buffer_commands.send(BuffCmd::FlushAndClose).await?;
-        // debug!("Sent BuffCmd::FlushAndClose, waiting for loop exit");
-        // self.flush_loop_handle.await.context("producer closing")??;
-        // debug!("Producer closed");
-        // Ok(())
-    }
-}
+//     #[instrument(level="debug", err, skip(self))]
+//     pub async fn close(self) -> anyhow::Result<()> {
+//         todo!()
+//         // debug!("Closing producer...");
+//         // self.buffer_commands.send(BuffCmd::FlushAndClose).await?;
+//         // debug!("Sent BuffCmd::FlushAndClose, waiting for loop exit");
+//         // self.flush_loop_handle.await.context("producer closing")??;
+//         // debug!("Producer closed");
+//         // Ok(())
+//     }
+// }
 
 // #[instrument(level = "debug")]
 // async fn flushing_loop(mut buff_rx: Receiver<BuffCmd>, buffer: &mut Buffer, ack_tx: Sender<Response>, cluster: ClusterHandler, send_timeout: Duration) -> BrokerResult<()> {
@@ -478,22 +649,13 @@ impl Inner {
 //     };
 // }
 
-enum EvalLoop {
 
+impl State {
+    fn msg_allowed(&self) -> bool { matches!(self, State::None) }
 }
-
-impl Future for EvalLoop {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        todo!()
-    }
-}
-
-
 
 #[derive(Debug)]
-pub enum Response {
+enum Response {
     Ack {
         partition: u32,
         offset: u64,
@@ -577,19 +739,20 @@ mod tests {
 
     #[tokio::test]
     async fn test() -> anyhow::Result<()> {
+        // let count = 10_000;
+        let count = 10;
         simple_logger::SimpleLogger::new().with_level(LevelFilter::Debug).init().unwrap();
         let _trace = init_tracer("producer-test")?;
 
-        let mut producer = ProducerBuilder::new("localhost").build()?;
-        //let producer2 = producer.clone();
+        let mut producer = Producer::builder("localhost".to_string()).build();
         let producer = tokio::spawn(async move {
-            for i in 0..10_000 {
-                producer.send(format!("msg {}", i), "test1").await?;
+            for i in 0..count {
+                producer.send(format!("msg {}", i), "test1".to_string()).await?;
             }
             BrokerResult::Ok(producer)
         }).instrument(span!(Level::INFO, "send loop task")).await??;
 
-        producer.close().await?;
+        // producer.close().await?;
 
         Ok(())
     }

@@ -112,6 +112,7 @@ impl Consumer {
                 }
             }
         });
+
         Ok(rx)
     }
 }
@@ -132,7 +133,7 @@ async fn fetch_loop(
     let mut offsets = vec![0_u64; topic_partition_count];
 
     loop {
-        let mut topic_meta = cluster.get_known_broker_map().await;
+        let mut topic_meta = cluster.get_known_broker_map();
 
         let fetch_requests: Vec<_> = topic_meta.into_iter().map(|(leader, leader_group)| {
             let request = protocol::FetchRequest5 {

@@ -9,12 +9,15 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use futures_util::future::Pending;
 use futures_util::FutureExt;
-use tokio::sync::{Mutex, RwLock};
+// use tokio::sync::{Mutex, RwLock};
+use std::sync::RwLock;
+use tokio::sync::broadcast::Receiver;
 use crate::protocol;
 use crate::types::{BrokerId, Partition, TopicMeta};
 use tracing::{debug, error, instrument};
 use crate::cluster::LeaderMap;
 
+#[derive(Clone)]
 pub struct MetaCache {
     data: Arc<RwLock<Data>>,    // TODO: replace with std::sync::RWLock to avoid `await`s?
 }
@@ -40,15 +43,20 @@ impl MetaCache {
         }
     }
 
+    pub fn subscribe_to_updates(&self) -> Receiver<()> {
+        let data = self.data.read().expect("Lock failed");
+        data.updates.subscribe()
+    }
+
     pub(crate) fn clone_data(&self) -> Arc<RwLock<Data>> {
         self.data.clone()
     }
 
     /// Return leader map of known brokers. Unknown brokers will be requested in background.
     #[instrument(level="debug")]
-    pub(crate) async fn get_known_broker_map(&self) -> LeaderMap {
+    pub(crate) fn get_known_broker_map(&self) -> LeaderMap {
         let mut res: HashMap<BrokerId, HashMap<String,Vec<Partition>>> = HashMap::new();
-        let data = self.data.read().await;
+        let data = self.data.read().expect("Lock failed");
 
         for (topic, partitions) in &data.leader_cache {
             for (partition, leader_id) in partitions.iter().enumerate() {
@@ -63,9 +71,9 @@ impl MetaCache {
     }
 
     #[instrument(ret)]
-    pub(crate) async fn group_leader_by_topics<'a>(&'a self, topics: &'a[String]) -> HashMap<BrokerId, Vec<String>> {
+    pub(crate) fn group_leader_by_topics<'a>(&'a self, topics: &'a[String]) -> HashMap<BrokerId, Vec<String>> {
         let mut res: HashMap<BrokerId, Vec<String>> = HashMap::new();
-        let data = self.data.read().await;
+        let data = self.data.read().expect("Lock failed");
 
         for topic in topics {
             match data.leader_cache.get(topic) {
@@ -83,35 +91,45 @@ impl MetaCache {
         res
     }
 
-    pub(crate) async fn get_topics_meta(&self, topics: &[String]) -> HashMap<String, TopicMeta> {
-        let data = self.data.read().await;
+    pub(crate) fn get_topics_meta(&self, topics: &[String]) -> HashMap<String, TopicMeta> {
+        let data = self.data.read().expect("Lock failed");
         topics.iter()
             .filter_map(|t| data.topics_meta.get(t).map(|m| (t.clone(), m.clone())))
             .collect()
     }
 
+    pub(crate) fn get_topic_meta(&self, topic: &str) -> Option<TopicMeta> {
+        let data = self.data.read().expect("Lock failed");
+        data.topics_meta.get(topic).cloned()
+    }
+
     // TODO: should return BrokerResult and not Option?
     pub(crate) async fn get_or_await<T, F>(&self, getter: F) -> Option<T>
-        where F: Fn(&Data) -> Option<T>,
+        where
+            F: Fn(&Data) -> Option<T>,
     {
-        let data = self.data.read().await;
-        let mut subscription = match getter(&data) {
-            Some(v) => {
-                debug!("Get value in cache");
-                return Some(v);
-            }
-            None => {
-                debug!("Cache miss, awaiting for result");
-                data.updates.subscribe()
+        let mut subscription = {
+            let data = self.data.read().expect("Lock failed");
+            match getter(&data) {
+                Some(v) => {
+                    debug!("Get value in cache");
+                    return Some(v);
+                }
+                None => {
+                    debug!("Cache miss, awaiting for result");
+                    data.updates.subscribe()
+                }
             }
         };
-        std::mem::drop(data);
 
         loop {
             debug!("Awaiting for metadata change");
-            let _ = subscription.recv().await;
+            if let Err(_) = subscription.recv().await {
+                debug!("Meta subscription closed");
+                return None;
+            }
             debug!("Got change in metadata");
-            let data = self.data.read().await;
+            let data = self.data.read().expect("Lock failed");
             match getter(&data) {
                 Some(v) => {
                     debug!("Got value in cache after awaiting");
@@ -122,8 +140,8 @@ impl MetaCache {
         }
     }
 
-    pub async fn get_addr_by_broker(&self, broker: &BrokerId) -> Option<SocketAddr> {
-        let data = self.data.read().await;
+    pub fn get_addr_by_broker(&self, broker: &BrokerId) -> Option<SocketAddr> {
+        let data = self.data.read().expect("Lock failed");
         data.broker_addr_map.get(broker).cloned()
     }
 }

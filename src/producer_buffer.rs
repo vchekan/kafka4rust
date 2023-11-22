@@ -1,14 +1,21 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Debug, Formatter};
-use crate::cluster::Cluster;
+use std::future::Future;
+use std::sync::Arc;
+use crate::cluster::{Cluster, LeaderMap};
 use tokio::sync::mpsc;
 use crate::protocol::{ProduceResponse3};
-use crate::error::BrokerResult;
+use crate::error::{BrokerFailureSource, BrokerResult};
 use crate::types::{BrokerId, Partition, QueuedMessage};
 use tracing;
 use log::{debug, error, Level};
+use tracing::debug_span;
 use tracing_attributes::instrument;
-use crate::producer::Response;
+use tracing_futures::Instrument;
+use crate::connection::BrokerConnection;
+use crate::connections_pool::{ConnectionPool, Entry};
+use crate::meta_cache::MetaCache;
+//use crate::producer::Response;
 use crate::protocol;
 
 ///
@@ -30,16 +37,42 @@ use crate::protocol;
 ///                                | topic 2 --| partition 0; recordset
 ///
 /// 
+/// Concurrency design.
+/// Producer: `add(msg) -> Option<msg>`. Fast, will return message back if overflow.
+/// Timer: `flush()` Long. Involves:
+///     * Resolving `topic[]`. Can be eliminated by issuing request to resolve topic and tagging it.
+///     * Await for connection to be available for a partition.
+///     * Await for connection to execute command.
+/// Producer: `flush()`: Long.
+///     * Can be called when timer's flush is executed, has to wait.
 ///
+/// Locks analysis.
+/// Flushing requires connections to be ready but it can
+///
+/// 
 ///
 
 pub struct Buffer {
     topic_queues: HashMap<String, Vec<PartitionQueue>>,
+    meta_discover_tx: mpsc::Sender<String>,
+    meta: MetaCache,
     // Current buffer size, in bytes
     size: usize,
     size_limit: usize,
-    // cluster: Cluster,
 }
+
+// struct Request {
+//
+// }
+//
+// struct Response {
+//
+// }
+//
+// pub(crate) struct BufferActor {
+//     request_tx: mpsc::Sender<Request>,
+//     response_rx: mpsc::Receiver<Response>,
+// }
 
 #[derive(Debug, Default)]
 struct PartitionQueue {
@@ -59,18 +92,19 @@ impl Debug for Buffer {
 }
 
 impl Buffer {
-    pub fn new() -> Self {
+    pub fn new(meta_discover_tx: mpsc::Sender<String>, meta: MetaCache) -> Self {
         Buffer {
             topic_queues: HashMap::new(),
+            meta_discover_tx,
+            meta,
             size: 0,
             // TODO: make configurable
             size_limit: 100 * 1024 * 1024,
-            // cluster,
         }
     }
 
     /// If buffer overflows, then message will be returned back.
-    #[instrument]
+    #[instrument(level="debug")]
     pub(crate) fn add(
         &mut self,
         msg: QueuedMessage,
@@ -104,6 +138,72 @@ impl Buffer {
         None
     }
 
+    /// Collect messages into Produce Requests and pair them with connections from Connections Pool
+    #[instrument(level = "debug", skip(self, connections))]
+    pub(crate) async fn flush_request(&mut self, connections: &mut ConnectionPool) -> BrokerResult<Vec<(protocol::ProduceRequest3, Box<BrokerConnection>)>> {
+        let leaders = self.meta.get_known_broker_map();
+        let requests = self.group_queue_by_leader(&leaders);
+
+        // send only entries which have connection available
+        let mut missing_topics = HashSet::new();
+        let connected = requests.iter()
+            .filter_map(|(broker_id, request_topics)| {
+                let conn = connections.take(broker_id);
+                match conn {
+                    // Connection found, give it back
+                    Some(Entry::Available(conn)) => Some((broker_id, request_topics, conn)),
+                    // Connection is already used or not ready yet
+                    Some(Entry::Lent) | Some(Entry::Resolving) | Some(Entry::Connecting) => None,
+                    // No connection for this broker
+                    None => {
+                        match self.meta.get_addr_by_broker(broker_id) {
+                            // if broker address in in the meta, create connection
+                            Some(addr) => {
+                                
+                            }
+                            // No meta for this broker, request resolution for given topic and mark
+                            // connection as "resolving"
+                            None => {
+                                todo!()
+                            }
+                        }
+                        request_topics.iter().for_each(|(t, _)| { missing_topics.insert(t); });
+                        connections.set_resolving(*broker_id);
+                        None
+                    }
+                }
+            });
+
+        if !missing_topics.is_empty() {
+            let missing_topics: Vec<_> = missing_topics.iter().map(|t| t.to_string()).collect();
+            for missing_topic in missing_topics {
+                self.meta_discover_tx.send(missing_topic).await
+                    .map_err(|e| BrokerFailureSource::ConnectionChannelClosed)?;
+            }
+        }
+
+        Ok(vec![])
+    }
+
+    pub(crate) fn serialize(req: protocol::ProduceRequest3) -> Vec<u8> {
+        todo!()
+    }
+
+    pub(crate) async fn flush_exec(request: Vec<u8>, conn: Box<BrokerConnection>) -> BrokerResult<protocol::ProduceResponse3> {
+        todo!()
+    }
+
+    fn scan_partitions_to_send(&self) -> Vec<(&str, Vec<Partition>)> {
+        self.topic_queues.iter()
+            .map(|(topic, parts)| {
+                (topic.as_str(), (0..parts.len()).map(|l| l as Partition).collect())
+            }).collect()
+    }
+
+    fn get_available_connections(parts: Vec<(&str, Vec<Partition>)>, cluster: &Cluster) {
+        //cluster.
+    }
+
     // /// TODO: rust BC to become smarter. Parameter `cluster` is member of `self` but I have to pass it separately because borrow checker
     // /// complains about `self` being borrowed 2 times mutably.
     // #[instrument(level = "debug", err, skip(self, acks))]
@@ -131,7 +231,7 @@ impl Buffer {
     //         //     acks: 1,
     //         //     timeout: 1500,
     //         //     topic_data: todo!()//data,
-    //         // };
+    //         // };                                                                                                   F
     //
     //
     //         // TODO: upon failure to connect to broker, reset connection and refresh metadata
@@ -294,22 +394,17 @@ impl Buffer {
     /// Two queues because that's how dequeue works.
     /// Returns leader->topic->partition->messages plus info about how many messages are being sent per partition queue
     /// so the queue can be truncated upon successful send.
-    pub(crate) fn group_queue_by_leader<'a>(&'a self, leader_map: &'a[(BrokerId, Vec<(String, Vec<Partition>)>)]) ->
+    pub(crate) fn group_queue_by_leader<'a>(&'a self, leader_map: &'a LeaderMap/*&'a[(BrokerId, Vec<(String, Vec<Partition>)>)]*/) ->
         // TODO: think how to integrate response with in-flight queue length
         // (HashMap<BrokerId, (BytesMut, HashMap<String,(Partition,usize)>)>)
         HashMap<BrokerId, HashMap<&'a str, HashMap<Partition, (&'a [QueuedMessage], &'a [QueuedMessage])>>>
     {
         // TODO: implement FIFO and request size bound algorithm
 
-        // leader->topic->partition->recordset[]
-        // let mut broker_partitioned = HashMap::<
-        //     BrokerId,
-        //     HashMap<&str, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>>
-        // >::new();
-
         let mut requests = HashMap::new();
 
         for (leader, topics) in leader_map {
+
             let mut topics_data: HashMap<&str, HashMap<Partition, (&[QueuedMessage], &[QueuedMessage])>> = HashMap::new();
             let mut length = HashMap::new();
             for (topic, partitions) in topics {
