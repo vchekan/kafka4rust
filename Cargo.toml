@@ -6,8 +6,8 @@ edition = "2018"
 keywords = ["kafka"]
 description = "High performance, async Kafka client"
 
-[workspace]
-members = ["libkarst", "bindings/karst-jvm"]
+#[workspace]
+#members = ["libkarst", "bindings/karst-jvm"]
 
 [profile.release]
 lto = true
@@ -38,7 +38,8 @@ crc32c = "0.6"
 log =  "0.4"
 simple_logger = "4"
 opentelemetry = {version = "*", features = ["rt-tokio"]}
-opentelemetry-jaeger = { version = "*", features = ["rt-tokio"] }
+#opentelemetry-jaeger = { version = "*", features = ["rt-tokio"] }
+opentelemetry-otlp = "0.15"
 
 tracing = { version = "0.1", features = ["log-always"] }
 tracing-opentelemetry = "*"
@@ -63,6 +64,6 @@ crossterm = {version = "0.18", features = ['event-stream'] }
 criterion = "0.3"
 assert_cmd = "1.0"
 
-[[bench]]
-name = "tokio_channel_clone"
-harness = false
+#[[bench]]
+#name = "tokio_channel_clone"
+#harness = false
