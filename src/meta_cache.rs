@@ -1,20 +1,12 @@
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::future::Future;
-use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::pin::{Pin, pin};
-use std::process::Output;
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
-use futures_util::future::Pending;
-use futures_util::FutureExt;
-// use tokio::sync::{Mutex, RwLock};
 use std::sync::RwLock;
 use tokio::sync::broadcast::Receiver;
 use crate::protocol;
 use crate::types::{BrokerId, Partition, TopicMeta};
-use tracing::{debug, error, instrument};
+use tracing::{debug, instrument};
 use crate::cluster::LeaderMap;
 
 #[derive(Clone)]
@@ -60,8 +52,8 @@ impl MetaCache {
 
         for (topic, partitions) in &data.leader_cache {
             for (partition, leader_id) in partitions.iter().enumerate() {
-                if let Some(leaderId) = leader_id {
-                    res.entry(*leaderId).or_default()
+                if let Some(leader_id) = leader_id {
+                    res.entry(*leader_id).or_default()
                         .entry(topic.clone()).or_default()
                         .push(partition as u32);
                 }

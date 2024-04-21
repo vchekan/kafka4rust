@@ -7,7 +7,6 @@ use crate::protocol::Recordset;
 use crate::types::{BrokerId, Partition};
 use crate::utils;
 use anyhow::Result;
-use itertools::Itertools;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -15,7 +14,6 @@ use tracing::{debug_span, event, Level, debug, error};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use std::future::Future;
-use tokio::sync::RwLock;
 
 // TODO: offset start: -2, end: -1
 pub enum StartOffset {
@@ -247,14 +245,12 @@ async fn fetch_loop(
 
 #[cfg(test)]
 mod test {
-    use log::LevelFilter;
     use crate::init_tracer;
     use super::*;
 
     #[tokio::test]
     async fn test() -> anyhow::Result<()> {
-        let _tracer = init_tracer("test");
-        simple_logger::SimpleLogger::new().with_level(LevelFilter::Debug).init().unwrap();
+        init_tracer("test");
 
         let mut  consumer = Consumer::builder("test1").
             bootstrap("127.0.0.1").build().await?;

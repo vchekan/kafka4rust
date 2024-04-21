@@ -29,11 +29,9 @@ async fn main() -> Result<()> {
     //simple_logger::init_with_env()?;
 
 
-    let _tracer = if cli.tracing {
-        Some(init_tracer("karst")?)
-    } else {
-        None
-    };
+    if cli.tracing {
+        init_tracer("karst");
+    }
 
     info_span!("ui-main");
 

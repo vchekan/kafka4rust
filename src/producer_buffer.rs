@@ -1,21 +1,16 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Formatter};
 use std::future::Future;
-use std::sync::Arc;
+use futures_util::stream::FuturesUnordered;
 use crate::cluster::{Cluster, LeaderMap};
 use tokio::sync::mpsc;
-use crate::protocol::{ProduceResponse3};
 use crate::error::{BrokerFailureSource, BrokerResult};
 use crate::types::{BrokerId, Partition, QueuedMessage};
-use tracing;
-use log::{debug, error, Level};
-use tracing::debug_span;
+use log::{debug, error, info};
 use tracing_attributes::instrument;
-use tracing_futures::Instrument;
 use crate::connection::BrokerConnection;
 use crate::connections_pool::{ConnectionPool, Entry};
 use crate::meta_cache::MetaCache;
-//use crate::producer::Response;
 use crate::protocol;
 
 ///
@@ -55,24 +50,13 @@ use crate::protocol;
 pub struct Buffer {
     topic_queues: HashMap<String, Vec<PartitionQueue>>,
     meta_discover_tx: mpsc::Sender<String>,
+    connection_request_tx: mpsc::Sender<BrokerId>,
+    //connecting: FuturesUnordered<ConnectingFuture>,
     meta: MetaCache,
     // Current buffer size, in bytes
     size: usize,
     size_limit: usize,
 }
-
-// struct Request {
-//
-// }
-//
-// struct Response {
-//
-// }
-//
-// pub(crate) struct BufferActor {
-//     request_tx: mpsc::Sender<Request>,
-//     response_rx: mpsc::Receiver<Response>,
-// }
 
 #[derive(Debug, Default)]
 struct PartitionQueue {
@@ -91,11 +75,15 @@ impl Debug for Buffer {
     }
 }
 
+//type ConnectingFuture = impl Future<Output=BrokerResult<BrokerConnection>> + Send;
+
 impl Buffer {
-    pub fn new(meta_discover_tx: mpsc::Sender<String>, meta: MetaCache) -> Self {
+    pub fn new(meta_discover_tx: mpsc::Sender<String>, meta: MetaCache/* , connecting: &FuturesUnordered<ConnectingFuture>*/, connection_request_tx: mpsc::Sender<BrokerId>) -> Self {
         Buffer {
             topic_queues: HashMap::new(),
             meta_discover_tx,
+            connection_request_tx,
+            //connecting: Default::default(),
             meta,
             size: 0,
             // TODO: make configurable
@@ -110,8 +98,8 @@ impl Buffer {
         msg: QueuedMessage,
         topic: &str,
         partition: Partition,
-        partitions_count: u32
-    ) -> Option<QueuedMessage> {
+        partitions_count: u32)
+     -> Option<QueuedMessage> {
         if self.size + msg.size() > self.size_limit {
             tracing::event!(tracing::Level::DEBUG, "Buffer overflow");
             //debug!("Overflow");
@@ -143,44 +131,64 @@ impl Buffer {
     pub(crate) async fn flush_request(&mut self, connections: &mut ConnectionPool) -> BrokerResult<Vec<(protocol::ProduceRequest3, Box<BrokerConnection>)>> {
         let leaders = self.meta.get_known_broker_map();
         let requests = self.group_queue_by_leader(&leaders);
+        let mut missing_brokers = vec![];
 
         // send only entries which have connection available
-        let mut missing_topics = HashSet::new();
+        //let mut missing_topics = HashSet::new();
         let connected = requests.iter()
             .filter_map(|(broker_id, request_topics)| {
                 let conn = connections.take(broker_id);
                 match conn {
-                    // Connection found, give it back
+                    // Connection found, take it
                     Some(Entry::Available(conn)) => Some((broker_id, request_topics, conn)),
-                    // Connection is already used or not ready yet
+                    // Connection is still being used or not ready yet
                     Some(Entry::Lent) | Some(Entry::Resolving) | Some(Entry::Connecting) => None,
-                    // No connection for this broker
+                    // No connection for this broker. Ask for one to be created.
                     None => {
-                        match self.meta.get_addr_by_broker(broker_id) {
-                            // if broker address in in the meta, create connection
-                            Some(addr) => {
-                                
-                            }
-                            // No meta for this broker, request resolution for given topic and mark
-                            // connection as "resolving"
-                            None => {
-                                todo!()
-                            }
-                        }
-                        request_topics.iter().for_each(|(t, _)| { missing_topics.insert(t); });
+                        // match self.meta.get_addr_by_broker(broker_id) {
+                        //     // if broker address in in the meta, create connection
+                        //     Some(addr) => {
+                        //         //let producer_tx = self.producer_tx.clone();
+                        //         tokio::spawn(async move {
+                        //             let conn = BrokerConnection::connect(addr);
+                        //             self.connecting.push(conn);
+                        //             //self.
+                        //             // if let Err(e) = producer_tx.send(conn).await {
+                        //             //     error!("Failed to send connected broker event to producer");
+                        //             // }
+                        //         });
+                        //     }
+                        //     // No meta for this broker, request resolution for given topic and mark
+                        //     // connection as "resolving"
+                        //     None => {
+                        //         todo!()
+                        //     }
+                        // }
+                        // request_topics.iter().for_each(|(t, _)| { missing_topics.insert(t); });
                         connections.set_resolving(*broker_id);
+
+                        // Initiate topic resolution
+                        missing_brokers.push(*broker_id);
                         None
                     }
                 }
             });
 
-        if !missing_topics.is_empty() {
+        for broker_id in missing_brokers {
+            if let Err(_) =  self.connection_request_tx.send(broker_id).await {
+                info!("connection_request_tx is closed, exiting flash_request");
+                return Err(BrokerFailureSource::Internal(anyhow::anyhow!("connection_request_tx is closed, exiting flash_request")));
+            }
+            debug!("Requested connection to {broker_id}");
+        }
+
+        /*if !missing_topics.is_empty() {
             let missing_topics: Vec<_> = missing_topics.iter().map(|t| t.to_string()).collect();
             for missing_topic in missing_topics {
                 self.meta_discover_tx.send(missing_topic).await
                     .map_err(|e| BrokerFailureSource::ConnectionChannelClosed)?;
             }
-        }
+        }*/
 
         Ok(vec![])
     }

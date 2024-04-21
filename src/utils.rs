@@ -52,10 +52,17 @@ impl Drop for TraceGuard {
     }
 }
 pub fn init_tracer(name: &str) -> anyhow::Result<TraceGuard> {
-    global::set_text_map_propagator(opentelemetry_jaeger::Propagator::default());
+    let exporter = opentelemetry_otlp::new_exporter().tonic();
+    let tracer = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(exporter)
+        .install_simple()?;
+
+    /*global::set_text_map_propagator(opentelemetry_jaeger::Propagator::default());
     let tracer = opentelemetry_jaeger::new_agent_pipeline()
         .with_service_name(name)
         .install_simple()?;
+    */
     let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
     let subscriber = Registry::default().with(telemetry);
     tracing::subscriber::set_global_default(subscriber)?;

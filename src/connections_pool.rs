@@ -1,16 +1,17 @@
-use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
-use log::error;
 use crate::connection::BrokerConnection;
 use crate::meta_cache::MetaCache;
 use crate::types::BrokerId;
+use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
+use tracing::error;
 
 /// When new connection object is created, where should be network connection performed?
 /// 1. Add object as "connecting" to the pool and skip it until it is ready.
 /// 2. Add "unconnected" state to connection object, lend it and connect upon first request,
 ///     it will connect and execute request.
 pub(crate) struct ConnectionPool {
-    connections: HashMap<BrokerId, Entry>
+    connections: HashMap<BrokerId, Entry>,
+    // connecting: &'a FuturesUnordered<BrokerResult<BrokerConnection>>,
 }
 
 pub(crate) enum Entry {
@@ -26,9 +27,12 @@ impl Debug for ConnectionPool {
     }
 }
 
+
 impl ConnectionPool {
     pub(crate) fn new() -> ConnectionPool {
-        ConnectionPool { connections: HashMap::new() }
+        ConnectionPool {
+            connections: HashMap::new()
+        }
     }
 
     fn add(&mut self, conn: BrokerConnection, id: BrokerId) {
@@ -56,7 +60,7 @@ impl ConnectionPool {
     /// Set missing BrokerID as resolving
     pub(crate) fn set_resolving(&mut self, id: BrokerId) {
         if self.connections.contains_key(&id) {
-            error!("Seeting 'Resolving' to broker id which is already set: {}", id);
+            error!("Setting 'Resolving' to broker id which is already set: {}", id);
             return;
         }
         self.connections.insert(id, Entry::Resolving);
@@ -64,7 +68,7 @@ impl ConnectionPool {
 
     fn return_conn(&mut self, conn: Box<BrokerConnection>, id: BrokerId) {
         if let Some(_) = self.connections.insert(id, Entry::Available(conn)) {
-            error!("Returned connection for Id which already existing: {}", id);
+            error!("Returned connection for Id which already exists: {}", id);
         }
     }
 

@@ -1,35 +1,22 @@
-use crate::error::{KafkaError, BrokerResult, BrokerFailureSource};
+use crate::error::{BrokerResult, BrokerFailureSource};
 use crate::murmur2a;
 use crate::cluster::Cluster;
 use crate::protocol::ErrorCode;
 use crate::types::*;
-use crate::utils;
-use std::collections::HashMap;
-use std::{fmt, mem};
-use std::fmt::{Debug, Formatter};
-use std::future::Future;
-use std::ops::Add;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
-use std::time::{Duration, UNIX_EPOCH};
-use futures::pin_mut;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tracing;
-use tracing_attributes::instrument;
 use crate::producer_buffer::Buffer;
-use log::{debug, error};
-use tokio::pin;
-use tokio::sync::{mpsc, oneshot, RwLock};
-use tokio::time::Instant;
-use tracing::field::debug;
-use tracing::{debug_span, info, Instrument};
-use tracing_subscriber::fmt::time;
-use crate::meta_cache::{Data, MetaCache};
-use crate::utils::TracedMessage;
-use futures::future::{Fuse, FusedFuture, FutureExt};
-use futures_util::stream::FuturesUnordered;
 use crate::connections_pool::ConnectionPool;
+use crate::meta_cache::MetaCache;
+use std::{fmt, mem};
+use std::fmt::Debug;
+use std::ops::Add;
+use std::time::{Duration, UNIX_EPOCH};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tracing_attributes::instrument;
+use tokio::pin;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant;
+use tracing::{debug, debug_span, info, Instrument};
+use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 
 /// Producer's design is build around `Buffer`. `Producer::produce()` put message into buffer and
@@ -213,7 +200,8 @@ pub struct Producer {
     //
     request_tx: Sender<Request>,
     response_rx: Receiver<Response>,
-    close_event: oneshot::Sender<()>
+    close_event: oneshot::Sender<()>,
+    closed_event: oneshot::Receiver<()>,
 }
 
 enum State {
@@ -222,12 +210,16 @@ enum State {
     WaitingBuffer(Request),
 }
 
-struct Request {
+pub(crate) struct Request {
     msg: QueuedMessage,
     topic: String,
 }
 
-async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Response>, mut close_event_receiver: oneshot::Receiver<()>, builder: ProducerBuilder) {
+async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Response>, 
+    mut close_event_receiver: oneshot::Receiver<()>,
+    closed_event: oneshot::Sender<()>,
+    builder: ProducerBuilder) 
+ {
     let flush_frequency = Duration::from_secs(5);
     let mut state = State::None;
     let mut cluster = Cluster::new(builder.bootstrap.to_string(), builder.send_timeout);
@@ -235,18 +227,23 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
     let mut meta_updates = cluster.get_meta_cache().subscribe_to_updates();
     let mut null_key_partition_counter: u32 = 0;
     let hasher = builder.hasher.unwrap_or_else(|| Box::new(Murmur2Partitioner{}));
-    let mut buffer = Buffer::new(cluster.meta_discover_sender_clone(), cluster.get_meta_cache());
+
+    let (connection_request_tx, connection_request_rx) = mpsc::channel(2);
+    let mut buffer = Buffer::new(cluster.meta_discover_sender_clone(), cluster.get_meta_cache(), connection_request_tx);
+    
     let (cluster_tx, cluster_rx) = Cluster::new(builder.bootstrap, None).spawn_cluster();
     let flush_timer = tokio::time::sleep(flush_frequency);
     pin!(flush_timer);
+    // let mut connecting = FuturesUnordered::new();
     let mut conns = ConnectionPool::new();
     let mut flushes = FuturesUnordered::new();
+
     loop {
         tokio::select! {
             //
             // Read messages to be published
             //
-            request = request_rx.recv(), if state.msg_allowed()  => {
+            request = request_rx.recv(), if state.msg_allowed() => {
                 let request = match request {
                     Some(msg) => msg,
                     None => {
@@ -333,8 +330,9 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
             // Producer close event
             //
             _ = &mut close_event_receiver => {
-                info!("Close event received");
-                // buffer.flush();
+                info!("Close event received, flushing buffer");
+                //buffer.flush();
+                let _ = closed_event.send(());
                 break;
             }
 
@@ -364,6 +362,13 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
             x = &mut flushes.next(), if !flushes.is_empty() => {
                 debug!("Flush complete: {:?}", x);
             }
+
+            //
+            // Connected to broker
+            //
+            /*conn = &mut connecting.next(), if !connecting.is_empty() => {
+                debug!("Broker connected");
+            }*/
         }
     }
     debug!("Exiting producer loop");
@@ -395,12 +400,14 @@ impl Producer {
     fn new(builder: ProducerBuilder) -> Self {
         let (response_tx, response_rx) = channel(2);
         let (request_tx, request_rx) = channel(2);
-        let (close_event, close_event_receiver) = oneshot::channel();
-        tokio::spawn(eval_loop(request_rx, response_tx, close_event_receiver, builder));
+        let (close_event, close_event_rx) = oneshot::channel();
+        let (closed_event_tx, closed_event_rx) = oneshot::channel();
+        tokio::spawn(eval_loop(request_rx, response_tx, close_event_rx, closed_event_tx, builder));
         Producer {
             request_tx,
             response_rx,
-            close_event
+            close_event,
+            closed_event: closed_event_rx,
         }
     }
 
@@ -442,8 +449,12 @@ impl Producer {
         // Ok(())
     }
 
-    pub async fn close(self) {
-        
+    pub async fn close(self) -> anyhow::Result<()> {
+        debug!("closing");
+        let _ = self.close_event.send(());
+
+        debug!("closed");
+        todo!()
     }
 }
 
@@ -730,19 +741,15 @@ impl ToMessage for &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use futures::future::Fuse;
     use super::*;
-    use log::LevelFilter;
     use crate::init_tracer;
-    use tracing;
-    use tracing::{Instrument, span, Level};
+    use tracing::{span, Level};
 
     #[tokio::test]
     async fn test() -> anyhow::Result<()> {
         // let count = 10_000;
         let count = 10;
-        simple_logger::SimpleLogger::new().with_level(LevelFilter::Debug).init().unwrap();
-        let _trace = init_tracer("producer-test")?;
+        init_tracer("producer-test");
 
         let mut producer = Producer::builder("localhost".to_string()).build();
         let producer = tokio::spawn(async move {
@@ -752,7 +759,7 @@ mod tests {
             BrokerResult::Ok(producer)
         }).instrument(span!(Level::INFO, "send loop task")).await??;
 
-        // producer.close().await?;
+        producer.close().await?;
 
         Ok(())
     }

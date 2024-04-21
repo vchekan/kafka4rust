@@ -20,7 +20,7 @@
 //! Write channel: how to implement sender's pushback?
 
 use std::time::Duration;
-use bytes::{BytesMut, BufMut, Bytes, Buf};
+use bytes::{BytesMut, Buf};
 use std::net::SocketAddr;
 
 use crate::error::{BrokerFailureSource, BrokerResult};
@@ -31,9 +31,7 @@ use tracing_futures::Instrument;
 use std::fmt::{Debug, Formatter};
 use crate::protocol;
 use crate::protocol::{write_request, read_response};
-use tokio::sync::{mpsc, oneshot};
-use log::{debug, trace, info};
-use crate::utils::TracedMessage;
+use tracing::{debug, trace};
 
 pub(crate) const CLIENT_ID: &str = "k4rs";
 
@@ -208,16 +206,15 @@ impl Debug for BrokerConnection {
 
 #[cfg(test)]
 mod tests {
+    use crate::utils;
+
     use super::*;
-    use crate::protocol::{
-        read_response, write_request, ApiVersionsRequest0, ApiVersionsResponse0,
-    };
     use std::env;
     use std::net::ToSocketAddrs;
 
     #[tokio::test]
     async fn it_works() -> anyhow::Result<()> {
-        simple_logger::SimpleLogger::new().env().with_level(log::LevelFilter::Debug).init().unwrap();
+        utils::init_tracer("connections");
 
         let bootstrap = env::var("kafka-bootstrap").unwrap_or("127.0.0.1:9092".to_string());
         let addr = bootstrap

@@ -3,26 +3,22 @@
 //! * Cluster topology caching
 //! * Request routing
 
-use std::borrow::BorrowMut;
-use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use tokio::time::Duration;
 use tracing_attributes::instrument;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use std::fmt::{Debug, Formatter};
-use std::future::Future;
 use std::ops::IndexMut;
 use std::sync::{Arc, RwLock};
-use std::sync::mpsc::{Receiver, Sender, SendError};
 use anyhow::anyhow;
-use futures_util::AsyncWriteExt;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use tracing::{debug, warn, error, debug_span, Instrument, Level, span};
+use tracing::{debug, warn};
 use crate::error::{BrokerResult, BrokerFailureSource};
 use crate::protocol;
 use crate::types::*;
-use crate::utils::{resolve_addr, TracedMessage};
+use crate::utils::resolve_addr;
 use crate::connection::BrokerConnection;
 use crate::protocol::{MetadataResponse0, MetadataRequest0, ListOffsetsRequest0};
 use crate::meta_cache::{Data, MetaCache};
@@ -316,10 +312,6 @@ impl Cluster {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_std::task;
-    use std::env;
-    use log::LevelFilter;
-    use tracing::Instrument;
     use crate::utils::init_tracer;
 
     // #[tokio::test]
@@ -346,7 +338,6 @@ mod tests {
     #[instrument]
     async fn fetch_offsets() -> anyhow::Result<()> {
         let _tracer = init_tracer("test");
-        simple_logger::SimpleLogger::new().with_level(LevelFilter::Debug).init().unwrap();
         let bootstrap = "127.0.0.1:9092".to_string();
 
         // TODO: when brokers are down, `some_offsets: Ok([])` is returned. Return actual error.

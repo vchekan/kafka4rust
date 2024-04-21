@@ -1,29 +1,24 @@
+use core::fmt;
 use std::collections::HashSet;
-use std::future::Future;
+use std::fmt::Debug;
 use std::net::SocketAddr;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use futures::TryStream;
 use crate::connection::BrokerConnection;
-use crate::utils::resolve_addr;
 use crate::protocol;
-use crate::types::BrokerId;
 use async_stream::try_stream;
-use tower::discover::Change;
 use crate::error::{BrokerFailureSource, BrokerResult};
 use tokio::select;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{debug, debug_span, info, instrument, Instrument};
 use futures::future::Fuse;
 use futures_lite::pin;
 use futures_util::FutureExt;
 use std::time::Duration;
-use log::debug;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::Instant;
-use tower::ServiceExt;
 use futures_lite::StreamExt;
 
+#[derive(Debug)]
 pub(crate) struct MetaDiscover {
     state: State,
     bootstrap: Vec<SocketAddr>,
@@ -80,11 +75,12 @@ impl MetaDiscover {
             }
 
             tracing::debug!("MetaDiscover loop exited");
-        });
+        }.instrument(debug_span!("meta discover loop")));
 
         (command_tx, response_rx)
     }
 
+    #[instrument()]
     fn stream(mut self) -> impl TryStream<Ok = protocol::MetadataResponse0, Error = BrokerFailureSource, Item=Result<protocol::MetadataResponse0,BrokerFailureSource>> {
         let stream = try_stream! {
             let mut topics = HashSet::new();
@@ -114,7 +110,7 @@ impl MetaDiscover {
                                 }
                             },
                             None => {
-                                tracing::debug!("Topics input stram closed, exiting discovery loop");
+                                tracing::debug!("Topics input stream closed, exiting discovery loop");
                                 break 'outer
                             }
                         }
@@ -129,11 +125,11 @@ impl MetaDiscover {
                                     connected_broker.insert(conn);
                                 } else {
                                     let topics = topics.iter().cloned().collect();
+                                    debug!("Activated fetching_meta");
                                     fetching_meta.set(Self::fetching_meta(topics, conn).fuse());
                                 }
                                 self.state = State::Connected;
                                 self.broker_idx += 1;
-                                continue;
                             }
                             Err(e) => {
                                 tracing::debug!("Failed to connect, will try again: {e}");
@@ -168,7 +164,6 @@ impl MetaDiscover {
                             }
                             Err(e) => info!("Error fetching topics metadata: {e}")
                         }
-
                     }
 
                     _ = &mut timeout, if self.state == State::RetrySleep => {
@@ -189,35 +184,32 @@ impl MetaDiscover {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-    use futures::pin_mut;
     use super::*;
     use tokio::time::timeout;
-    use futures_lite::stream::StreamExt;
+    use tracing::{debug_span, info_span, Instrument};
     use crate::init_tracer;
+    use crate::utils::resolve_addr;
 
     #[tokio::test]
     async fn test() -> anyhow::Result<()> {
-        let _tracer = init_tracer("test");
-        simple_logger::SimpleLogger::new().env().with_level(log::LevelFilter::Debug).init().unwrap();
+        init_tracer("test");
+        let span = info_span!("test");
+        let _guard = span.enter();
 
-        timeout(Duration::from_secs(15), async move {
+        timeout(Duration::from_secs(20), async move {
 
-            let (tx, rx) = mpsc::channel(1);
-            let tx2 = tx.clone();   // to keep it open until end of test
             let bootstrap = resolve_addr("localhost");
             let (discover_tx, mut discover_rx) = MetaDiscover::new(bootstrap);
-            //let stream = discover.stream();
-            //pin_mut!(stream);
-
-            let topics = vec!["topic1", "topic2", "topic2"];
+            let topics = vec!["topic1", "topic2", "topic3"];
             let topic_count = topics.len();
             tokio::task::spawn(async move {
                 for topic in topics {
                     tokio::time::sleep(Duration::from_millis(300)).await;
-                    tx.send(topic.to_string()).await.unwrap();
+                    debug!("Sending topic for resolution: {topic}");
+                    discover_tx.send(topic.to_string()).await.unwrap();
+                    debug!("Sent");
                 }
-            });
+            }.instrument(debug_span!("send loop")));
 
             let mut broker_resolved = 0;
             loop {

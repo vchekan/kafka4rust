@@ -1,6 +1,5 @@
 use anyhow::Result;
 use crossterm::{
-    self,
     event::{Event, EventStream, KeyCode, KeyEvent},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -16,7 +15,6 @@ use tui::layout::Rect;
 use tui::text::{Span, Spans};
 use tui::widgets::{Cell, ListItem, ListState};
 use tui::{
-    self,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
