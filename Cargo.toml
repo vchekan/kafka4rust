@@ -14,7 +14,6 @@ lto = true
 panic = 'abort'
 
 [dependencies]
-itertools = "0.10"
 anyhow = "1.0"
 thiserror = "1.0"
 indexmap = "1"

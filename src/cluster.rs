@@ -13,7 +13,6 @@ use std::ops::IndexMut;
 use std::sync::{Arc, RwLock};
 use anyhow::anyhow;
 use indexmap::IndexMap;
-use itertools::Itertools;
 use tracing::{debug, warn, debug_span, Instrument};
 use crate::error::{BrokerResult, BrokerFailureSource};
 use crate::protocol;
@@ -148,10 +147,10 @@ impl Cluster {
                                             timestamp: -1,
                                             max_num_offsets: 2
                                         }
-                                        }).collect_vec()
+                                        }).collect()
                                 }
                             })
-                        ).collect_vec()
+                        ).collect()
                 };
                 // TODO: execute requests in parallel
                 let (_, conn) = self.connections.get_index_mut(conn_idx).expect("Could not find connection at index");

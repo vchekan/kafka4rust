@@ -1159,7 +1159,6 @@ dependencies = [
  "futures-lite 1.13.0",
  "futures-util",
  "indexmap 1.9.3",
- "itertools 0.10.5",
  "lazy_static",
  "opentelemetry 0.20.0",
  "opentelemetry-otlp",
