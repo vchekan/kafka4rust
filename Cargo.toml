@@ -16,15 +16,13 @@ panic = 'abort'
 [dependencies]
 anyhow = "1.0"
 thiserror = "1.0"
-indexmap = "1"
+indexmap = "2"
 
 futures = "0.3"
 tokio = { version = "1.23", features = ["full"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
-futures-lite = "1"
 futures-util = "0.3"
-pin-project-lite = "0.2"
 
 bytes = "1.0"
 crc32c = "0.6"
@@ -39,8 +37,6 @@ tracing-futures = "0.2"
 tracing-attributes = "0.1"
 thrift = "0"
 
-lazy_static = "1.4"
-
 # for testing
 rand = "0.8.4"
 
@@ -49,11 +45,11 @@ clap = { version = "4.0", features = ["derive"] }
 regex = "1.4"
 tui = {git = "https://github.com/vchekan/tui-rs", branch="table-render-fix", default-features = false, features = ['crossterm']}
 #{ version = "0.13", default-features = false, features = ['crossterm'] }
-crossterm = {version = "0.18", features = ['event-stream'] }
+crossterm = {version = "0", features = ['event-stream'] }
 
 [dev-dependencies]
-criterion = "0.3"
-assert_cmd = "1.0"
+criterion = "0"
+assert_cmd = "2"
 
 #[[bench]]
 #name = "tokio_channel_clone"

@@ -1,21 +1,19 @@
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::net::SocketAddr;
-use futures::TryStream;
+use futures::{StreamExt, TryStream};
 use crate::connection::BrokerConnection;
 use crate::protocol;
 use async_stream::try_stream;
 use crate::error::{BrokerFailureSource, BrokerResult};
-use tokio::select;
+use tokio::{pin, select};
 use tokio::sync::mpsc;
 use tracing::{debug, debug_span, info, instrument, Instrument};
 use futures::future::Fuse;
-use futures_lite::pin;
 use futures_util::FutureExt;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::Instant;
-use futures_lite::StreamExt;
 
 #[derive(Debug)]
 pub(crate) struct MetaDiscover {
