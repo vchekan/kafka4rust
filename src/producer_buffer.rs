@@ -1,12 +1,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Formatter};
-use std::future::Future;
-use futures_util::stream::FuturesUnordered;
-use crate::cluster::{Cluster, LeaderMap};
+use crate::cluster::LeaderMap;
+use bytes::BytesMut;
 use tokio::sync::mpsc;
-use crate::error::{BrokerFailureSource, BrokerResult};
 use crate::types::{BrokerId, Partition, QueuedMessage};
-use log::{debug, error, info};
+use tracing::{debug, error, trace};
 use tracing_attributes::instrument;
 use crate::connection::BrokerConnection;
 use crate::connections_pool::{ConnectionPool, Entry};
@@ -30,22 +28,6 @@ use crate::protocol;
 ///                  | broker_id 2 | topic 1 --| partition 3; recordset
 ///                                |
 ///                                | topic 2 --| partition 0; recordset
-///
-/// 
-/// Concurrency design.
-/// Producer: `add(msg) -> Option<msg>`. Fast, will return message back if overflow.
-/// Timer: `flush()` Long. Involves:
-///     * Resolving `topic[]`. Can be eliminated by issuing request to resolve topic and tagging it.
-///     * Await for connection to be available for a partition.
-///     * Await for connection to execute command.
-/// Producer: `flush()`: Long.
-///     * Can be called when timer's flush is executed, has to wait.
-///
-/// Locks analysis.
-/// Flushing requires connections to be ready but it can
-///
-/// 
-///
 
 pub struct Buffer {
     topic_queues: HashMap<String, Vec<PartitionQueue>>,
@@ -75,15 +57,12 @@ impl Debug for Buffer {
     }
 }
 
-//type ConnectingFuture = impl Future<Output=BrokerResult<BrokerConnection>> + Send;
-
 impl Buffer {
-    pub fn new(meta_discover_tx: mpsc::Sender<String>, meta: MetaCache/* , connecting: &FuturesUnordered<ConnectingFuture>*/, connection_request_tx: mpsc::Sender<BrokerId>) -> Self {
+    pub fn new(meta_discover_tx: mpsc::Sender<String>, meta: MetaCache, connection_request_tx: mpsc::Sender<BrokerId>) -> Self {
         Buffer {
             topic_queues: HashMap::new(),
             meta_discover_tx,
             connection_request_tx,
-            //connecting: Default::default(),
             meta,
             size: 0,
             // TODO: make configurable
@@ -122,83 +101,56 @@ impl Buffer {
         // });
         self.size += msg.size();
         partitions[partition as usize].queue.push_back(msg);
+        debug!("Added message to partition {partition}");
 
         None
     }
 
     /// Collect messages into Produce Requests and pair them with connections from Connections Pool
     #[instrument(level = "debug", skip(self, connections))]
-    pub(crate) async fn flush_request(&mut self, connections: &mut ConnectionPool) -> BrokerResult<Vec<(protocol::ProduceRequest3, Box<BrokerConnection>)>> {
+    pub(crate) fn flush_request<'a, 'b>(&'a mut self, connections: &'b mut ConnectionPool) -> Vec<(BytesMut, Box<BrokerConnection>)> {
+        debug!("flush_request");
         let leaders = self.meta.get_known_broker_map();
         let requests = self.group_queue_by_leader(&leaders);
-        let mut missing_brokers = vec![];
+
+        trace!("Size: {}", self.size);
+        trace!("Requests: {:?}", requests);
+        trace!("MetaCache: {:?}", self.meta);
 
         // send only entries which have connection available
-        //let mut missing_topics = HashSet::new();
-        let connected = requests.iter()
+        let connected: Vec<_> = requests.into_iter()
             .filter_map(|(broker_id, request_topics)| {
-                let conn = connections.take(broker_id);
+                trace!("Looking for connection for broker_id: {broker_id}");
+                let conn = connections.get(&broker_id);
                 match conn {
                     // Connection found, take it
-                    Some(Entry::Available(conn)) => Some((broker_id, request_topics, conn)),
-                    // Connection is still being used or not ready yet
-                    Some(Entry::Lent) | Some(Entry::Resolving) | Some(Entry::Connecting) => None,
-                    // No connection for this broker. Ask for one to be created.
-                    None => {
-                        // match self.meta.get_addr_by_broker(broker_id) {
-                        //     // if broker address in in the meta, create connection
-                        //     Some(addr) => {
-                        //         //let producer_tx = self.producer_tx.clone();
-                        //         tokio::spawn(async move {
-                        //             let conn = BrokerConnection::connect(addr);
-                        //             self.connecting.push(conn);
-                        //             //self.
-                        //             // if let Err(e) = producer_tx.send(conn).await {
-                        //             //     error!("Failed to send connected broker event to producer");
-                        //             // }
-                        //         });
-                        //     }
-                        //     // No meta for this broker, request resolution for given topic and mark
-                        //     // connection as "resolving"
-                        //     None => {
-                        //         todo!()
-                        //     }
-                        // }
-                        // request_topics.iter().for_each(|(t, _)| { missing_topics.insert(t); });
-                        connections.set_resolving(*broker_id);
-
-                        // Initiate topic resolution
-                        missing_brokers.push(*broker_id);
+                    Entry::Available(conn) => {
+                        trace!("Got active connection from pool");
+                        Some((broker_id, request_topics, conn))
+                    }
+                    Entry::Lent => {
+                        trace!("Connection is busy in the pool");
+                        None
+                    }
+                    Entry::Connecting => {
+                        trace!("Connection is connecting in the pool");
                         None
                     }
                 }
-            });
+            }).map(|(broker_id, topics, mut conn)| {
+                let request = protocol::ProduceRequest3 {
+                    transactional_id: None,
+                    acks: 1,    // TODO: config
+                    timeout: 1500,  // TODO: config
+                    topic_data: &topics,
+                };
+                let buffer = conn.write_request(&request);
+                // let mut buffer = BytesMut::with_capacity(1024*1024);
+                // request.serialize(&mut buffer);
+                (buffer, conn)
+            }).collect();
 
-        for broker_id in missing_brokers {
-            if let Err(_) =  self.connection_request_tx.send(broker_id).await {
-                info!("connection_request_tx is closed, exiting flash_request");
-                return Err(BrokerFailureSource::Internal(anyhow::anyhow!("connection_request_tx is closed, exiting flash_request")));
-            }
-            debug!("Requested connection to {broker_id}");
-        }
-
-        /*if !missing_topics.is_empty() {
-            let missing_topics: Vec<_> = missing_topics.iter().map(|t| t.to_string()).collect();
-            for missing_topic in missing_topics {
-                self.meta_discover_tx.send(missing_topic).await
-                    .map_err(|e| BrokerFailureSource::ConnectionChannelClosed)?;
-            }
-        }*/
-
-        Ok(vec![])
-    }
-
-    pub(crate) fn serialize(req: protocol::ProduceRequest3) -> Vec<u8> {
-        todo!()
-    }
-
-    pub(crate) async fn flush_exec(request: Vec<u8>, conn: Box<BrokerConnection>) -> BrokerResult<protocol::ProduceResponse3> {
-        todo!()
+        connected
     }
 
     fn scan_partitions_to_send(&self) -> Vec<(&str, Vec<Partition>)> {
@@ -206,10 +158,6 @@ impl Buffer {
             .map(|(topic, parts)| {
                 (topic.as_str(), (0..parts.len()).map(|l| l as Partition).collect())
             }).collect()
-    }
-
-    fn get_available_connections(parts: Vec<(&str, Vec<Partition>)>, cluster: &Cluster) {
-        //cluster.
     }
 
     // /// TODO: rust BC to become smarter. Parameter `cluster` is member of `self` but I have to pass it separately because borrow checker
@@ -471,9 +419,6 @@ impl Buffer {
 }
 
 mod test {
-    use std::future::Future;
-    use futures::future::Fuse;
-    use super::*;
 
     #[tokio::test]
     async fn test() -> anyhow::Result<()> {

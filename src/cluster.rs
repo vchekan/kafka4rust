@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::anyhow;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use tracing::{debug, warn};
+use tracing::{debug, warn, debug_span, Instrument};
 use crate::error::{BrokerResult, BrokerFailureSource};
 use crate::protocol;
 use crate::types::*;
@@ -35,17 +35,6 @@ pub struct Cluster {
     meta_discover_tx: mpsc::Sender<String>,     // TODO: send `Vec<String> to ensure batching resolution?
 }
 
-pub struct ClusterActor {
-    cluster: Cluster,
-}
-
-pub enum Cmd {
-
-}
-
-pub enum Response {
-
-}
 
 impl Debug for Cluster {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -60,8 +49,11 @@ impl Debug for Cluster {
 
 impl Cluster {
     /// Connect to at least one broker successfully
+    #[instrument(name = "Cluster::new", skip(bootstrap, operation_timeout))]
     pub fn new(bootstrap: String, operation_timeout: Option<Duration>) -> Self {
+        debug!("new Cluster");
         let bootstrap = resolve_addr(&bootstrap);
+
 
         let(meta_discover_tx, meta_discover_rx) = MetaDiscover::new(bootstrap.clone());
         let meta_cache = MetaCache::new();
@@ -74,21 +66,6 @@ impl Cluster {
             meta_cache,
             meta_discover_tx
         }
-    }
-
-    pub fn spawn_cluster(self) -> (mpsc::Sender<Cmd>, mpsc::Receiver<Response>) {
-        let (cmd_tx, mut cmd_rx) = mpsc::channel(2);
-        let (response_tx, response_rx) = mpsc::channel(2);
-        tokio::spawn(async move {
-            while let Some(msg) = cmd_rx.recv().await {
-                todo!()
-                // match msg {
-                //
-                // }
-            }
-        });
-
-        (cmd_tx, response_rx)
     }
 
     pub fn get_meta_cache(&self) -> MetaCache {
@@ -106,7 +83,6 @@ impl Cluster {
     fn spawn_discover(data: Arc<RwLock<Data>>, mut meta_discover_rx: mpsc::Receiver<BrokerResult<protocol::MetadataResponse0>>) {
         tokio::task::spawn(async move {
             loop {
-                debug!("spawn_discover: awaiting for meta update");
                 match meta_discover_rx.recv().await {
                     Some(meta) => {
                         debug!("Got meta update");
@@ -122,7 +98,7 @@ impl Cluster {
                     None => break
                 }
             }
-        });
+        }.instrument(debug_span!("Cluster-meta-handler")));
     }
 
     /// Return leader map of known brokers. Unknown brokers will be requested in background.
@@ -195,7 +171,7 @@ impl Cluster {
             None => {
                 match self.meta_cache.get_addr_by_broker(&broker_id) {
                     Some(addr) => {
-                        match BrokerConnection::connect(addr).await {
+                        match BrokerConnection::connect(addr, broker_id).await {
                             Ok(broker) => {
                                 self.connections.insert(broker_id, broker);
                                 self.connections.get_index_of(&broker_id).unwrap()
@@ -218,7 +194,7 @@ impl Cluster {
 
         // TODO: if broker does not exist, return error?
         if let Some(addr) = self.meta_cache.get_addr_by_broker(broker_id) {
-            let conn = BrokerConnection::connect(addr).await?;
+            let conn = BrokerConnection::connect(addr, *broker_id).await?;
             self.connections.insert(*broker_id, conn);
         }
 
@@ -255,7 +231,7 @@ impl Cluster {
         // }
 
         for addr in &self.bootstrap {
-            match BrokerConnection::connect(*addr).await?.exchange(&request).await {
+            match BrokerConnection::connect(*addr, 0).await?.exchange(&request).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => debug!("Error: {:?}", e)
             }

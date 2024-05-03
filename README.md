@@ -74,6 +74,8 @@
   * Is unstable
 * Try Async Local Executors
   * https://maciej.codes/2022-06-09-local-async.html
+* `futures-concurrency`
+* Glommio and Monoio are not Send and use a "thread-per-core" design 
 
 ## Projects
 * CLI tools

@@ -70,9 +70,9 @@ impl MetaCache {
         for topic in topics {
             match data.leader_cache.get(topic) {
                 Some(brokers) => {
-                    for (partition, leaderId) in brokers.into_iter().enumerate() {
-                        if let Some(leaderId) = leaderId {
-                            res.entry(*leaderId).or_default().push(topic.to_owned());
+                    for (partition, leader_id) in brokers.into_iter().enumerate() {
+                        if let Some(leader_id) = leader_id {
+                            res.entry(*leader_id).or_default().push(topic.to_owned());
                         }
                     }
                 },
@@ -140,7 +140,10 @@ impl MetaCache {
 
 impl Debug for MetaCache {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MetaCache")
+        let data = self.data.read();
+        f.debug_struct("MetaCache")
+        .field("data", &data)
+        .finish()
     }
 }
 

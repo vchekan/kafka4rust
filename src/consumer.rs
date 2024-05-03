@@ -95,7 +95,7 @@ impl Consumer {
             )).into());
         }
 
-        let mut cluster = Cluster::new(bootstrap, Some(builder.timeout));
+        let cluster = Cluster::new(bootstrap, Some(builder.timeout));
         // let topic_meta = cluster.fetch_topic_meta_and_update(&[&builder.topic]).await?;
         // debug!("Resolved topic: {:?}", topic_meta);
         // assert_eq!(1, topic_meta.topics.len());
@@ -131,7 +131,7 @@ async fn fetch_loop(
     let mut offsets = vec![0_u64; topic_partition_count];
 
     loop {
-        let mut topic_meta = cluster.get_known_broker_map();
+        let topic_meta = cluster.get_known_broker_map();
 
         let fetch_requests: Vec<_> = topic_meta.into_iter().map(|(leader, leader_group)| {
             let request = protocol::FetchRequest5 {

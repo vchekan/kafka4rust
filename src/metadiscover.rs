@@ -1,4 +1,3 @@
-use core::fmt;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::net::SocketAddr;
@@ -41,6 +40,7 @@ struct RequestFuture<F> {
 }
 
 impl MetaDiscover {
+    #[instrument(level = "debug", name = "MetaDiscover::new", skip(bootstrap))]
     pub fn new(bootstrap: Vec<SocketAddr>) -> (Sender<String>, Receiver<Result<protocol::MetadataResponse0,BrokerFailureSource>>) {
         let (command_tx, command_rx) = mpsc::channel(1);
         let (response_tx, response_rx) = mpsc::channel(1);
@@ -80,6 +80,10 @@ impl MetaDiscover {
         (command_tx, response_rx)
     }
 
+    async fn eval_loop() {
+        
+    }
+
     #[instrument()]
     fn stream(mut self) -> impl TryStream<Ok = protocol::MetadataResponse0, Error = BrokerFailureSource, Item=Result<protocol::MetadataResponse0,BrokerFailureSource>> {
         let stream = try_stream! {
@@ -100,8 +104,12 @@ impl MetaDiscover {
                     topic = self.topic_requests.recv() => {
                         match topic {
                             Some(topic) => {
-                                tracing::debug!("Added topic to be resolved: {topic}");
-                                topics.insert(topic);
+                                tracing::debug!("Topic to be resolved: {topic}");
+                                if topics.insert(topic) {
+                                    tracing::debug!("Added topic to be resolved");
+                                } else {
+                                    tracing::debug!("Topic is alresy being resolved");
+                                }
                                 if let State::Connected = self.state {
                                     tracing::debug!("Starting fetching");
                                     let topics = topics.iter().cloned().collect();
@@ -117,7 +125,7 @@ impl MetaDiscover {
                     }
 
                     // Always try to connect when disconnected
-                    conn = BrokerConnection::connect(self.bootstrap[self.broker_idx]), if self.state == State::Disconnected => {
+                    conn = BrokerConnection::connect(self.bootstrap[self.broker_idx], 0), if self.state == State::Disconnected => {
                         match conn {
                             Ok(conn) => {
                                 tracing::debug!("Connected");

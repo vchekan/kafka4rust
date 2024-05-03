@@ -1,9 +1,7 @@
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use log::{debug, error};
+use tracing::{debug, error};
 use opentelemetry::global;
 use tracing_attributes::instrument;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::Registry;
 
 /// Resolve addresses and produce only those which were successfully resolved.
 /// Unresolved entries will be logged with `error` level.
@@ -51,23 +49,26 @@ impl Drop for TraceGuard {
         global::shutdown_tracer_provider();
     }
 }
-pub fn init_tracer(name: &str) -> anyhow::Result<TraceGuard> {
-    let exporter = opentelemetry_otlp::new_exporter().tonic();
+pub fn init_tracer(name: &str) {
+    tracing_subscriber::fmt::init();
+
+    /*let exporter = opentelemetry_stdout::SpanExporter::default(); //opentelemetry_otlp::new_exporter().tonic();
     let tracer = opentelemetry_otlp::new_pipeline()
         .tracing()
         .with_exporter(exporter)
         .install_simple()?;
+    */
 
     /*global::set_text_map_propagator(opentelemetry_jaeger::Propagator::default());
     let tracer = opentelemetry_jaeger::new_agent_pipeline()
         .with_service_name(name)
         .install_simple()?;
     */
-    let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-    let subscriber = Registry::default().with(telemetry);
-    tracing::subscriber::set_global_default(subscriber)?;
+    //let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+    //let subscriber = Registry::default().with(telemetry);
+    //tracing::subscriber::set_global_default(subscriber)?;
 
-    Ok(TraceGuard{})
+    //Ok(TraceGuard{})
 
     // let exporter = opentelemetry_jaeger::Exporter::builder()
     //     .with_agent_endpoint("localhost:6831".parse().unwrap())

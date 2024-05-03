@@ -1,7 +1,7 @@
 use std::time::Duration;
 use std::result::Result;
 use std::future::Future;
-use log::debug;
+use tracing::debug;
 use tokio::time::timeout as tokio_timeout;
 use crate::error::{BrokerFailureSource, BrokerResult};
 
