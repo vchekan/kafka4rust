@@ -19,13 +19,10 @@ thiserror = "1.0"
 indexmap = "1"
 
 futures = "0.3"
-# TODO: remove and leave tokio only
-async-std = { version = "1.7.0", features = ["unstable"] }
 tokio = { version = "1.23", features = ["full"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
 futures-lite = "1"
-tower = { version = "0.4", features = ["timeout","retry","discover","util"] }
 futures-util = "0.3"
 pin-project-lite = "0.2"
 

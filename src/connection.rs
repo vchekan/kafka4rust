@@ -21,18 +21,18 @@
 
 use std::time::Duration;
 use bytes::{BytesMut, Buf};
+use tokio::net::TcpStream;
 use std::net::SocketAddr;
 
 use crate::error::{BrokerFailureSource, BrokerResult};
 use crate::types::BrokerId;
-use async_std::net::TcpStream;
-use async_std::prelude::*;
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use std::fmt::{Debug, Formatter};
 use crate::protocol;
 use crate::protocol::{write_request, read_response};
 use tracing::{debug, trace};
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
 
 pub(crate) const CLIENT_ID: &str = "k4rs";
 
