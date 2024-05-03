@@ -41,7 +41,7 @@
 ## TODO
 - [ ] tokio-console
 - [ ] Validate that BytesMut has always enough reserve bytes. Or switch to Vec?
-- [ ] Remove ByteOrder because `bytes` already have it  
+- [X] Remove ByteOrder because `bytes` already have it  
 - [ ] Make sure that command send anr response are corresponding even in parallel scenario.
 - [ ] Producer sent message size limit
 - [ ] Evaluate `select!` usage for cancellation safety: https://tomaka.medium.com/a-look-back-at-asynchronous-rust-d54d63934a1c

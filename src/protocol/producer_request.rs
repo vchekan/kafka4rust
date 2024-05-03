@@ -1,7 +1,6 @@
 use crate::types::QueuedMessage;
 use crate::protocol::{ApiKey, HasApiKey, HasApiVersion, ProduceResponse3, Request, ToKafka};
 use crate::zigzag::{put_zigzag64, zigzag_len};
-use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use crc32c::crc32c;
 use std::collections::HashMap;
@@ -144,13 +143,13 @@ impl ProduceRequest3<'_> {
 
                 // write data and batch size
                 let recordset_len = buf.len() - recordset_bookmark - 4;
-                BigEndian::write_u32(&mut buf[recordset_bookmark..], recordset_len as u32);
+                buf[recordset_bookmark..][..4].copy_from_slice(&(recordset_len as u32).to_be_bytes());
                 let batch_len = buf.len() - batch_len_bookmark - 4;
-                BigEndian::write_u32(&mut buf[batch_len_bookmark..], batch_len as u32);
+                buf[batch_len_bookmark..][..4].copy_from_slice(&(batch_len as u32).to_be_bytes());
 
                 // Calculate Crc after all length are set
                 let crc = crc32c(&buf[crc_bookmark + 4..]);
-                BigEndian::write_u32(&mut buf[crc_bookmark..], crc);
+                buf[crc_bookmark..][..4].copy_from_slice(&crc.to_be_bytes());
             }
         }
     }

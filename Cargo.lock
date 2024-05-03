@@ -1150,7 +1150,6 @@ dependencies = [
  "assert_cmd",
  "async-std",
  "async-stream",
- "byteorder",
  "bytes",
  "clap 4.5.3",
  "crc32c",
