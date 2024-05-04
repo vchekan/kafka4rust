@@ -11,11 +11,13 @@ use std::fmt::{Display, Formatter};
 use std::io::{stdout, Write};
 use std::panic;
 use tracing_futures::Instrument;
-use tui::layout::Rect;
-use tui::text::{Span, Spans};
-use tui::widgets::{Cell, ListItem, ListState};
-use tui::{
-    backend::CrosstermBackend,
+use ratatui::{layout::Rect, text::Line};
+use ratatui::text::{Span};
+use ratatui::widgets::{Cell, ListItem, ListState};
+use ratatui::{
+    prelude::{
+        CrosstermBackend
+    },
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     widgets::{Block, Borders, List, Paragraph, Row, Table},
@@ -103,7 +105,7 @@ impl Drop for TerminalRawModeGuard {
     }
 }
 
-type Terminal = tui::Terminal<CrosstermBackend<std::io::Stdout>>;
+type Terminal = ratatui::prelude::Terminal<CrosstermBackend<std::io::Stdout>>;
 
 /// UI entry point
 pub async fn main_ui(bootstrap: &str) -> Result<()> {
@@ -189,7 +191,7 @@ fn draw(terminal: &mut Terminal, state: &State) -> Result<()> {
 
         // status line
         let status_style = Style::default().bg(Color::LightBlue);
-        let status_line = Paragraph::new(Spans(vec![
+        let status_line = Paragraph::new(Line::default().spans(vec![
             Span::from(" 1"),
             Span::styled("Help", status_style),
             Span::from(" 3"),
@@ -214,7 +216,7 @@ fn draw(terminal: &mut Terminal, state: &State) -> Result<()> {
     Ok(())
 }
 
-fn draw_topics<T: tui::backend::Backend>(frame: &mut Frame<T>, area: Rect, state: &State) {
+fn draw_topics(frame: &mut Frame, area: Rect, state: &State) {
     //
     // -main_frame--------------------------
     // |     master_box        | detail_box|
@@ -260,6 +262,7 @@ fn draw_topics<T: tui::backend::Backend>(frame: &mut Frame<T>, area: Rect, state
                 format!("{}", row.last),
             ])
         }),
+        [Constraint::Percentage(40), Constraint::Percentage(40), Constraint::Percentage(20)]
     )
     .widths(&[
         Constraint::Length(10),
@@ -273,14 +276,16 @@ fn draw_topics<T: tui::backend::Backend>(frame: &mut Frame<T>, area: Rect, state
     frame.render_widget(table, detail_box);
 }
 
-fn draw_brokers<B: tui::backend::Backend>(frame: &mut Frame<B>, area: Rect, _state: &State) {
+fn draw_brokers(frame: &mut Frame, area: Rect, _state: &State) {
     let table = Table::new(_state.brokers.iter().map(|b| {
         Row::new(vec![
             Cell::from(format!("{}:{}", b.host, b.port)),
             Cell::from(b.node_id.to_string()),
             Cell::from(""),
         ])
-    }))
+    }), 
+        [Constraint::Percentage(60), Constraint::Percentage(20), Constraint::Percentage(20)]
+    )
     .header(Row::new(vec!["Host", "Id", "Parts prim/repl"]))
     .block(Block::default().title("Brokers").borders(Borders::ALL));
 
