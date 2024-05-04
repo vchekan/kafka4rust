@@ -4,36 +4,21 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use kafka4rust::{Cluster, init_tracer};
-use tracing::info_span;
-use tracing_attributes::instrument;
+use tracing::{info_span};
 use std::time::Duration;
 
 
 #[tokio::main]
-#[instrument(level="debug")]
 async fn main() -> Result<()> {
     // let span = tracing::info_span!("main");
     // let _guard = span.enter();
 
     let cli = Cli::parse();
-    /*let level = match cli.value_of("log").unwrap_or("info") {
-        "trace" => LevelFilter::Trace,
-        "debug" => LevelFilter::Debug,
-        "info" => LevelFilter::Info,
-        "error" => LevelFilter::Error,
-        "off" => LevelFilter::Off,
-        _ => panic!("Unknown log level")
-    };*/
-    // TODO: logging messes up UI. Think how to redirect into a window in UI?
-    // simple_logger::SimpleLogger::new().with_level(level).init().unwrap();
-    //simple_logger::init_with_env()?;
-
-
     if cli.tracing {
         init_tracer("karst");
     }
 
-    info_span!("ui-main");
+    // info_span!("ui-main");
 
     match cli.command {
         KartCommand::List {subcommand} => {

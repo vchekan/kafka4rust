@@ -192,16 +192,12 @@ fn draw(terminal: &mut Terminal, state: &State) -> Result<()> {
         // status line
         let status_style = Style::default().bg(Color::LightBlue);
         let status_line = Paragraph::new(Line::default().spans(vec![
-            Span::from(" 1"),
-            Span::styled("Help", status_style),
-            Span::from(" 3"),
-            Span::styled("Log", status_style),
-            Span::from(" 4"),
-            Span::styled("Brokers", status_style),
-            Span::from(" 8"),
-            Span::styled("Delete", status_style),
-            Span::from(" 10"),
-            Span::styled("Quit", status_style),
+            Span::from(" 1"), Span::styled("Help", status_style),
+            Span::from(" 2"), Span::styled("Topics", status_style),
+            Span::from(" 3"), Span::styled("Brokers", status_style),
+            Span::from(" 4"), Span::styled("Log", status_style),
+            Span::from(" 8"), Span::styled("Delete", status_style),
+            Span::from(" 10"), Span::styled("Quit", status_style),
             Span::from(" "),
             status_text,
         ]));
@@ -348,6 +344,7 @@ async fn eval_loop(
                 if let Some(Ok(Event::Key(KeyEvent{code, modifiers: _}))) = key_event {
                     match code {
                         KeyCode::Char('q') | KeyCode::F(10) => break,
+                        KeyCode::F(2) => state.page = Page::Topics,
                         KeyCode::F(3) => state.page = Page::Brokers,
                         KeyCode::Down => {
                             let len = state.topics.len();
