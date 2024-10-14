@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyEvent},
+    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -341,7 +341,7 @@ async fn eval_loop(
                 }
             }
             key_event = term_events.next() => {
-                if let Some(Ok(Event::Key(KeyEvent{code, modifiers: _}))) = key_event {
+                if let Some(Ok(Event::Key(KeyEvent{code, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: _}))) = key_event {
                     match code {
                         KeyCode::Char('q') | KeyCode::F(10) => break,
                         KeyCode::F(2) => state.page = Page::Topics,

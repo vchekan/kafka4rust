@@ -1,8 +1,8 @@
 use crate::connection::BrokerConnection;
 use crate::error::{BrokerResult, BrokerFailureSource};
-use crate::murmur2a;
+use crate::{murmur2a, protocol};
 use crate::cluster::Cluster;
-use crate::protocol::ErrorCode;
+use crate::protocol::{ErrorCode, TypedBuffer};
 use crate::types::*;
 use crate::producer_buffer::Buffer;
 use crate::connections_pool::ConnectionPool;
@@ -11,8 +11,8 @@ use std::{fmt, mem};
 use std::fmt::Debug;
 use std::ops::Add;
 use std::time::{Duration, UNIX_EPOCH};
-use bytes::BytesMut;
-use futures::Future;
+use futures::pin_mut;
+use ratatui::buffer;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tracing_attributes::instrument;
 use tokio::pin;
@@ -218,6 +218,15 @@ pub(crate) struct Request {
     topic: String,
 }
 
+enum LoopEvent {
+    None,
+    AddMsg(Request),
+    FlushTimer,
+    FlushingComplete,
+    ProducerClosed,
+    MetaUpdate,
+}
+
 #[instrument(name = "Producer::eval_loop", skip(request_rx, response_tx, close_event_receiver, closed_event, builder))]
 async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Response>, 
     mut close_event_receiver: oneshot::Receiver<()>,
@@ -234,16 +243,21 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
 
     let (connection_request_tx, connection_request_rx) = mpsc::channel(2);
     let mut buffer = Buffer::new(cluster.meta_discover_sender_clone(), cluster.get_meta_cache(), connection_request_tx);
+    pin_mut!(buffer);
     
-    // let (cluster_tx, cluster_rx) = Cluster::new(builder.bootstrap, None).spawn_cluster();
     let flush_timer = tokio::time::sleep(flush_frequency);
     pin!(flush_timer);
-    // let mut connecting = FuturesUnordered::new();
+    
+    let mut flushes = FuturesUnordered::new(); 
+    
+    let mut flushing = false;
+
     let mut conn_pool = ConnectionPool::new(cluster.get_meta_cache());
-    let mut flushes = FuturesUnordered::new();
     let mut closing = false;
 
     loop {
+        let mut loopEvent = LoopEvent::None;
+
         tokio::select! {
             //
             // Read messages to be published, unless in closing state or waiting for meta
@@ -256,36 +270,38 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
                         break;
                     }
                 };
-                let msg = request.msg;
-                let topic = request.topic;
+                loopEvent = LoopEvent::AddMsg(request);
 
-                debug!("Got msg: {:?}", msg);
-                // calculate partition by the key
-                let key_hash = match &msg.key {
-                    Some(key) => hasher.partition(key),
-                    None => null_key_partition_counter.wrapping_add(1)
-                };
+                // let msg = request.msg;
+                // let topic = request.topic;
 
-                // let meta_cache = meta_cache.read().await;
-                let meta = meta_cache.get_topic_meta(&topic);
-                let partition_count = match meta {
-                    Some(meta) => meta.partitions.len() as u32,
-                    None => {
-                        if let Err(_) = cluster.request_meta_refresh(topic.clone()).await {
-                            info!("Cluster request_meta_refresh() failed");
-                            break;
-                        }
-                        debug!("Awaiting for meta resolution for topic: '{}'", topic);
-                        state = State::WaitingMetadata(Request {msg, topic});
-                        continue;
-                    }
-                };
+                // debug!("Got msg: {:?}", msg);
+                // // calculate partition by the key
+                // let key_hash = match &msg.key {
+                //     Some(key) => hasher.partition(key),
+                //     None => null_key_partition_counter.wrapping_add(1)
+                // };
 
-                let partition = calculate_partition(&msg, partition_count, &hasher, &mut null_key_partition_counter);
-                state = match buffer.add(msg, &topic, partition, partition_count) {
-                    Some(msg) => State::WaitingBuffer(Request{ msg, topic }),
-                    None => State::None
-                }
+                // // let meta_cache = meta_cache.read().await;
+                // let meta = meta_cache.get_topic_meta(&topic);
+                // let partition_count = match meta {
+                //     Some(meta) => meta.partitions.len() as u32,
+                //     None => {
+                //         if let Err(_) = cluster.request_meta_refresh(topic.clone()).await {
+                //             info!("Cluster request_meta_refresh() failed");
+                //             break;
+                //         }
+                //         debug!("Awaiting for meta resolution for topic: '{}'", topic);
+                //         state = State::WaitingMetadata(Request {msg, topic});
+                //         continue;
+                //     }
+                // };
+
+                // let partition = calculate_partition(&msg, partition_count, &hasher, &mut null_key_partition_counter);
+                // state = match buffer.add(msg, &topic, partition, partition_count) {
+                //     Some(msg) => State::WaitingBuffer(Request{ msg, topic }),
+                //     None => State::None
+                // }
             }
 
             //
@@ -299,34 +315,35 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
                 debug!("Got meta update");
 
                 // If there is a message waiting for topic resolution, retry it
-                if let State::WaitingMetadata(request) = &mut state {
-                    // let meta_cache = meta_cache.read().await;
-                    let Request {msg, topic} = request;
-                    match meta_cache.get_topic_meta(topic) {
-                        // Topic found, can send message to buffer now
-                        Some(meta) => {
-                            debug!("Resolved topic for awaited message");
-                            let partitions = meta.partitions.len() as u32;
-                            let partition = calculate_partition(&msg, partitions, &hasher, &mut null_key_partition_counter);
+                // if let State::WaitingMetadata(request) = &mut state {
+                //     // let meta_cache = meta_cache.read().await;
+                //     let Request {msg, topic} = request;
+                //     match meta_cache.get_topic_meta(topic) {
+                //         // Topic found, can send message to buffer now
+                //         Some(meta) => {
+                //             debug!("Resolved topic for awaited message");
+                //             let partitions = meta.partitions.len() as u32;
+                //             let partition = calculate_partition(&msg, partitions, &hasher, &mut null_key_partition_counter);
 
-                            // extract message from state
-                            let state2 = mem::replace(&mut state, State::None);
-                            let (msg, topic) = match state2 {
-                                State::WaitingMetadata(Request {msg, topic}) => (msg, topic),
-                                _ => unreachable!()
-                            };
+                //             // extract message from state
+                //             let state2 = mem::replace(&mut state, State::None);
+                //             let (msg, topic) = match state2 {
+                //                 State::WaitingMetadata(Request {msg, topic}) => (msg, topic),
+                //                 _ => unreachable!()
+                //             };
 
-                            match buffer.add(msg, &topic, partition, partitions) {
-                                // Buffer overflow, wait for buffer to be available
-                                Some(msg) => state = State::WaitingBuffer(Request {msg, topic}),
-                                // Buffer accepted the message, continue with no more awaiting
-                                None => state = State::None
-                            }
-                        },
-                        // Still no meta for the topic, keep waiting
-                        None => continue,
-                    }
-                }
+                //             match buffer.add(msg, &topic, partition, partitions) {
+                //                 // Buffer overflow, wait for buffer to be available
+                //                 Some(msg) => state = State::WaitingBuffer(Request {msg, topic}),
+                //                 // Buffer accepted the message, continue with no more awaiting
+                //                 None => state = State::None
+                //             }
+                //         },
+                //         // Still no meta for the topic, keep waiting
+                //         None => continue,
+                //     }
+                // }
+                loopEvent = LoopEvent::MetaUpdate;
 
                 //conns.update_meta(&meta_cache);
             }
@@ -337,53 +354,76 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
             _ = &mut close_event_receiver, if !closing => {
                 info!("Close event, flushing buffer");
                 closing = true;
-                let requests = buffer.flush_request(&mut conn_pool);
+                // let requests = buffer.flush_request(&mut conn_pool);
                 
-                for (request, conn) in requests {
-                    flushes.push(flush(request, conn));
-                }
+                // for (request, conn) in requests {
+                //     flushes.push(flush(request, conn));
+                // }
+                loopEvent = LoopEvent::ProducerClosed;
             }
 
             //
             // Flush timer
             //
-            _ = &mut flush_timer => {
+            _ = &mut flush_timer, if !flushing && !closing => {
                 debug!("Start flushing");
+                flushing = true;
                 let requests = buffer.flush_request(&mut conn_pool);
 
                 for (request, conn) in requests {
                     flushes.push(flush(request, conn));
                 }
                 flush_timer.as_mut().reset(Instant::now().add(flush_frequency));
+                // loopEvent = LoopEvent::FlushTimer;
             }
 
             //
             // Flushing is complete
             // TODO: do flushing until closing timeout or buffer is empty
             //
-            Some((res, conn)) = &mut flushes.next(), if !flushes.is_empty() => {
-                debug!("Flush complete: {:?}", res);
-                conn_pool.return_conn(conn);
-                // If `close` event was triggered, 
-                if closing {
-                    // TODO: if not all data has been flushed, should continue?
-                    debug!("Flushing complete when closing initiated, exiting producer loop");
-                    let _ = closed_event.send(());
-                    break;    
-                }
-            }
+            // Some((res, conn)) = &mut flushes.next() /*, if !flushes.is_empty()*/ => {
+            //     debug!("Flush complete: {:?}", res);
+            //     flushing = false;
+            //     conn_pool.return_conn(conn);
+            //     if let Ok(res) = res {
+            //         buffer.discard(&res);
+            //     }
+            //     // If `close` event was triggered, 
+            //     if closing {
+            //         // TODO: if not all data has been flushed, should continue?
+            //         debug!("Flushing complete when closing initiated, exiting producer loop");
+            //         let _ = closed_event.send(());
+            //         break;    
+            //     }
+            //     loopEvent = LoopEvent::FlushingComplete;
+            // }
 
             // Drive connection pool
             _ = conn_pool.drive(), if !conn_pool.is_empty() => {}
 
         }
+
+        // match loopEvent {
+        //     LoopEvent::FlushTimer => {
+        //         let requests = buffer.flush_request(&mut conn_pool);
+        //         for (request, conn) in requests {
+        //             let f = flush(request, conn);
+        //             // flushes.push(f);
+        //         }
+        //         flush_timer.as_mut().reset(Instant::now().add(flush_frequency));
+        //     }
+        //     _ => {
+        //         todo!()
+        //     }
+        // }
+
     }
     debug!("Exiting producer loop");
 }
 
 // Extract this into a function just because rustc considers 2 identical lambdas as different type
-async fn flush(mut buff: BytesMut, mut conn: Box<BrokerConnection>) -> (Result<(), BrokerFailureSource>, Box<BrokerConnection>) {
-    let res = conn.exchange_with_buf(&mut buff).await;
+async fn flush<T: crate::protocol::Request>(mut buff: TypedBuffer<T>, mut conn: Box<BrokerConnection>) -> (Result<T::Response, BrokerFailureSource>, Box<BrokerConnection>) {
+    let res = conn.read_response::<T>(buff).await;
     (res, conn)
 }
 
@@ -550,12 +590,13 @@ impl ToMessage for &[u8] {
 mod tests {
     use super::*;
     use crate::init_tracer;
+    use tokio::time::sleep;
     use tracing::{info_span, span, Level, Instrument};
 
     #[tokio::test]
     async fn test() -> anyhow::Result<()> {
         // let count = 10_000;
-        let count = 10;
+        let count = 100;
         init_tracer("producer-test");
         let span = info_span!("test");
         let _guard = span.enter();
@@ -568,6 +609,7 @@ mod tests {
                 debug!("sending");
                 producer.send(format!("msg {}", i), "test1".to_string()).await?;
                 debug!("sent");
+                sleep(Duration::from_millis(300)).await;
             }
             BrokerResult::Ok(producer)
         }).instrument(span!(Level::INFO, "send loop task")).await??;

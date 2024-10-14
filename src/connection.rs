@@ -29,7 +29,7 @@ use crate::types::BrokerId;
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use std::fmt::{Debug, Formatter};
-use crate::protocol;
+use crate::protocol::{self, Request, TypedBuffer};
 use crate::protocol::{write_request, read_response};
 use tracing::{debug, trace};
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
@@ -113,14 +113,15 @@ impl BrokerConnection {
     where
         R: protocol::Request,
     {
-        let mut buff = self.write_request(request);
+        let buff = TypedBuffer::new(self.write_request(request));
 
-        self.exchange_with_buf(&mut buff).await?;
-        //let mut cursor = Cursor::new(buff);
-        let (_corr_id, response) = read_response(&mut buff.freeze())?;
-        // TODO: check correlationId
-        // TODO: check for response error
-        Ok(response)
+        self.read_response::<R>(buff).await
+        // self.exchange_with_buf(&mut buff).await?;
+        // //let mut cursor = Cursor::new(buff);
+        // let (_corr_id, response) = read_response(&mut buff.freeze())?;
+        // // TODO: check correlationId
+        // // TODO: check for response error
+        // Ok(response)
     }
 
     #[instrument(level = "debug", skip(self, request))]
@@ -136,6 +137,19 @@ impl BrokerConnection {
         protocol::write_request(request, None, &mut buff, self.correlation_id);
         self.correlation_id = self.correlation_id.wrapping_add(1);
         buff
+    }
+
+    #[instrument(level = "debug", skip(self, buff))]
+    pub async fn read_response<T>(&mut self, mut buff: TypedBuffer<T>) -> BrokerResult<T::Response>
+        where T: Request
+    {
+        self.exchange_with_buf(&mut buff).await?;
+        //let mut cursor = Cursor::new(buff);
+        let mut buff = buff.unwrap().freeze();
+        let (_corr_id, response) = read_response(&mut buff)?;
+        // TODO: check correlationId
+        // TODO: check for response error
+        Ok(response)        
     }
 
     #[instrument(level="debug")]

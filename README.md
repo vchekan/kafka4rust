@@ -75,7 +75,8 @@
 * Try Async Local Executors
   * https://maciej.codes/2022-06-09-local-async.html
 * `futures-concurrency`
-* Glommio and Monoio are not Send and use a "thread-per-core" design 
+* Glommio and Monoio are not Send and use a "thread-per-core" design
+* https://docs.rs/thunderdome/latest/thunderdome/ address borrow checker pains and allows more natural code.
 
 ## Projects
 * CLI tools
