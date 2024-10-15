@@ -29,7 +29,7 @@ use crate::types::BrokerId;
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use std::fmt::{Debug, Formatter};
-use crate::protocol::{self, Request, TypedBuffer};
+use crate::protocol::{self, FromKafka, Request, TypedBuffer};
 use crate::protocol::{write_request, read_response};
 use tracing::{debug, trace};
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
@@ -115,7 +115,7 @@ impl BrokerConnection {
     {
         let buff = TypedBuffer::new(self.write_request(request));
 
-        self.read_response::<R>(buff).await
+        self.read_response::<R::Response>(buff).await
         // self.exchange_with_buf(&mut buff).await?;
         // //let mut cursor = Cursor::new(buff);
         // let (_corr_id, response) = read_response(&mut buff.freeze())?;
@@ -140,8 +140,8 @@ impl BrokerConnection {
     }
 
     #[instrument(level = "debug", skip(self, buff))]
-    pub async fn read_response<T>(&mut self, mut buff: TypedBuffer<T>) -> BrokerResult<T::Response>
-        where T: Request
+    pub async fn read_response<T>(&mut self, mut buff: TypedBuffer<T>) -> BrokerResult<T>
+        where T: FromKafka
     {
         self.exchange_with_buf(&mut buff).await?;
         //let mut cursor = Cursor::new(buff);
