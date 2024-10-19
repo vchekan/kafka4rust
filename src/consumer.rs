@@ -250,7 +250,7 @@ mod test {
 
     #[tokio::test]
     async fn test() -> anyhow::Result<()> {
-        init_tracer("test");
+        init_tracer();
 
         let mut  consumer = Consumer::builder("test1").
             bootstrap("127.0.0.1").build().await?;

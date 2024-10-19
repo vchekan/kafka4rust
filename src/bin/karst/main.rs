@@ -4,21 +4,19 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use kafka4rust::{Cluster, init_tracer};
-use tracing::{info_span};
+use tracing::debug;
 use std::time::Duration;
-
+use kafka4rust::Producer;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // let span = tracing::info_span!("main");
-    // let _guard = span.enter();
-
     let cli = Cli::parse();
     if cli.tracing {
-        init_tracer("karst");
+        init_tracer();
     }
 
-    // info_span!("ui-main");
+    let span = tracing::info_span!("main");
+    let _guard = span.enter();
 
     match cli.command {
         KartCommand::List {subcommand} => {
@@ -53,12 +51,12 @@ async fn main() -> Result<()> {
         }
         KartCommand::Publish {key, topic, single_message, send_timeout_sec, from_file, msg_value} => {
             let brokers = cli.bootstrap;
-            // let mut producer = ProducerBuilder::new(&brokers);
-            // if let Some(send_timeout) = send_timeout_sec {
-            //     producer = producer.send_timeout(Duration::from_secs(send_timeout));
-            // }
-
-            todo!()
+            let mut producer = Producer::builder(brokers).send_timeout(send_timeout_sec.map(Duration::from_secs)).build();
+            if let Some(msg) = msg_value {
+                producer.publish(msg, topic).await?;
+                producer.close().await?;
+            }
+            
             // let (mut producer, _acks) =
             //     producer.start().expect("Failed to create publisher");
             // if let Some(key) = key {

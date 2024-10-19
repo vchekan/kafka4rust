@@ -198,7 +198,7 @@ mod tests {
 
     #[tokio::test]
     async fn test() -> anyhow::Result<()> {
-        init_tracer("test");
+        init_tracer();
         let span = info_span!("test");
         let _guard = span.enter();
 

@@ -312,7 +312,7 @@ mod tests {
     #[tokio::test]
     #[instrument]
     async fn fetch_offsets() -> anyhow::Result<()> {
-        let _tracer = init_tracer("test");
+        let _tracer = init_tracer();
         let bootstrap = "127.0.0.1:9092".to_string();
 
         // TODO: when brokers are down, `some_offsets: Ok([])` is returned. Return actual error.

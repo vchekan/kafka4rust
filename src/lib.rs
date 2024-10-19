@@ -19,7 +19,5 @@ mod murmur2a;
 mod connections_pool;
 
 pub use self::cluster::Cluster;
-//pub use self::consumer::{ConsumerBuilder};
-//pub use self::error::KafkaError;
-// pub use self::producer::{FixedPartitioner, ProducerBuilder, Response};
+pub use self::producer::Producer;
 pub use self::utils::init_tracer;

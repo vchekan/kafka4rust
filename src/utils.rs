@@ -2,6 +2,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use tracing::{debug, error};
 use opentelemetry::global;
 use tracing_attributes::instrument;
+use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 
 /// Resolve addresses and produce only those which were successfully resolved.
 /// Unresolved entries will be logged with `error` level.
@@ -49,47 +50,12 @@ impl Drop for TraceGuard {
         global::shutdown_tracer_provider();
     }
 }
-pub fn init_tracer(name: &str) {
-    tracing_subscriber::fmt::init();
-
-    /*let exporter = opentelemetry_stdout::SpanExporter::default(); //opentelemetry_otlp::new_exporter().tonic();
-    let tracer = opentelemetry_otlp::new_pipeline()
-        .tracing()
-        .with_exporter(exporter)
-        .install_simple()?;
-    */
-
-    /*global::set_text_map_propagator(opentelemetry_jaeger::Propagator::default());
-    let tracer = opentelemetry_jaeger::new_agent_pipeline()
-        .with_service_name(name)
-        .install_simple()?;
-    */
-    //let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-    //let subscriber = Registry::default().with(telemetry);
-    //tracing::subscriber::set_global_default(subscriber)?;
-
-    //Ok(TraceGuard{})
-
-    // let exporter = opentelemetry_jaeger::Exporter::builder()
-    //     .with_agent_endpoint("localhost:6831".parse().unwrap())
-    //     .with_process(opentelemetry_jaeger::Process {
-    //         service_name: "kafka4rust".to_string(),
-    //         tags: vec![
-    //             //Key::new("exporter").string("jaeger"),
-    //             //Key::new("float").f64(312.23),
-    //         ],
-    //     })
-    //     .init()?;
-    // let provider = sdk::Provider::builder()
-    //     .with_simple_exporter(exporter)
-    //     .with_config(sdk::Config {
-    //         default_sampler: Box::new(sdk::Sampler::Always),
-    //         max_events_per_span: 500,
-    //         ..Default::default()
-    //     })
-    //     .build();
-    // global::set_provider(provider);
-    // Ok(())
+pub fn init_tracer() {
+    tracing_subscriber::fmt()
+        .with_thread_ids(true)
+        .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
 }
 
 #[derive(Debug)]
@@ -116,11 +82,3 @@ impl <T> TracedMessage<T> {
     }
 }
 
-// impl <T> Deref for TracedMessage<T> {
-//     type Target = T;
-//
-//     fn deref(&self) -> &Self::Target {
-//         tracing::Span::current().follows_from(&self.trace);
-//         &self.msg
-//     }
-// }

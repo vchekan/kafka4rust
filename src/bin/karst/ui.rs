@@ -8,16 +8,14 @@ use kafka4rust::protocol::Broker;
 use kafka4rust::{Cluster, protocol};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
-use std::io::{stdout, Write};
+use std::io::stdout;
 use std::panic;
 use tracing_futures::Instrument;
 use ratatui::{layout::Rect, text::Line};
-use ratatui::text::{Span};
+use ratatui::text::Span;
 use ratatui::widgets::{Cell, ListItem, ListState};
 use ratatui::{
-    prelude::{
-        CrosstermBackend
-    },
+    prelude::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     widgets::{Block, Borders, List, Paragraph, Row, Table},

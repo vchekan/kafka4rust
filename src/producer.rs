@@ -158,14 +158,6 @@ impl Partitioner for FixedPartitioner {
     }
 }
 
-// #[derive(Debug)]
-// pub struct Message {
-//     pub key: Option<Vec<u8>>,
-//     pub value: Vec<u8>,
-//     pub topic: String,
-//     pub timestamp: u64
-// }
-
 #[derive(Debug)]
 pub struct ProducerBuilder {
     bootstrap: String,
@@ -178,29 +170,13 @@ impl ProducerBuilder {
         ProducerBuilder { bootstrap: brokers, hasher: None, send_timeout: None}
     }
     pub fn hasher(mut self, hasher: Box<dyn Partitioner>) -> Self { self.hasher = Some(hasher); self }
-    pub fn send_timeout(self, timeout: Duration) -> Self { ProducerBuilder {send_timeout: Some(timeout), ..self} }
+    pub fn send_timeout(self, timeout: impl Into<Option<Duration>>) -> Self { ProducerBuilder {send_timeout: timeout.into(), ..self} }
     
     /// If bootstrap address does not resolve, return error
     pub fn build(self) -> Producer { Producer::new(self) }
 }
 
 pub struct Producer {
-    //inner: Arc<Mutex<Inner>>
-    //rx: mpsc::Receiver<TracedMessage<Msg>>,
-    // bootstrap: String,
-    // buffer: Buffer,
-    // cluster: Cluster,
-    // partitioner: Box<dyn Partitioner>,
-    // /// Async response (ack/nack) to the caller
-    // // acks: Sender<Response>,
-    // /// Channel to the buffer
-    // // buffer_commands: Sender<BuffCmd>,
-    // //flush_loop_handle: tokio::task::JoinHandle<BrokerResult<()>>,
-    // send_timeout: Option<Duration>,
-    // /// Counter use to round-robin messages with null key
-    // null_key_partition_counter: u32,
-    // topic_partitions_count: HashMap<String,usize>,
-    //
     request_tx: Sender<Request>,
     response_rx: Receiver<Response>,
     close_event: oneshot::Sender<()>,
@@ -218,15 +194,6 @@ pub(crate) struct Request {
     topic: String,
 }
 
-enum LoopEvent {
-    None,
-    AddMsg(Request),
-    FlushTimer,
-    FlushingComplete,
-    ProducerClosed,
-    MetaUpdate,
-}
-
 #[instrument(name = "Producer::eval_loop", skip(request_rx, response_tx, close_event_receiver, closed_event, builder))]
 async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Response>, 
     mut close_event_receiver: oneshot::Receiver<()>,
@@ -242,7 +209,7 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
     let hasher = builder.hasher.unwrap_or_else(|| Box::new(Murmur2Partitioner{}));
 
     let (connection_request_tx, connection_request_rx) = mpsc::channel(2);
-    let mut buffer = Buffer::new(cluster.meta_discover_sender_clone(), cluster.get_meta_cache(), connection_request_tx);
+    let buffer = Buffer::new(cluster.meta_discover_sender_clone(), cluster.get_meta_cache(), connection_request_tx);
     pin_mut!(buffer);
     
     let flush_timer = tokio::time::sleep(flush_frequency);
@@ -269,7 +236,6 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
                         break;
                     }
                 };
-                // loopEvent = LoopEvent::AddMsg(request);
 
                 let msg = request.msg;
                 let topic = request.topic;
@@ -426,6 +392,7 @@ fn wrapping_get_and_inc(h: &mut u32) -> u32 {
 
 
 impl Producer {
+    #[instrument(level="debug")]
     pub fn builder(brokers: String) -> ProducerBuilder {
         ProducerBuilder::new(brokers)
     }
@@ -445,8 +412,9 @@ impl Producer {
         }
     }
 
-    #[instrument(err, skip(msg, self))]
-    pub async fn send<M: ToMessage + 'static>(&mut self, msg: M, topic: String) -> BrokerResult<()> {
+    #[instrument(level  = "debug", fields(len = msg.value().len()), err, skip(msg, self))]
+    pub async fn publish<M: ToMessage + 'static>(&mut self, msg: M, topic: String) -> BrokerResult<()> {
+        debug!("publish()");
         let msg = QueuedMessage {
             key: msg.key(),
             value: msg.value(),
@@ -460,31 +428,11 @@ impl Producer {
             info!("Broker channel closed, send failed");
             BrokerFailureSource::ConnectionChannelClosed
         })
-
-        // // calculate partition by the key
-        // c
-        //
-        // let partition_count = match self.topic_partitions_count.get(topic) {
-        //     Some(count) => *count,
-        //     None => {
-        //         // TODO: no long-time blocking should exist
-        //         let partition_count = self.cluster.get_or_fetch_partition_count(topic.to_string()).await?; //self.get_or_fetch_partition_count(&topic).await?;
-        //         self.topic_partitions_count.insert(topic.to_string(), partition_count);
-        //         partition_count
-        //     }
-        // };
-        //
-        // let partition = partition % partition_count as u32;
-        // tracing::debug!("partition: {}", partition);
-        //
-        // let mut buffer = self.buffer.lock().expect("Failed to lock producer buffer");
-        // buffer.add(msg, topic, partition, partition_count as u32);
-        //
-        // Ok(())
     }
 
+    #[instrument(level = "debug", skip(self))]
     pub async fn close(self) -> anyhow::Result<()> {
-        debug!("closing");
+        debug!("closing producer");
         self.close_event.send(()).map_err(|_| BrokerFailureSource::Internal(anyhow::anyhow!("Failed to send close event")))?;
         let _ = self.closed_event.await;
         debug!("closed");
@@ -578,7 +526,7 @@ mod tests {
     async fn test() -> anyhow::Result<()> {
         // let count = 10_000;
         let count = 10;
-        init_tracer("producer-test");
+        init_tracer();
         let span = info_span!("test");
         let _guard = span.enter();
 
@@ -588,7 +536,7 @@ mod tests {
         let producer = tokio::spawn(async move {
             for i in 0..count {
                 debug!("sending");
-                producer.send(format!("msg {}", i), "test1".to_string()).await?;
+                producer.publish(format!("msg {}", i), "test1".to_string()).await?;
                 debug!("sent {}", i);
                 sleep(Duration::from_millis(300)).await;
             }

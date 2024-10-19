@@ -219,7 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_works() -> anyhow::Result<()> {
-        utils::init_tracer("connections");
+        utils::init_tracer();
 
         let bootstrap = env::var("kafka-bootstrap").unwrap_or("127.0.0.1:9092".to_string());
         let addr = bootstrap
