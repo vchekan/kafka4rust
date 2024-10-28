@@ -21,6 +21,12 @@ pub(crate) struct ConnectionPool {
     connecting: FuturesUnordered<ConnectFuture>,
 }
 
+#[derive(Debug)]
+pub(crate) enum EventType {
+    NewConnection,
+    FailedToConnect,
+}
+
 type ConnectFuture = Pin<Box<dyn Future<Output=Result<BrokerConnection, (BrokerId,BrokerFailureSource)>> + Send>>;
 
 pub(crate) enum Entry {
@@ -75,6 +81,7 @@ impl ConnectionPool {
         }
     }
 
+    #[instrument(level = "debug")]
     fn new_connection(&self, broker_id: BrokerId) {
         match self.meta_cache.get_addr_by_broker(&broker_id) {
             Some(addr) => {
@@ -103,18 +110,21 @@ impl ConnectionPool {
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub(crate) async fn drive(&mut self) {
+    pub(crate) async fn drive(&mut self) -> EventType {
         match self.connecting.next().await {
             Some( Ok(conn)) => {
                 debug!("connected {}", conn.addr);
                 self.connections.insert(conn.broker_id, Entry::Available(Box::new(conn)));
+                EventType::NewConnection
             }
             Some(Err((broker_id, err))) => {
                 debug!(name: "Failed to connect", conn = broker_id, %err);
                 let _ = self.connections.remove(&broker_id);
+                EventType::FailedToConnect
             }
             None => { 
                 warn!("Shouldn't be called on empty connections"); 
+                EventType::FailedToConnect
             }
         }
     }

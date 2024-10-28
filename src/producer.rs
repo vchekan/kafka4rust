@@ -1,6 +1,6 @@
 use crate::connection::BrokerConnection;
 use crate::error::{BrokerResult, BrokerFailureSource};
-use crate::{murmur2a, protocol};
+use crate::{connections_pool, murmur2a, protocol};
 use crate::cluster::Cluster;
 use crate::protocol::{ErrorCode, TypedBuffer};
 use crate::types::*;
@@ -12,7 +12,6 @@ use std::fmt::Debug;
 use std::ops::Add;
 use std::time::{Duration, UNIX_EPOCH};
 use futures::pin_mut;
-use ratatui::buffer;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tracing_attributes::instrument;
 use tokio::pin;
@@ -179,7 +178,6 @@ impl ProducerBuilder {
 pub struct Producer {
     request_tx: Sender<Request>,
     response_rx: Receiver<Response>,
-    close_event: oneshot::Sender<()>,
     closed_event: oneshot::Receiver<()>,
 }
 
@@ -194,9 +192,8 @@ pub(crate) struct Request {
     topic: String,
 }
 
-#[instrument(name = "Producer::eval_loop", skip(request_rx, response_tx, close_event_receiver, closed_event, builder))]
+#[instrument(name = "Producer::eval_loop", skip(request_rx, response_tx, closed_event, builder))]
 async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Response>, 
-    mut close_event_receiver: oneshot::Receiver<()>,
     closed_event: oneshot::Sender<()>,
     builder: ProducerBuilder) 
  {
@@ -222,18 +219,26 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
     let mut conn_pool = ConnectionPool::new(cluster.get_meta_cache());
     let mut closing = false;
 
+    debug!("starting eval loop");
     loop {
-
         tokio::select! {
             //
             // Read messages to be published, unless in closing state or waiting for meta
             //
             request = request_rx.recv(), if !closing && !matches!(state, State::WaitingMetadata(_)) => {
+                debug!("request_rx");
                 let request = match request {
                     Some(msg) => msg,
                     None => {
-                        debug!("request_rx channel close");
-                        break;
+                        info!("Close event, flushing buffer");
+                        closing = true;
+                        let requests = buffer.flush_request(&mut conn_pool);
+                        
+                        for (request, conn) in requests {
+                            flushes.push(flush(request, conn));
+                        }
+                        debug!("Remaining {} requests to be flushed, will wait", flushes.len());
+                        continue;
                     }
                 };
 
@@ -247,13 +252,12 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
                     None => null_key_partition_counter.wrapping_add(1)
                 };
 
-                // let meta_cache = meta_cache.read().await;
                 let meta = meta_cache.get_topic_meta(&topic);
                 let partition_count = match meta {
                     Some(meta) => meta.partitions.len() as u32,
                     None => {
-                        if let Err(_) = cluster.request_meta_refresh(topic.clone()).await {
-                            info!("Cluster request_meta_refresh() failed");
+                        if let Err(e) = cluster.request_meta_refresh(topic.clone()).await {
+                            info!("Cluster request_meta_refresh() failed: {}", e);
                             break;
                         }
                         debug!("Awaiting for meta resolution for topic: '{}'", topic);
@@ -281,7 +285,6 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
 
                 // If there is a message waiting for topic resolution, retry it
                 if let State::WaitingMetadata(request) = &mut state {
-                    // let meta_cache = meta_cache.read().await;
                     let Request {msg, topic} = request;
                     match meta_cache.get_topic_meta(topic) {
                         // Topic found, can send message to buffer now
@@ -299,30 +302,23 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
 
                             match buffer.add(msg, &topic, partition, partitions) {
                                 // Buffer overflow, wait for buffer to be available
-                                Some(msg) => state = State::WaitingBuffer(Request {msg, topic}),
+                                Some(msg) => {
+                                    debug!("Buffer overflow, will wait");
+                                    state = State::WaitingBuffer(Request {msg, topic})
+                                }
                                 // Buffer accepted the message, continue with no more awaiting
                                 None => state = State::None
                             }
+                            debug!("buffer is empty: {}", buffer.is_empty());
                         },
-                        // Still no meta for the topic, keep waiting
-                        None => continue,
+                        None => {
+                            debug!("Still no meta for the topic, keep waiting");
+                            continue
+                        }
                     }
                 }
 
                 //conns.update_meta(&meta_cache);
-            }
-
-            //
-            // Producer close event
-            //
-            _ = &mut close_event_receiver, if !closing => {
-                info!("Close event, flushing buffer");
-                closing = true;
-                let requests = buffer.flush_request(&mut conn_pool);
-                
-                for (request, conn) in requests {
-                    flushes.push(flush(request, conn));
-                }
             }
 
             //
@@ -360,7 +356,19 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
             }
 
             // Drive connection pool
-            _ = conn_pool.drive(), if !conn_pool.is_empty() => {}
+            conn_event = conn_pool.drive(), if !conn_pool.is_empty() => {
+                debug!("conn_event: {:?}, buffer.is_empty(): {}", conn_event, buffer.is_empty());
+                if closing && !buffer.is_empty() && matches!(conn_event, connections_pool::EventType::NewConnection) {
+                    debug!("New connection while closing, try flushing again");
+                    // TODO: make sure do not sent the same messages in the progress again
+                    let requests = buffer.flush_request(&mut conn_pool);
+
+                    for (request, conn) in requests {
+                        flushes.push(flush(request, conn));
+                    }
+    
+                }
+            }
 
         }
     }
@@ -401,13 +409,11 @@ impl Producer {
     fn new(builder: ProducerBuilder) -> Self {
         let (response_tx, response_rx) = channel(2);
         let (request_tx, request_rx) = channel(2);
-        let (close_event, close_event_rx) = oneshot::channel();
         let (closed_event_tx, closed_event_rx) = oneshot::channel();
-        tokio::spawn(eval_loop(request_rx, response_tx, close_event_rx, closed_event_tx, builder));
+        tokio::spawn(eval_loop(request_rx, response_tx, closed_event_tx, builder));
         Producer {
-            request_tx,
+            request_tx: request_tx,
             response_rx,
-            close_event,
             closed_event: closed_event_rx,
         }
     }
@@ -431,12 +437,9 @@ impl Producer {
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub async fn close(self) -> anyhow::Result<()> {
+    pub fn close(self) -> oneshot::Receiver<()> {
         debug!("closing producer");
-        self.close_event.send(()).map_err(|_| BrokerFailureSource::Internal(anyhow::anyhow!("Failed to send close event")))?;
-        let _ = self.closed_event.await;
-        debug!("closed");
-        Ok(())
+        self.closed_event
     }
 }
 
@@ -518,7 +521,7 @@ impl ToMessage for &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_tracer;
+    use crate::init_console_tracer;
     use tokio::time::sleep;
     use tracing::{info_span, span, Level, Instrument};
 
@@ -526,7 +529,7 @@ mod tests {
     async fn test() -> anyhow::Result<()> {
         // let count = 10_000;
         let count = 10;
-        init_tracer();
+        init_console_tracer();
         let span = info_span!("test");
         let _guard = span.enter();
 
@@ -541,10 +544,10 @@ mod tests {
                 sleep(Duration::from_millis(300)).await;
             }
             BrokerResult::Ok(producer)
-        }).instrument(span!(Level::INFO, "send loop task")).await??;
+        }).instrument(span!(Level::DEBUG, "send loop task")).await??;
 
         debug!("closing producer");
-        producer.close().await?;
+        producer.close().await;
         debug!("producer closed");
 
         Ok(())

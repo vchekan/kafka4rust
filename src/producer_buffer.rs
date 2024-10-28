@@ -70,6 +70,10 @@ impl Buffer {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.topic_queues.iter().flat_map(|tq| tq.1).all(|pq| pq.queue.is_empty())
+    }
+
     /// If buffer overflows, then message will be returned back.
     #[instrument(level="debug")]
     pub(crate) fn add(
@@ -111,7 +115,7 @@ impl Buffer {
         let leaders = self.meta.get_known_broker_map();
         let requests = self.group_queue_by_leader(&leaders);
 
-        trace!("Size: {}", self.size);
+        trace!("Bytes: {}", self.size);
         trace!("Requests: {:?}", requests);
         trace!("MetaCache: {:?}", self.meta);
 
@@ -123,15 +127,15 @@ impl Buffer {
                 match conn {
                     // Connection found, take it
                     Entry::Available(conn) => {
-                        trace!("Got active connection from pool");
+                        debug!("Got active connection from pool");
                         Some((broker_id, request_topics, conn))
                     }
                     Entry::Lent => {
-                        trace!("Connection is busy in the pool");
+                        debug!("Connection is busy in the pool");
                         None
                     }
                     Entry::Connecting => {
-                        trace!("Connection is connecting in the pool");
+                        debug!("Connection is connecting in the pool");
                         None
                     }
                 }
@@ -147,13 +151,6 @@ impl Buffer {
             }).collect();
 
         connected
-    }
-
-    fn scan_partitions_to_send(&self) -> Vec<(&str, Vec<Partition>)> {
-        self.topic_queues.iter()
-            .map(|(topic, parts)| {
-                (topic.as_str(), (0..parts.len()).map(|l| l as Partition).collect())
-            }).collect()
     }
 
     /// Scan message buffer and group messages by the leader and update `sending` counter.
@@ -210,7 +207,9 @@ impl Buffer {
         requests
     }
 
+    #[instrument(level = "debug")]
     pub(crate) fn discard(&mut self, partitions: &protocol::ProduceResponse3 /*&[(&str,&[Partition])]*/) {
+        debug!("discard()");
         for response in &partitions.responses {
             if let Some(mut queues) = self.topic_queues.get_mut(&response.topic) {
                 for partition in &response.partition_responses {

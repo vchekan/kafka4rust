@@ -287,7 +287,7 @@ impl Cluster {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::init_tracer;
+    use crate::utils::init_console_tracer;
 
     // #[tokio::test]
     // #[instrument(level="info")]
@@ -312,7 +312,7 @@ mod tests {
     #[tokio::test]
     #[instrument]
     async fn fetch_offsets() -> anyhow::Result<()> {
-        let _tracer = init_tracer();
+        let _tracer = init_console_tracer();
         let bootstrap = "127.0.0.1:9092".to_string();
 
         // TODO: when brokers are down, `some_offsets: Ok([])` is returned. Return actual error.

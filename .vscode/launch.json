@@ -7,6 +7,30 @@
         {
             "type": "lldb",
             "request": "launch",
+            "name": "list-topics",
+            "program": "${workspaceFolder}/target/debug/karst",
+            "args": ["list","topics"],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_BACKTRACE": "1",
+                "RUST_LOG": "Trace"
+            }
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "publish",
+            "program": "${workspaceFolder}/target/debug/karst",
+            "args": ["publish", "-t", "topic1", "abc"],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                // "RUST_BACKTRACE": "1",
+                // "RUST_LOG": "Trace"
+            }
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
             "name": "Debug unit tests in library 'kafka4rust'",
             "cargo": {
                 "args": [

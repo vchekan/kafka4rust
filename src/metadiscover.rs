@@ -32,11 +32,6 @@ enum State {
     FetchingMeta,
 }
 
-struct RequestFuture<F> {
-    conn: BrokerConnection,
-    exchange: F,
-}
-
 impl MetaDiscover {
     #[instrument(level = "debug", name = "MetaDiscover::new", skip(bootstrap))]
     pub fn new(bootstrap: Vec<SocketAddr>) -> (Sender<String>, Receiver<Result<protocol::MetadataResponse0,BrokerFailureSource>>) {
@@ -56,6 +51,7 @@ impl MetaDiscover {
                 match discover.next().await {
                     Some(Ok(meta)) => {
                         if let Err(_) = response_tx.send(Ok(meta)).await {
+                            debug!("response_tx closed, exiting the loop");
                             break;
                         }
                     },
@@ -72,17 +68,14 @@ impl MetaDiscover {
                 }
             }
 
-            tracing::debug!("MetaDiscover loop exited");
+            debug!("MetaDiscover loop exited");
         }.instrument(debug_span!("meta discover loop")));
 
         (command_tx, response_rx)
     }
 
-    async fn eval_loop() {
-        
-    }
 
-    #[instrument()]
+    #[instrument(level = "debug", skip(self))]
     fn stream(mut self) -> impl TryStream<Ok = protocol::MetadataResponse0, Error = BrokerFailureSource, Item=Result<protocol::MetadataResponse0,BrokerFailureSource>> {
         let stream = try_stream! {
             let mut topics = HashSet::new();
@@ -193,12 +186,12 @@ mod tests {
     use super::*;
     use tokio::time::timeout;
     use tracing::{debug_span, info_span, Instrument};
-    use crate::init_tracer;
+    use crate::init_console_tracer;
     use crate::utils::resolve_addr;
 
     #[tokio::test]
     async fn test() -> anyhow::Result<()> {
-        init_tracer();
+        init_console_tracer();
         let span = info_span!("test");
         let _guard = span.enter();
 

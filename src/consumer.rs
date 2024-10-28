@@ -109,7 +109,7 @@ impl Consumer {
                     event!(tracing::Level::ERROR, %error, "Fetch loop failed")
                 }
             }
-        });
+        }.instrument(debug_span!("fetch-loop")));
 
         Ok(rx)
     }
@@ -245,12 +245,12 @@ async fn fetch_loop(
 
 #[cfg(test)]
 mod test {
-    use crate::init_tracer;
+    use crate::init_console_tracer;
     use super::*;
 
     #[tokio::test]
     async fn test() -> anyhow::Result<()> {
-        init_tracer();
+        init_console_tracer();
 
         let mut  consumer = Consumer::builder("test1").
             bootstrap("127.0.0.1").build().await?;

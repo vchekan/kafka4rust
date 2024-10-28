@@ -63,7 +63,7 @@ impl BrokerConnection {
 
         let mut buf = buf.freeze();
         let (corr_id, response): (u32, protocol::ApiVersionsResponse0) = read_response(&mut buf)?;
-        debug!("Got ApiVersionResponse {:?}; correlation_id: {}, buf: {:?}", response, corr_id, buf);
+        trace!("Got ApiVersionResponse {:?}; correlation_id: {}, buf: {:?}", response, corr_id, buf);
         response.error_code.as_result()?;
         let negotiated_api_version = build_api_compatibility(&response);
 
@@ -219,7 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_works() -> anyhow::Result<()> {
-        utils::init_tracer();
+        utils::init_console_tracer();
 
         let bootstrap = env::var("kafka-bootstrap").unwrap_or("127.0.0.1:9092".to_string());
         let addr = bootstrap

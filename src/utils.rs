@@ -1,8 +1,13 @@
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use opentelemetry::{trace::Tracer, KeyValue};
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::{runtime, trace::Config, Resource};
+use opentelemetry_semantic_conventions::resource::SERVICE_NAME;
 use tracing::{debug, error};
-use opentelemetry::global;
 use tracing_attributes::instrument;
-use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
+use tracing_futures::WithSubscriber;
+use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 /// Resolve addresses and produce only those which were successfully resolved.
 /// Unresolved entries will be logged with `error` level.
@@ -44,41 +49,25 @@ pub(crate) fn resolve_addr(addr: &str) -> Vec<SocketAddr> {
         .collect()
 }
 
-pub struct TraceGuard {}
-impl Drop for TraceGuard {
-    fn drop(&mut self) {
-        global::shutdown_tracer_provider();
-    }
-}
-pub fn init_tracer() {
-    tracing_subscriber::fmt()
+pub fn init_console_tracer() -> tracing_subscriber::fmt::Layer<tracing_subscriber::layer::Layered<tracing_opentelemetry::OpenTelemetryLayer<tracing_subscriber::layer::Layered<EnvFilter, tracing_subscriber::Registry>, opentelemetry_sdk::trace::Tracer>, tracing_subscriber::layer::Layered<EnvFilter, tracing_subscriber::Registry>>>  {
+    tracing_subscriber::fmt::layer()
         .with_thread_ids(true)
-        .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+        .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)    
 }
 
-#[derive(Debug)]
-pub(crate) struct TracedMessage<T> {
-    msg: T,
-    trace: Option<tracing::Id>
-}
-
-impl <T> TracedMessage<T> {
-    pub fn new(msg: T) -> Self {
-        TracedMessage {
-            msg,
-            trace: tracing::Span::current().id()
-        }
-    }
-
-    // pub fn follows_from(&self) {
-    //     tracing::Span::current().follows_from(&self.trace);
-    // }
-
-    pub fn get(self) -> T {
-        tracing::Span::current().follows_from(self.trace);
-        self.msg
-    }
+pub fn init_grpc_opentetemetry_tracer() -> opentelemetry_sdk::trace::TracerProvider {
+    opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(opentelemetry_otlp::new_exporter()
+            //.tonic().with_endpoint("http://127.0.0.1:4317/")
+            .http().with_endpoint("http://127.0.0.1:4318/v1/traces")
+        )
+        .with_trace_config(Config::default().with_resource(Resource::new(vec![KeyValue::new(
+            SERVICE_NAME,
+            "karst-cli",
+        )])))
+        // .install_batch(opentelemetry_sdk::runtime::Tokio)
+        .install_simple()
+        .expect("Unable to init tracing")
 }
 
