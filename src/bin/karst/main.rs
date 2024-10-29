@@ -3,17 +3,15 @@ mod ui;
 use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use kafka4rust::{init_console_tracer, init_grpc_opentetemetry_tracer, Cluster};
-use opentelemetry::trace::{Tracer, TracerProvider};
-use tracing::{debug, error, info, info_span, instrument::{self, WithSubscriber}, Instrument, Span};
-use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use kafka4rust::{Cluster, ConsumerBuilder};
+use tracing::{debug, error};
 use std::time::Duration;
 use kafka4rust::Producer;
 use tracing_attributes::instrument;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // tracing_subscriber::fmt::init();
 
     // let provider = init_grpc_opentetemetry_tracer(); 
     // let tracer = provider.tracer("main");
@@ -30,7 +28,7 @@ async fn main() -> Result<()> {
 
     // let span = info_span!("root");
     // let _guard = span.enter();
-    let x = run()/*.with_subscriber(subscriber).in_current_span()*/.await?;
+    run().await?;
 
     // tracing::subscriber::with_default(subscriber, || {
     //     let span = info_span!("root");
@@ -117,6 +115,21 @@ async fn run() -> Result<()> {
             // }
             // producer.close().await?;
         }
+        KartCommand::Consume { topic, count } => {
+            let mut consumer = ConsumerBuilder::new(&topic).build().await?;
+            loop {
+                let batch = match consumer.recv().await {
+                    Some(batch) => batch,
+                    None => break
+                };
+                for msg in batch.messages {
+                    let msg = String::from_utf8(msg.value)?;
+                    println!("{msg}");
+                }
+            }
+
+        }
+
         KartCommand::Ui => {
             ui::main_ui(&cli.bootstrap).await?;
         }
@@ -186,6 +199,17 @@ enum KartCommand {
         #[arg(conflicts_with = "from_file", index = 1)]
         msg_value: Option<String>,
     },
+
+    /// Read from topic
+    Consume {
+        #[arg(short, long)]
+        topic: String,
+
+        /// Count of messages to read. Default is 0, meaning no limit
+        #[arg(long, default_value_t = 0)]
+        count: u32,
+    },
+
     Ui,
 }
 

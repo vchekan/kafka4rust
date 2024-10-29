@@ -1,13 +1,11 @@
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use opentelemetry::{trace::Tracer, KeyValue};
-use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::{runtime, trace::Config, Resource};
+use opentelemetry_sdk::{trace::Config, Resource};
 use opentelemetry_semantic_conventions::resource::SERVICE_NAME;
 use tracing::{debug, error};
 use tracing_attributes::instrument;
-use tracing_futures::WithSubscriber;
-use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 
 /// Resolve addresses and produce only those which were successfully resolved.
 /// Unresolved entries will be logged with `error` level.

@@ -20,4 +20,6 @@ mod connections_pool;
 
 pub use self::cluster::Cluster;
 pub use self::producer::Producer;
+pub use self::consumer::ConsumerBuilder;
 pub use self::utils::{init_console_tracer, init_grpc_opentetemetry_tracer};
+
