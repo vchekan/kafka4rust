@@ -2,6 +2,7 @@ use crate::connection::BrokerConnection;
 use crate::error::BrokerFailureSource;
 use crate::meta_cache::MetaCache;
 use crate::types::BrokerId;
+use crate::SslOptions;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::pin::Pin;
@@ -19,6 +20,7 @@ pub(crate) struct ConnectionPool {
     connections: HashMap<BrokerId, Entry>,
     meta_cache: MetaCache,
     connecting: FuturesUnordered<ConnectFuture>,
+    ssl_options: SslOptions,
 }
 
 #[derive(Debug)]
@@ -41,13 +43,13 @@ impl Debug for ConnectionPool {
     }
 }
 
-
 impl ConnectionPool {
-    pub(crate) fn new(meta_cache: MetaCache) -> ConnectionPool {
+    pub(crate) fn new(meta_cache: MetaCache, ssl_options: SslOptions) -> ConnectionPool {
         ConnectionPool {
             connections: HashMap::new(),
             meta_cache,
-            connecting: FuturesUnordered::new()
+            connecting: FuturesUnordered::new(),
+            ssl_options
         }
     }
 
@@ -86,8 +88,9 @@ impl ConnectionPool {
         match self.meta_cache.get_addr_by_broker(&broker_id) {
             Some(addr) => {
                 debug!("Connecting to broker {broker_id}/{addr}");
+                let ssl_options = self.ssl_options.clone();
                 self.connecting.push(Box::pin(async move {
-                    match BrokerConnection::connect(addr, broker_id).await {
+                    match BrokerConnection::connect(addr, broker_id, &ssl_options).await {
                         Ok(conn) => {
                             debug!(name: "Connected", %broker_id, addr = %conn.addr);
                             Ok(conn)

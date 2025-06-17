@@ -4,6 +4,7 @@ use crate::cluster::Cluster;
 use crate::error::KafkaError;
 use crate::protocol;
 use crate::protocol::Recordset;
+use crate::ssl::SslOptions;
 use crate::types::{BrokerId, Partition};
 use crate::utils;
 use anyhow::Result;
@@ -26,6 +27,7 @@ pub struct ConsumerBuilder {
     bootstrap: Option<String>,
     topic: String,
     timeout: Duration,
+    ssl_opts: SslOptions,
 }
 
 impl ConsumerBuilder {
@@ -33,11 +35,17 @@ impl ConsumerBuilder {
         ConsumerBuilder {
             bootstrap: None,
             topic: topic.as_ref().to_string(),
-            timeout: Duration::from_secs(20)
+            timeout: Duration::from_secs(20),
+            ssl_opts: SslOptions::default()
         }}
 
     pub fn bootstrap(mut self, bootstrap: &str) -> Self {
         self.bootstrap = Some(bootstrap.into());
+        self
+    }
+
+    pub fn with_ssl_options(mut self, ssl_options: SslOptions) -> Self {
+        self.ssl_opts = ssl_options;
         self
     }
 
@@ -95,7 +103,7 @@ impl Consumer {
             )).into());
         }
 
-        let cluster = Cluster::new(bootstrap, Some(builder.timeout));
+        let cluster = Cluster::new(bootstrap, Some(builder.timeout), builder.ssl_opts.clone());
         // let topic_meta = cluster.fetch_topic_meta_and_update(&[&builder.topic]).await?;
         // debug!("Resolved topic: {:?}", topic_meta);
         // assert_eq!(1, topic_meta.topics.len());

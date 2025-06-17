@@ -1,6 +1,6 @@
 use crate::connection::BrokerConnection;
 use crate::error::{BrokerResult, BrokerFailureSource};
-use crate::{connections_pool, murmur2a, protocol};
+use crate::{connections_pool, murmur2a, protocol, SslOptions};
 use crate::cluster::Cluster;
 use crate::protocol::{ErrorCode, TypedBuffer};
 use crate::types::*;
@@ -162,11 +162,12 @@ pub struct ProducerBuilder {
     bootstrap: String,
     hasher: Option<Box<dyn Partitioner>>,
     send_timeout: Option<Duration>,
+    ssl_options: SslOptions,
 }
 
 impl ProducerBuilder {
     pub fn new(brokers: String) -> Self {
-        ProducerBuilder { bootstrap: brokers, hasher: None, send_timeout: None}
+        ProducerBuilder { bootstrap: brokers, hasher: None, send_timeout: None, ssl_options: SslOptions::default() }
     }
     pub fn hasher(mut self, hasher: Box<dyn Partitioner>) -> Self { self.hasher = Some(hasher); self }
     pub fn send_timeout(self, timeout: impl Into<Option<Duration>>) -> Self { ProducerBuilder {send_timeout: timeout.into(), ..self} }
@@ -179,6 +180,7 @@ pub struct Producer {
     request_tx: Sender<Request>,
     response_rx: Receiver<Response>,
     closed_event: oneshot::Receiver<()>,
+    ssl_options: SslOptions,
 }
 
 enum State {
@@ -199,7 +201,7 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
  {
     let flush_frequency = Duration::from_secs(5);
     let mut state = State::None;
-    let cluster = Cluster::new(builder.bootstrap.to_string(), builder.send_timeout);
+    let cluster = Cluster::new(builder.bootstrap.to_string(), builder.send_timeout, builder.ssl_options.clone());
     let meta_cache:MetaCache = cluster.get_meta_cache();
     let mut meta_updates = cluster.get_meta_cache().subscribe_to_updates();
     let mut null_key_partition_counter: u32 = 0;
@@ -216,7 +218,7 @@ async fn eval_loop(mut request_rx: Receiver<Request>, response_tx: Sender<Respon
     
     let mut flushing = false;
 
-    let mut conn_pool = ConnectionPool::new(cluster.get_meta_cache());
+    let mut conn_pool = ConnectionPool::new(cluster.get_meta_cache(), builder.ssl_options);
     let mut closing = false;
 
     debug!("starting eval loop");
@@ -407,6 +409,7 @@ impl Producer {
 
     #[instrument(level = "debug")]
     fn new(builder: ProducerBuilder) -> Self {
+        let ssl_options = builder.ssl_options.clone();
         let (response_tx, response_rx) = channel(2);
         let (request_tx, request_rx) = channel(2);
         let (closed_event_tx, closed_event_rx) = oneshot::channel();
@@ -415,6 +418,7 @@ impl Producer {
             request_tx: request_tx,
             response_rx,
             closed_event: closed_event_rx,
+            ssl_options
         }
     }
 

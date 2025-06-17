@@ -4,7 +4,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use kafka4rust::protocol::Broker;
+use kafka4rust::{protocol::Broker, SslOptions};
 use kafka4rust::{Cluster, protocol};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
@@ -106,7 +106,7 @@ impl Drop for TerminalRawModeGuard {
 type Terminal = ratatui::prelude::Terminal<CrosstermBackend<std::io::Stdout>>;
 
 /// UI entry point
-pub async fn main_ui(bootstrap: &str) -> Result<()> {
+pub async fn main_ui(bootstrap: &str, ssl_options: SslOptions) -> Result<()> {
     enable_raw_mode()?;
     let _terminal_guard = TerminalRawModeGuard {};
 
@@ -128,7 +128,7 @@ pub async fn main_ui(bootstrap: &str) -> Result<()> {
             let res = async {
                 tracing::event!(tracing::Level::DEBUG, %bootstrap, "Connecting");
                 tx.send(Cmd::ConnState(ConnState::Connecting)).await?;
-                let mut cluster = Cluster::new(bootstrap, Some(Duration::from_secs(20)));
+                let mut cluster = Cluster::new(bootstrap, Some(Duration::from_secs(20)), ssl_options);
                 let topics_meta = cluster.fetch_topic_meta_no_update(vec![]).await?;
                 tracing::debug_span!("Connected");
                 tx.send(Cmd::ConnState(ConnState::Connected)).await?;

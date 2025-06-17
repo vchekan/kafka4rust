@@ -1,5 +1,6 @@
 pub mod protocol;
 mod connection;
+mod ssl;
 mod cluster;
 mod metadiscover;
 mod meta_cache;
@@ -22,4 +23,4 @@ pub use self::cluster::Cluster;
 pub use self::producer::Producer;
 pub use self::consumer::ConsumerBuilder;
 pub use self::utils::{init_console_tracer, init_grpc_opentetemetry_tracer};
-
+pub use self::ssl::{SecurityProtocol, SslOptions};

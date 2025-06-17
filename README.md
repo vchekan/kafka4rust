@@ -1,5 +1,9 @@
 # Kafka client (personal project, work in progress) 
 
+## Focus
+* [ ]  KIP-602: Change default value for client.dns.lookup
+
+
 ## Features
 * IPv6 support
 * Instrumentation
@@ -39,12 +43,13 @@
     * snafu
 
 ## TODO
+- [ ] Evaluate `select!` usage for cancellation safety: https://tomaka.medium.com/ (use tokio tcp streams)
 - [ ] tokio-console
 - [ ] Validate that BytesMut has always enough reserve bytes. Or switch to Vec?
 - [X] Remove ByteOrder because `bytes` already have it  
-- [ ] Make sure that command send anr response are corresponding even in parallel scenario.
+- [ ] Make sure that command send and response are corresponding even in parallel scenario.
 - [ ] Producer sent message size limit
-- [ ] Evaluate `select!` usage for cancellation safety: https://tomaka.medium.com/a-look-back-at-asynchronous-rust-d54d63934a1c
+a-look-back-at-asynchronous-rust-d54d63934a1c
   - Joshua's `Stream::merge`: https://blog.yoshuawuyts.com/futures-concurrency-3/#issues-with-futures-select 
 - [ ] Implement BufferPool to minimize large vectors allocations  
 - [ ] Use crossbeam::epoch::Pointable to store list of known brokers and metadata. Allows for lock-free walks over brokers.
@@ -94,4 +99,3 @@
 https://matklad.github.io/2020/10/15/study-of-std-io-error.html
 https://willcrichton.net/rust-api-type-patterns/
 https://aturon.github.io/blog/2015/08/27/epoch/
-https://ryhl.io/blog/actors-with-tokio/

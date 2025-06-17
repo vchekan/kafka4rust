@@ -3,7 +3,7 @@ use std::fmt::Debug;
 use std::net::SocketAddr;
 use futures::{StreamExt, TryStream};
 use crate::connection::BrokerConnection;
-use crate::protocol;
+use crate::{protocol, SslOptions};
 use async_stream::try_stream;
 use crate::error::{BrokerFailureSource, BrokerResult};
 use tokio::{pin, select};
@@ -21,6 +21,7 @@ pub(crate) struct MetaDiscover {
     bootstrap: Vec<SocketAddr>,
     broker_idx: usize,
     topic_requests: mpsc::Receiver<String>,
+    ssl_options: SslOptions,
 }
 
 #[derive(PartialEq, Debug)]
@@ -34,7 +35,7 @@ enum State {
 
 impl MetaDiscover {
     #[instrument(level = "debug", name = "MetaDiscover::new", skip(bootstrap))]
-    pub fn new(bootstrap: Vec<SocketAddr>) -> (Sender<String>, Receiver<Result<protocol::MetadataResponse0,BrokerFailureSource>>) {
+    pub fn new(bootstrap: Vec<SocketAddr>, ssl_options: SslOptions) -> (Sender<String>, Receiver<Result<protocol::MetadataResponse0,BrokerFailureSource>>) {
         let (command_tx, command_rx) = mpsc::channel(1);
         let (response_tx, response_rx) = mpsc::channel(1);
 
@@ -43,6 +44,7 @@ impl MetaDiscover {
             broker_idx: 0,
             bootstrap,
             topic_requests: command_rx,
+            ssl_options
         }.stream();
 
         tokio::task::spawn(async move {
@@ -116,7 +118,7 @@ impl MetaDiscover {
                     }
 
                     // Always try to connect when disconnected
-                    conn = BrokerConnection::connect(self.bootstrap[self.broker_idx], 0), if self.state == State::Disconnected => {
+                    conn = BrokerConnection::connect(self.bootstrap[self.broker_idx], 0, &self.ssl_options), if self.state == State::Disconnected => {
                         match conn {
                             Ok(conn) => {
                                 tracing::debug!("Connected");
@@ -198,7 +200,7 @@ mod tests {
         timeout(Duration::from_secs(20), async move {
 
             let bootstrap = resolve_addr("localhost");
-            let (discover_tx, mut discover_rx) = MetaDiscover::new(bootstrap);
+            let (discover_tx, mut discover_rx) = MetaDiscover::new(bootstrap, SslOptions::default());
             let topics = vec!["topic1", "topic2", "topic3"];
             let topic_count = topics.len();
             tokio::task::spawn(async move {

@@ -1,0 +1,61 @@
+services:
+  zookeeper:
+    image: wurstmeister/zookeeper:latest
+    ports:
+      - "2181:2181"
+    environment:
+      ZOO_MY_ID: 1
+
+  kafka1:
+    image: wurstmeister/kafka:latest
+    ports:
+      - "9091:9091" # Plaintext - Host Access
+      - "9093:9093" # SSL - Host Access
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_LISTENERS: PLAINTEXT://:9091,SSL://:9093,INTERNAL://kafka1:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9091,SSL://localhost:9093,INTERNAL://kafka1:9094
+      KAFKA_SSL_KEYSTORE_LOCATION: /kafka/certs/keystore.jks
+      KAFKA_SSL_TRUSTSTORE_LOCATION: /kafka/certs/truststore.jks
+      KAFKA_SSL_KEYSTORE_PASSWORD: changeit # Replace with a strong password
+      KAFKA_SSL_TRUSTSTORE_PASSWORD: changeit # Replace with a strong password
+    volumes:
+      - ./certs:/kafka/certs
+    depends_on:
+      - zookeeper
+
+  # kafka2:
+  #   image: wurstmeister/kafka:latest
+  #   ports:
+  #     - "9092:9091" # Plaintext - Host Access
+  #     - "9094:9093" # SSL - Host Access
+  #   environment:
+  #     KAFKA_BROKER_ID: 2
+  #     KAFKA_LISTENERS: PLAINTEXT://:9091,SSL://:9093,INTERNAL://kafka2:9094
+  #     KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,SSL://localhost:9094,INTERNAL://kafka2:9094
+  #     KAFKA_SSL_KEYSTORE_LOCATION: /kafka/certs/keystore.jks
+  #     KAFKA_SSL_TRUSTSTORE_LOCATION: /kafka/certs/truststore.jks
+  #     KAFKA_SSL_KEYSTORE_PASSWORD: changeit # Replace with a strong password
+  #     KAFKA_SSL_TRUSTSTORE_PASSWORD: changeit # Replace with a strong password
+  #   volumes:
+  #     - ./certs:/kafka/certs
+  #   depends_on:
+  #     - zookeeper
+
+  # kafka3:
+  #   image: wurstmeister/kafka:latest
+  #   ports:
+  #     - "9093:9091" # Plaintext - Host Access
+  #     - "9095:9093" # SSL - Host Access
+  #   environment:
+  #     KAFKA_BROKER_ID: 3
+  #     KAFKA_LISTENERS: PLAINTEXT://:9091,SSL://:9093,INTERNAL://kafka3:9094
+  #     KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9093,SSL://localhost:9095,INTERNAL://kafka3:9094
+  #     KAFKA_SSL_KEYSTORE_LOCATION: /kafka/certs/keystore.jks
+  #     KAFKA_SSL_TRUSTSTORE_LOCATION: /kafka/certs/truststore.jks
+  #     KAFKA_SSL_KEYSTORE_PASSWORD: changeit # Replace with a strong password
+  #     KAFKA_SSL_TRUSTSTORE_PASSWORD: changeit # Replace with a strong password
+  #   volumes:
+  #     - ./certs:/kafka/certs
+  #   depends_on:
+  #     - zookeeper

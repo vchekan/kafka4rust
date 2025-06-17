@@ -15,7 +15,7 @@ use anyhow::anyhow;
 use indexmap::IndexMap;
 use tracing::{debug, warn, debug_span, Instrument};
 use crate::error::{BrokerResult, BrokerFailureSource};
-use crate::protocol;
+use crate::{protocol, SslOptions};
 use crate::types::*;
 use crate::utils::resolve_addr;
 use crate::connection::BrokerConnection;
@@ -32,6 +32,7 @@ pub struct Cluster {
     /// topic -> partition[] -> leader (if known). Leader is None if it is down and requires re-discovery
     meta_cache: MetaCache,
     meta_discover_tx: mpsc::Sender<String>,     // TODO: send `Vec<String> to ensure batching resolution?
+    ssl_options: SslOptions,
 }
 
 
@@ -49,12 +50,12 @@ impl Debug for Cluster {
 impl Cluster {
     /// Connect to at least one broker successfully
     #[instrument(name = "Cluster::new", skip(bootstrap, operation_timeout))]
-    pub fn new(bootstrap: String, operation_timeout: Option<Duration>) -> Self {
+    pub fn new(bootstrap: String, operation_timeout: Option<Duration>, ssl_options: SslOptions) -> Self {
         debug!("new Cluster");
         let bootstrap = resolve_addr(&bootstrap);
 
 
-        let(meta_discover_tx, meta_discover_rx) = MetaDiscover::new(bootstrap.clone());
+        let(meta_discover_tx, meta_discover_rx) = MetaDiscover::new(bootstrap.clone(), ssl_options.clone());
         let meta_cache = MetaCache::new();
         Self::spawn_discover(meta_cache.clone_data(), meta_discover_rx);
 
@@ -63,7 +64,8 @@ impl Cluster {
             operation_timeout: operation_timeout.unwrap_or(Duration::from_secs(5)),
             connections: IndexMap::new(),
             meta_cache,
-            meta_discover_tx
+            meta_discover_tx,
+            ssl_options
         }
     }
 
@@ -170,7 +172,7 @@ impl Cluster {
             None => {
                 match self.meta_cache.get_addr_by_broker(&broker_id) {
                     Some(addr) => {
-                        match BrokerConnection::connect(addr, broker_id).await {
+                        match BrokerConnection::connect(addr, broker_id, &self.ssl_options).await {
                             Ok(broker) => {
                                 self.connections.insert(broker_id, broker);
                                 self.connections.get_index_of(&broker_id).unwrap()
@@ -193,7 +195,7 @@ impl Cluster {
 
         // TODO: if broker does not exist, return error?
         if let Some(addr) = self.meta_cache.get_addr_by_broker(broker_id) {
-            let conn = BrokerConnection::connect(addr, *broker_id).await?;
+            let conn = BrokerConnection::connect(addr, *broker_id, &self.ssl_options).await?;
             self.connections.insert(*broker_id, conn);
         }
 
@@ -230,7 +232,7 @@ impl Cluster {
         // }
 
         for addr in &self.bootstrap {
-            match BrokerConnection::connect(*addr, 0).await?.exchange(&request).await {
+            match BrokerConnection::connect(*addr, 0, &self.ssl_options).await?.exchange(&request).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => debug!("Error: {:?}", e)
             }
@@ -317,7 +319,7 @@ mod tests {
 
         // TODO: when brokers are down, `some_offsets: Ok([])` is returned. Return actual error.
 
-        let mut cluster = Cluster::new(bootstrap, Some(Duration::from_secs(10)));
+        let mut cluster = Cluster::new(bootstrap, Some(Duration::from_secs(10)), SslOptions::default());
         let zero_offsets = cluster.list_offsets(vec!["test1".to_owned()]).await;
         let some_offsets = cluster.list_offsets(vec!["topic2".to_owned()]).await;
         println!("zero_offsets: {:?}", zero_offsets);

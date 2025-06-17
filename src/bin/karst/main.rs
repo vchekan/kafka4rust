@@ -3,15 +3,17 @@ mod ui;
 use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use kafka4rust::{Cluster, ConsumerBuilder};
+use kafka4rust::{Cluster, ConsumerBuilder, SecurityProtocol};
 use tracing::{debug, error};
 use std::time::Duration;
 use kafka4rust::Producer;
 use tracing_attributes::instrument;
+use kafka4rust::SslOptions;
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt::init();
 
     // let provider = init_grpc_opentetemetry_tracer(); 
     // let tracer = provider.tracer("main");
@@ -60,11 +62,18 @@ async fn run() -> Result<()> {
     //     TracingType::OpentelemetryGrpc => init_grpc_opentetemetry_tracer()
     // }
 
+    let ssl_options = SslOptions {
+        security_protocol: cli.security_protocol,
+        keystore_location: cli.keystore_location,
+        keystore_password: cli.keystore_password,
+        truststore_location: cli.truststore_location,
+        truststore_password: cli.truststore_password
+    };
 
     
     match cli.command {
         KartCommand::List {subcommand} => {
-            let mut cluster = Cluster::new(cli.bootstrap, Some(Duration::from_secs(20)));
+            let mut cluster = Cluster::new(cli.bootstrap, Some(Duration::from_secs(20)), ssl_options);
             // TODO: check for errors
             let meta = cluster.fetch_topic_meta_no_update(vec![]).await?;
             match subcommand {
@@ -116,7 +125,10 @@ async fn run() -> Result<()> {
             // producer.close().await?;
         }
         KartCommand::Consume { topic, count } => {
-            let mut consumer = ConsumerBuilder::new(&topic).build().await?;
+            let mut consumer = ConsumerBuilder::new(&topic)
+                .bootstrap(&cli.bootstrap)
+                .with_ssl_options(ssl_options)
+                .build().await?;
             loop {
                 let batch = match consumer.recv().await {
                     Some(batch) => batch,
@@ -127,11 +139,10 @@ async fn run() -> Result<()> {
                     println!("{msg}");
                 }
             }
-
         }
 
         KartCommand::Ui => {
-            ui::main_ui(&cli.bootstrap).await?;
+            ui::main_ui(&cli.bootstrap, ssl_options).await?;
         }
     }
     debug!("exiting");
@@ -158,6 +169,21 @@ struct Cli {
     /// Turn on tracing
     #[arg(long, value_enum, default_value_t = TracingType::Off)]
     tracing: TracingType,
+
+    //
+    // SSL
+    //
+    #[arg(long, value_enum, default_value_t = SecurityProtocol::PLAINTEXT)]
+    security_protocol: SecurityProtocol,
+    #[arg(long)]
+    truststore_location: Option<String>,
+    #[arg(long)]
+    truststore_password: Option<String>,
+
+    #[arg(long)]
+    keystore_location: Option<String>,
+    #[arg(long)]
+    keystore_password: Option<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -166,6 +192,7 @@ enum TracingType {
     Console,
     OpentelemetryGrpc,
 }
+
 
 #[derive(Subcommand)]
 enum KartCommand {
