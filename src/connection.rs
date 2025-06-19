@@ -20,6 +20,7 @@
 //! Write channel: how to implement sender's pushback?
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use anyhow::Context;
 use bytes::{BytesMut, Buf};
@@ -32,11 +33,11 @@ use tokio_rustls::{TlsConnector, rustls::ClientConfig};
 
 use crate::error::{BrokerFailureSource, BrokerResult};
 use crate::types::BrokerId;
-use crate::SslOptions;
+use crate::{SecurityProtocol, SslOptions};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
 use std::fmt::{Debug, Formatter};
-use crate::protocol::{self, FromKafka, Request, TypedBuffer};
+use crate::protocol::{self, FromKafka, TypedBuffer};
 use crate::protocol::{write_request, read_response};
 use tracing::{debug, trace};
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
@@ -57,16 +58,34 @@ impl BrokerConnection {
     /// Keys
     #[instrument(level="debug")]
     pub async fn connect(addr: SocketAddr, broker_id: BrokerId, ssl_options: &SslOptions) -> BrokerResult<Self> {
-        let mut cert_store = RootCertStore::empty();
-        //cert_store.extend(webkpi_roots::TLS_SERVER_ROOTS.iter().clened());
-        let truststore_location = Path::new(&ssl_options.truststore_location.unwrap());
-        for cert in CertificateDer::pem_file_iter(truststore_location) {
-            cert_store.add(cert?)?;
+
+        if let SecurityProtocol::SSL = ssl_options.security_protocol {
+            let mut ca_store = RootCertStore::empty();
+            match ssl_options.truststore_location {
+                Some(truststore_location) => {
+                    //cert_store.extend(webkpi_roots::TLS_SERVER_ROOTS.iter().clened());
+                    let truststore_location = Path::new(&truststore_location);
+                    for cert in CertificateDer::pem_file_iter(truststore_location).context("reading truststore cert").unwrap() {
+                        ca_store.add(cert.context("reading cert in truststore").unwrap()).context("adding truststore cert").unwrap();
+                    }
+                }
+                None => {
+                    ca_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                }
+            }
+            
+            let tls_config = ClientConfig::builder()
+                .with_root_certificates(ca_store);
+
+            tls_config.with_no_client_auth().bu
+            let tls_config = match ssl_options.keystore_location {
+                Some(keystore_location) => tls_config.with_client_auth_cert(cert_chain, key_der).context("Failed to read ssl certs").unwrap(),
+                None => tls_config.with_no_client_auth(),
+            };
+                            
+            let tls_connector = TlsConnector::from(Arc::new(tls_config));
+
         }
-        let tls_config = ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_client_auth_cert(cert_chain, key_der).context("Failed to read ssl certs").unwrap();
-        let tls_connector = TlsConnector::from(tls_config);
 
         let tcp = TcpStream::connect(&addr).await?;
         debug!("Connected to {}", addr);
