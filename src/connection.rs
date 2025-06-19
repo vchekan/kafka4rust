@@ -19,6 +19,7 @@
 //!
 //! Write channel: how to implement sender's pushback?
 
+use std::path::Path;
 use std::time::Duration;
 use anyhow::Context;
 use bytes::{BytesMut, Buf};
@@ -58,7 +59,8 @@ impl BrokerConnection {
     pub async fn connect(addr: SocketAddr, broker_id: BrokerId, ssl_options: &SslOptions) -> BrokerResult<Self> {
         let mut cert_store = RootCertStore::empty();
         //cert_store.extend(webkpi_roots::TLS_SERVER_ROOTS.iter().clened());
-        for cert in CertificateDer::pem_file_iter(ssl_options.truststore_location) {
+        let truststore_location = Path::new(&ssl_options.truststore_location.unwrap());
+        for cert in CertificateDer::pem_file_iter(truststore_location) {
             cert_store.add(cert?)?;
         }
         let tls_config = ClientConfig::builder()
