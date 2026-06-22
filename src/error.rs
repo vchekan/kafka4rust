@@ -1,15 +1,15 @@
 //! `BrokerError` is error happen during communication with a broker, whereas `InternalError` is
 //! caused by driver itself (for example channel communication error).
 
-use thiserror::Error;
-use std::io;
-use crate::types::BrokerId;
 use crate::retry_policy::ShouldRetry;
+use crate::types::BrokerId;
+use std::io;
+use thiserror::Error;
 
 //pub(crate) type Result<T,E=InternalError> = std::result::Result<T,E>;
 /// Result with focus on retry-ability. Higher-level function wrap the response into retry policy
 /// and make decision on either underlying connection must be reset.
-pub(crate) type BrokerResult<T> = std::result::Result<T,BrokerFailureSource>;
+pub(crate) type BrokerResult<T> = std::result::Result<T, BrokerFailureSource>;
 
 /// User-facing error
 #[derive(Debug, Error)]
@@ -19,11 +19,9 @@ pub enum KafkaError {
 
     //#[error("Dns resolution failed: {0}")]
     //DnsFailed(String),
-
     #[error("Config error. {0}")]
     Config(String),
 }
-
 
 // TODO: `Cluster` is exposed for admin tools and exposes internal errors.
 // Think how to solve it. Create public copy of `Cluster` and re-wrap errors
@@ -35,16 +33,25 @@ pub enum InternalError {
     Timeout,
 
     #[error("networking operation failed: {context}")]
-    Network {context: String, source: Box<dyn std::error::Error + 'static + Send + Sync>},
+    Network {
+        context: String,
+        source: Box<dyn std::error::Error + 'static + Send + Sync>,
+    },
 
     #[error("{1}")]
     Io(#[source] std::io::Error, String),
 
     #[error("{1}")]
-    Context(#[source] Box<dyn std::error::Error + 'static + Send + Sync>, String),
+    Context(
+        #[source] Box<dyn std::error::Error + 'static + Send + Sync>,
+        String,
+    ),
 
     #[error("broker response")]
-    BrokerResponseError{#[from] error_code: crate::protocol::ErrorCode},
+    BrokerResponseError {
+        #[from]
+        error_code: crate::protocol::ErrorCode,
+    },
 
     #[error("Corrupt message. {0}")]
     CorruptMessage(&'static str),
@@ -82,16 +89,16 @@ pub enum BrokerFailureSource {
 
     #[error("serialization")]
     Serialization(#[source] anyhow::Error),
-    
+
     #[error("timeout")]
     Timeout,
-    
+
     #[error("{0}. {1}")]
     Write(String, io::Error),
-    
+
     #[error("read failed at position {0}. {1}")]
     Read(usize, io::Error),
-    
+
     #[error("unknown broker_id: {0}")]
     UnknownBrokerId(BrokerId),
 
@@ -115,8 +122,8 @@ impl ShouldRetry for BrokerFailureSource {
             // TODO: seems "retryable" is not enough, need to distinct requirement to reset connection
             Serialization(_) => true,
             Timeout => true,
-            Write(_,_) => true,
-            Read(_,_) => true,
+            Write(_, _) => true,
+            Read(_, _) => true,
             UnknownBrokerId(_) => true,
             NoBrokerAvailable => true,
             Internal(_) => false,

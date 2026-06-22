@@ -19,28 +19,29 @@
 //!
 //! Write channel: how to implement sender's pushback?
 
+use anyhow::Context;
+use bytes::{Buf, BytesMut};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use anyhow::Context;
-use bytes::{BytesMut, Buf};
 use tokio::net::TcpStream;
+use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::CertificateDer;
+use tokio_rustls::rustls::ClientConfig;
 use tokio_rustls::rustls::RootCertStore;
-use std::net::SocketAddr;
-use tokio_rustls::{TlsConnector, rustls::ClientConfig};
 
 use crate::error::{BrokerFailureSource, BrokerResult};
+use crate::protocol::{self, FromKafka, TypedBuffer};
+use crate::protocol::{read_response, write_request};
 use crate::types::BrokerId;
 use crate::{SecurityProtocol, SslOptions};
+use std::fmt::{Debug, Formatter};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing::{debug, trace};
 use tracing_attributes::instrument;
 use tracing_futures::Instrument;
-use std::fmt::{Debug, Formatter};
-use crate::protocol::{self, FromKafka, TypedBuffer};
-use crate::protocol::{write_request, read_response};
-use tracing::{debug, trace};
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
 
 pub(crate) const CLIENT_ID: &str = "k4rs";
 
@@ -49,47 +50,71 @@ pub(crate) struct BrokerConnection {
     pub(crate) broker_id: BrokerId,
     /// (api_keys, agreed_version)
     negotiated_api_version: Vec<(i16, i16)>,
-    tcp: TcpStream,
+    stream: TcpOrTls,
     correlation_id: u32,
+}
+
+/// Connection can be either raw Tcp or Tls. This wrapper implements common interface for both so rest of the code can treat these 2 option
+/// uniformely.
+enum TcpOrTls {
+    Tcp(TcpStream),
+    Tls(TlsStream<TcpStream>),
 }
 
 impl BrokerConnection {
     /// Connect to address and issue ApiVersion request, build compatible Api Versions for all Api
     /// Keys
-    #[instrument(level="debug")]
-    pub async fn connect(addr: SocketAddr, broker_id: BrokerId, ssl_options: &SslOptions) -> BrokerResult<Self> {
+    #[instrument(level = "debug")]
+    pub async fn connect(
+        addr: SocketAddr,
+        broker_id: BrokerId,
+        ssl_options: &SslOptions,
+    ) -> BrokerResult<Self> {
+        let tcp = TcpStream::connect(&addr).await?;
+        debug!("Connected to {}", addr);
 
-        if let SecurityProtocol::SSL = ssl_options.security_protocol {
+        let stream: TcpOrTls = if let SecurityProtocol::SSL = ssl_options.security_protocol {
             let mut ca_store = RootCertStore::empty();
-            match ssl_options.truststore_location {
+            match &ssl_options.truststore_location {
                 Some(truststore_location) => {
                     //cert_store.extend(webkpi_roots::TLS_SERVER_ROOTS.iter().clened());
                     let truststore_location = Path::new(&truststore_location);
-                    for cert in CertificateDer::pem_file_iter(truststore_location).context("reading truststore cert").unwrap() {
-                        ca_store.add(cert.context("reading cert in truststore").unwrap()).context("adding truststore cert").unwrap();
+                    for cert in CertificateDer::pem_file_iter(truststore_location)
+                        .context("reading truststore cert")
+                        .unwrap()
+                    {
+                        ca_store
+                            .add(cert.context("reading cert in truststore").unwrap())
+                            .context("adding truststore cert")
+                            .unwrap();
                     }
                 }
                 None => {
                     ca_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
                 }
             }
-            
-            let tls_config = ClientConfig::builder()
-                .with_root_certificates(ca_store);
 
-            tls_config.with_no_client_auth().bu
-            let tls_config = match ssl_options.keystore_location {
-                Some(keystore_location) => tls_config.with_client_auth_cert(cert_chain, key_der).context("Failed to read ssl certs").unwrap(),
-                None => tls_config.with_no_client_auth(),
-            };
-                            
-            let tls_connector = TlsConnector::from(Arc::new(tls_config));
+            let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(
+                ClientConfig::builder()
+                    .with_root_certificates(ca_store)
+                    .with_no_client_auth(),
+            ));
 
-        }
+            let connect = tls_connector.connect(addr.ip().into(), tcp).await?;
+            TcpOrTls::Tls(connect)
+        } else {
+            TcpOrTls::Tcp(tcp)
+        };
 
-        let tcp = TcpStream::connect(&addr).await?;
-        debug!("Connected to {}", addr);
-        let mut conn = BrokerConnection { addr, broker_id, negotiated_api_version: vec![], tcp, correlation_id: 0};
+        // let tcp = TcpStream::connect(&addr).await?;
+        // debug!("Connected to {}", addr);
+        let mut conn = BrokerConnection {
+            addr,
+            broker_id,
+            negotiated_api_version: vec![],
+            stream,
+            correlation_id: 0,
+        };
         let req = protocol::ApiVersionsRequest0 {};
         let mut buf = BytesMut::with_capacity(1024);
         // TODO: This is special case, we need correlationId and clientId before broker is created...
@@ -100,7 +125,12 @@ impl BrokerConnection {
 
         let mut buf = buf.freeze();
         let (corr_id, response): (u32, protocol::ApiVersionsResponse0) = read_response(&mut buf)?;
-        trace!("Got ApiVersionResponse {:?}; correlation_id: {}, buf: {:?}", response, corr_id, buf);
+        trace!(
+            "Got ApiVersionResponse {:?}; correlation_id: {}, buf: {:?}",
+            response,
+            corr_id,
+            buf
+        );
         response.error_code.as_result()?;
         let negotiated_api_version = build_api_compatibility(&response);
 
@@ -108,35 +138,54 @@ impl BrokerConnection {
             addr: conn.addr,
             broker_id,
             negotiated_api_version,
-            tcp: conn.tcp,
+            stream: conn.stream,
             correlation_id: 1,
         })
     }
-
-    pub fn addr(&self) -> SocketAddr {self.addr}
-
 
     /// Write request from buffer into tcp and reuse the buffer to read response.
     /// Message size is read from the buffer, so buffer will position to the correlation_id
     #[instrument(level = "debug", err, skip(self, buf))]
     pub async fn exchange_with_buf(&mut self, buf: &mut BytesMut) -> BrokerResult<()> {
-        trace!("Sending request[{}] to {:?}", buf.len(), self.tcp.peer_addr());
-        self.tcp.write_all(buf).instrument(tracing::debug_span!("writing request")).await
-            .map_err(|e| BrokerFailureSource::Write(format!("writing {} bytes to socket {:?}", buf.len(), self.tcp.peer_addr()), e))?;
-        trace!("write complete");
+        trace!(
+            "Sending request[{}] to {:?}",
+            buf.len(),
+            self.stream.peer_addr()
+        );
+        self.stream
+            .write_all(buf)
+            .instrument(tracing::debug_span!("writing request"))
+            .await?;
+        // .map_err(|e| {
+        //     BrokerFailureSource::Write(
+        //         format!(
+        //             "writing {} bytes to socket {:?}",
+        //             buf.len(),
+        //             self.tcp.peer_addr()
+        //         ),
+        //         e,
+        //     )
+        // })?;
+        // trace!("write complete");
 
         // TODO: buffer reuse
         buf.clear();
         // Read length into buffer
         buf.resize(4, 0_u8);
         // TODO: ensure length is sane
-        self.tcp.read_exact(buf).instrument(tracing::info_span!("reading msg len")).await
-            .map_err(|e| BrokerFailureSource::Read(buf.len(), e))?;
+        self.stream
+            .read_exact(buf)
+            .instrument(tracing::info_span!("reading msg len"))
+            .await?;
+        // .map_err(|e| BrokerFailureSource::Read(buf.len(), e))?;
         let len = buf.get_u32();
         //debug!("Response len: {}, reading body...", len);
         buf.resize(len as usize, 0_u8);
-        self.tcp.read_exact(buf).instrument(tracing::info_span!("reading msg body")).await
-            .map_err(|e| BrokerFailureSource::Read(buf.len(), e))?;
+        self.stream
+            .read_exact(buf)
+            .instrument(tracing::info_span!("reading msg body"))
+            .await?;
+        // .map_err(|e| BrokerFailureSource::Read(buf.len(), e))?;
 
         // TODO: validate correlation_id
         // TODO: why little endian???
@@ -169,8 +218,8 @@ impl BrokerConnection {
         // TODO: buffer management
         // TODO: ensure capacity (BytesMut will panic if out of range)
         let mut buff = BytesMut::with_capacity(200 * 1024); //Vec::with_capacity(1024);
-        //let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
-        // let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
+                                                            //let correlation_id = self.correlation_id.fetch_add(1, Ordering::SeqCst) as u32;
+                                                            // let correlation_id = CORRELATION_ID.fetch_add(1, Ordering::SeqCst) as u32;
         protocol::write_request(request, None, &mut buff, self.correlation_id);
         self.correlation_id = self.correlation_id.wrapping_add(1);
         buff
@@ -178,7 +227,8 @@ impl BrokerConnection {
 
     #[instrument(level = "debug", skip(self, buff))]
     pub async fn read_response<T>(&mut self, mut buff: TypedBuffer<T>) -> BrokerResult<T>
-        where T: FromKafka
+    where
+        T: FromKafka,
     {
         self.exchange_with_buf(&mut buff).await?;
         //let mut cursor = Cursor::new(buff);
@@ -186,19 +236,19 @@ impl BrokerConnection {
         let (_corr_id, response) = read_response(&mut buff)?;
         // TODO: check correlationId
         // TODO: check for response error
-        Ok(response)        
+        Ok(response)
     }
 
-    #[instrument(level="debug")]
-    pub async fn fetch_topic_with_broker(&mut self, topics: Vec<String>, timeout: Duration) -> BrokerResult<protocol::MetadataResponse0> {
-        let req = protocol::MetadataRequest0 {
-            topics,
-        };
+    #[instrument(level = "debug")]
+    pub async fn fetch_topic_with_broker(
+        &mut self,
+        topics: Vec<String>,
+        timeout: Duration,
+    ) -> BrokerResult<protocol::MetadataResponse0> {
+        let req = protocol::MetadataRequest0 { topics };
 
         self.exchange(&req).await
     }
-
-
 }
 
 fn build_api_compatibility(them: &protocol::ApiVersionsResponse0) -> Vec<(i16, i16)> {
@@ -245,6 +295,43 @@ impl Debug for BrokerConnection {
     }
 }
 
+impl TcpOrTls {
+    pub async fn write_all(&mut self, buf: &mut BytesMut) -> BrokerResult<()> {
+        match self {
+            Self::Tcp(tcp) => tcp.write_all(buf).await.map_err(BrokerFailureSource::from),
+            Self::Tls(tls) => tls.write_all(buf).await.map_err(BrokerFailureSource::from),
+        }
+    }
+
+    pub async fn read_exact(&mut self, buf: &mut BytesMut) -> BrokerResult<usize> {
+        match self {
+            Self::Tcp(tcp) => tcp
+                .read_exact(buf)
+                .await
+                .map_err(|e| BrokerFailureSource::Read(buf.len(), e)),
+            Self::Tls(tls) => tls
+                .read_exact(buf)
+                .await
+                .map_err(|e| BrokerFailureSource::Read(buf.len(), e)),
+        }
+    }
+
+    pub fn peer_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        match self {
+            Self::Tcp(tcp) => tcp.peer_addr(),
+            Self::Tls(tls) => tls.get_ref().0.peer_addr(),
+        }
+    }
+}
+
+impl Debug for TcpOrTls {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tcp(arg0) => f.debug_tuple("Tcp").field(arg0).finish(),
+            Self::Tls(arg0) => f.debug_tuple("Tls").field(arg0).finish(),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -266,7 +353,9 @@ mod tests {
             .expect(format!("Host '{}' not found", bootstrap).as_str());
 
         let mut conn = BrokerConnection::connect(addr, 0, &SslOptions::default()).await?;
-        let meta = conn.fetch_topic_with_broker(vec!["test1".to_string()], Duration::from_secs(10)).await?;
+        let meta = conn
+            .fetch_topic_with_broker(vec!["test1".to_string()], Duration::from_secs(10))
+            .await?;
         println!("Meta: {:?}", meta);
 
         Ok(())
