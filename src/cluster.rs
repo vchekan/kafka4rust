@@ -3,59 +3,61 @@
 //! * Cluster topology caching
 //! * Request routing
 
+use crate::connection::BrokerConnection;
+use crate::error::{BrokerFailureSource, BrokerResult};
+use crate::meta_cache::{Data, MetaCache};
+use crate::metadiscover::MetaDiscover;
+use crate::protocol::{ListOffsetsRequest0, MetadataRequest0, MetadataResponse0};
+use crate::types::{BrokerAddress, BrokerId, Partition, TopicMeta};
+use crate::utils::resolve_addr;
+use crate::{protocol, SslOptions};
+use anyhow::anyhow;
+use indexmap::IndexMap;
 use std::collections::HashMap;
-use std::net::SocketAddr;
-use tokio::time::Duration;
-use tracing_attributes::instrument;
-use tokio::sync::mpsc;
 use std::fmt::{Debug, Formatter};
 use std::ops::IndexMut;
 use std::sync::{Arc, RwLock};
-use anyhow::anyhow;
-use indexmap::IndexMap;
-use tracing::{debug, warn, debug_span, Instrument};
-use crate::error::{BrokerResult, BrokerFailureSource};
-use crate::{protocol, SslOptions};
-use crate::types::*;
-use crate::utils::resolve_addr;
-use crate::connection::BrokerConnection;
-use crate::protocol::{MetadataResponse0, MetadataRequest0, ListOffsetsRequest0};
-use crate::meta_cache::{Data, MetaCache};
-use crate::metadiscover::MetaDiscover;
+use tokio::sync::mpsc;
+use tokio::time::Duration;
+use tracing::{debug, debug_span, warn, Instrument};
+use tracing_attributes::instrument;
 
 pub(crate) type LeaderMap = Vec<(BrokerId, Vec<(String, Vec<Partition>)>)>;
 
 pub struct Cluster {
-    bootstrap: Vec<SocketAddr>,
+    bootstrap: Vec<BrokerAddress>,
     operation_timeout: Duration,
     connections: IndexMap<BrokerId, BrokerConnection>,
     /// topic -> partition[] -> leader (if known). Leader is None if it is down and requires re-discovery
     meta_cache: MetaCache,
-    meta_discover_tx: mpsc::Sender<String>,     // TODO: send `Vec<String> to ensure batching resolution?
+    meta_discover_tx: mpsc::Sender<String>, // TODO: send `Vec<String> to ensure batching resolution?
     ssl_options: SslOptions,
 }
-
 
 impl Debug for Cluster {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Cluster")
-        .field("bootstrap", &self.bootstrap)
-        .field("operation_timeout", &self.operation_timeout)
-        .field("meta_cache", &self.meta_cache)
-        // TODO: need to block maps to get their string
-        .finish()
+            .field("bootstrap", &self.bootstrap)
+            .field("operation_timeout", &self.operation_timeout)
+            .field("meta_cache", &self.meta_cache)
+            // TODO: need to block maps to get their string
+            .finish()
     }
 }
 
 impl Cluster {
     /// Connect to at least one broker successfully
     #[instrument(name = "Cluster::new", skip(bootstrap, operation_timeout))]
-    pub fn new(bootstrap: String, operation_timeout: Option<Duration>, ssl_options: SslOptions) -> Self {
+    pub fn new(
+        bootstrap: String,
+        operation_timeout: Option<Duration>,
+        ssl_options: SslOptions,
+    ) -> Self {
         debug!("new Cluster");
-        let bootstrap = resolve_addr(&bootstrap);
+        let bootstrap: Vec<BrokerAddress> = resolve_addr(&bootstrap).into_iter().collect();
 
-
-        let(meta_discover_tx, meta_discover_rx) = MetaDiscover::new(bootstrap.clone(), ssl_options.clone());
+        let (meta_discover_tx, meta_discover_rx) =
+            MetaDiscover::new(bootstrap.clone(), ssl_options.clone());
         let meta_cache = MetaCache::new();
         Self::spawn_discover(meta_cache.clone_data(), meta_discover_rx);
 
@@ -65,7 +67,7 @@ impl Cluster {
             connections: IndexMap::new(),
             meta_cache,
             meta_discover_tx,
-            ssl_options
+            ssl_options,
         }
     }
 
@@ -73,7 +75,10 @@ impl Cluster {
         self.meta_cache.clone()
     }
 
-    pub async fn request_meta_refresh(&self, topic: String) -> Result<(), mpsc::error::SendError<String>> {
+    pub async fn request_meta_refresh(
+        &self,
+        topic: String,
+    ) -> Result<(), mpsc::error::SendError<String>> {
         self.meta_discover_tx.send(topic).await
     }
 
@@ -81,49 +86,70 @@ impl Cluster {
         self.meta_discover_tx.clone()
     }
 
-    fn spawn_discover(data: Arc<RwLock<Data>>, mut meta_discover_rx: mpsc::Receiver<BrokerResult<protocol::MetadataResponse0>>) {
-        tokio::task::spawn(async move {
-            loop {
-                match meta_discover_rx.recv().await {
-                    Some(meta) => {
-                        debug!("Got meta update");
-                        let mut data = (*data).write().expect("Lock failed");
-                        match meta {
-                            Ok(meta) => {
-                                data.update_meta(&meta);
-                                
-                            },
-                            Err(e) => debug!("Received error from discovery: {e}")
+    fn spawn_discover(
+        data: Arc<RwLock<Data>>,
+        mut meta_discover_rx: mpsc::Receiver<BrokerResult<protocol::MetadataResponse0>>,
+    ) {
+        tokio::task::spawn(
+            async move {
+                loop {
+                    match meta_discover_rx.recv().await {
+                        Some(meta) => {
+                            debug!("Got meta update");
+                            let mut data = (*data).write().expect("Lock failed");
+                            match meta {
+                                Ok(meta) => {
+                                    data.update_meta(&meta);
+                                }
+                                Err(e) => debug!("Received error from discovery: {e}"),
+                            }
                         }
-                    },
-                    None => break
+                        None => break,
+                    }
                 }
             }
-        }.instrument(debug_span!("Cluster-meta-handler")));
+            .instrument(debug_span!("Cluster-meta-handler")),
+        );
     }
 
     /// Return leader map of known brokers. Unknown brokers will be requested in background.
-    #[instrument(level="debug")]
+    #[instrument(level = "debug")]
     pub(crate) fn get_known_broker_map(&self) -> LeaderMap {
         self.meta_cache.get_known_broker_map()
     }
 
     /// Get partitions count from cache or listen in background fore resolution
     #[instrument]
-    pub(crate) async fn get_or_fetch_partition_count(&mut self, topic: String) -> BrokerResult<usize> {
-        let _ = self.get_or_request_brokers_and_meta(&vec![topic.clone()]).await?;
-        let meta = self.meta_cache.get_or_await(move |cache| cache.topics_meta.get(&topic).cloned()).await;
+    pub(crate) async fn get_or_fetch_partition_count(
+        &mut self,
+        topic: String,
+    ) -> BrokerResult<usize> {
+        let _ = self
+            .get_or_request_brokers_and_meta(&vec![topic.clone()])
+            .await?;
+        let meta = self
+            .meta_cache
+            .get_or_await(move |cache| cache.topics_meta.get(&topic).cloned())
+            .await;
 
         match meta {
             Some(meta) => Ok(meta.partitions.len()),
-            None => Err(BrokerFailureSource::Internal(anyhow!("Failed to fetch count")))
+            None => Err(BrokerFailureSource::Internal(anyhow!(
+                "Failed to fetch count"
+            ))),
         }
     }
 
     #[instrument(ret, err)]
-    pub async fn list_offsets(&mut self, topics: Vec<String>) -> BrokerResult<Vec<BrokerResult<protocol::ListOffsetsResponse0>>> {
+    pub async fn list_offsets(
+        &mut self,
+        topics: Vec<String>,
+    ) -> BrokerResult<Vec<BrokerResult<protocol::ListOffsetsResponse0>>> {
         let mut res = vec![];
-        let (broker_topics, topics_meta) = self.get_or_request_brokers_and_meta(&topics).await?;
+        let (broker_topics, topics_meta): (
+            HashMap<BrokerId, Vec<String>>,
+            HashMap<String, TopicMeta>,
+        ) = self.get_or_request_brokers_and_meta(&topics).await?;
 
         for broker_id in broker_topics.keys() {
             self.ensure_broker_connected(broker_id).await?;
@@ -132,31 +158,39 @@ impl Cluster {
         //let topics_meta = self.meta_cache.get_topics_meta(&topics).await;
 
         for (broker_id, topics) in broker_topics {
-            if let Some(conn_idx) = self.connections.get_index_of(&broker_id) { //self.connections.get_mut(&broker_id) {
+            if let Some(conn_idx) = self.connections.get_index_of(&broker_id) {
+                //self.connections.get_mut(&broker_id) {
                 let offset_request = ListOffsetsRequest0 {
                     replica_id: -1,
-                    topics: topics.into_iter()
-                        .filter_map(|topic| topics_meta.get(&topic)
-                            .map(|meta| {
+                    topics: topics
+                        .into_iter()
+                        .filter_map(|topic| {
+                            topics_meta.get(&topic).map(|meta| {
                                 protocol::Topics {
-                                        topic: topic.to_owned(),
-                                        partitions: (0..meta.partitions.len()).map( | partition | {
-                                        protocol::Partition {
-                                            partition: partition as u32,
-                                            // TODO: pass start/end offset
-                                            //  max timestamp for message offsets. returns the largest offsets that
-                                            //  are before the given time. Pass -2L for TopicHead, and -1L for TopicTail
-                                            timestamp: -1,
-                                            max_num_offsets: 2
-                                        }
-                                        }).collect()
+                                    topic: topic.to_owned(),
+                                    partitions: (0..meta.partitions.len())
+                                        .map(|partition| {
+                                            protocol::Partition {
+                                                partition: partition as u32,
+                                                // TODO: pass start/end offset
+                                                //  max timestamp for message offsets. returns the largest offsets that
+                                                //  are before the given time. Pass -2L for TopicHead, and -1L for TopicTail
+                                                timestamp: -1,
+                                                max_num_offsets: 2,
+                                            }
+                                        })
+                                        .collect(),
                                 }
                             })
-                        ).collect()
+                        })
+                        .collect(),
                 };
                 // TODO: execute requests in parallel
-                let (_, conn) = self.connections.get_index_mut(conn_idx).expect("Could not find connection at index");
-                let response =  conn.exchange(&offset_request).await;
+                let (_, conn) = self
+                    .connections
+                    .get_index_mut(conn_idx)
+                    .expect("Could not find connection at index");
+                let response = conn.exchange(&offset_request).await;
                 res.push(response)
             } else {
                 tracing::warn!("Can't find connection with brokerId: {}", broker_id);
@@ -166,23 +200,30 @@ impl Cluster {
         Ok(res)
     }
 
-    pub(crate) async fn broker_get_or_connect(&mut self, broker_id: BrokerId) -> BrokerResult<&mut BrokerConnection> {
+    pub(crate) async fn broker_get_or_connect(
+        &mut self,
+        broker_id: BrokerId,
+    ) -> BrokerResult<&mut BrokerConnection> {
         let idx = match self.connections.get_index_of(&broker_id) {
             Some(idx) => idx,
-            None => {
-                match self.meta_cache.get_addr_by_broker(&broker_id) {
-                    Some(addr) => {
-                        match BrokerConnection::connect(addr, broker_id, &self.ssl_options).await {
-                            Ok(broker) => {
-                                self.connections.insert(broker_id, broker);
-                                self.connections.get_index_of(&broker_id).unwrap()
-                            }
-                            Err(e) => return Err(e)
+            None => match self.meta_cache.get_addr_by_broker(&broker_id) {
+                Some(broker_addr) => {
+                    match BrokerConnection::connect(broker_addr, broker_id, &self.ssl_options).await
+                    {
+                        Ok(broker) => {
+                            self.connections.insert(broker_id, broker);
+                            self.connections.get_index_of(&broker_id).unwrap()
                         }
+                        Err(e) => return Err(e),
                     }
-                    None => return Err(BrokerFailureSource::Internal(anyhow::format_err!("Address for broker_id {} not found in metadata", broker_id)))
                 }
-           }
+                None => {
+                    return Err(BrokerFailureSource::Internal(anyhow::format_err!(
+                        "Address for broker_id {} not found in metadata",
+                        broker_id
+                    )))
+                }
+            },
         };
 
         Ok(self.connections.index_mut(idx))
@@ -194,20 +235,23 @@ impl Cluster {
         }
 
         // TODO: if broker does not exist, return error?
-        if let Some(addr) = self.meta_cache.get_addr_by_broker(broker_id) {
-            let conn = BrokerConnection::connect(addr, *broker_id, &self.ssl_options).await?;
+        if let Some(broker_addr) = self.meta_cache.get_addr_by_broker(broker_id) {
+            let conn =
+                BrokerConnection::connect(broker_addr, *broker_id, &self.ssl_options).await?;
             self.connections.insert(*broker_id, conn);
         }
 
         Ok(())
     }
 
-
     // // TODO: what is the list of all known brokers?
     // // TODO: retry policy
     // /// Execute request on every broker until success
     #[instrument]
-    pub async fn request_any<R: protocol::Request + Debug>(&mut self, request: R) -> BrokerResult<R::Response> {
+    pub async fn request_any<R: protocol::Request + Debug>(
+        &mut self,
+        request: R,
+    ) -> BrokerResult<R::Response> {
         for broker in self.connections.values_mut() {
             match broker.exchange(&request).await {
                 Ok(resp) => return Ok(resp),
@@ -231,10 +275,14 @@ impl Cluster {
         //     }
         // }
 
-        for addr in &self.bootstrap {
-            match BrokerConnection::connect(*addr, 0, &self.ssl_options).await?.exchange(&request).await {
+        for broker_addr in &self.bootstrap {
+            match BrokerConnection::connect(broker_addr.clone(), 0, &self.ssl_options)
+                .await?
+                .exchange(&request)
+                .await
+            {
                 Ok(resp) => return Ok(resp),
-                Err(e) => debug!("Error: {:?}", e)
+                Err(e) => debug!("Error: {:?}", e),
             }
         }
 
@@ -242,27 +290,44 @@ impl Cluster {
     }
 
     #[instrument(ret, err)]
-    async fn get_or_request_brokers_and_meta(&mut self, topics: &Vec<String>) -> BrokerResult<(HashMap<BrokerId, Vec<String>>, HashMap<String, TopicMeta>)> {
+    async fn get_or_request_brokers_and_meta(
+        &mut self,
+        topics: &Vec<String>,
+    ) -> BrokerResult<(HashMap<BrokerId, Vec<String>>, HashMap<String, TopicMeta>)> {
         // TODO: extract resolving missing topics into a separate function
         let mut topics_meta = self.meta_cache.get_topics_meta(topics);
 
-        let missings: Vec<_> = topics.into_iter()
+        let missings: Vec<_> = topics
+            .into_iter()
             //.partition(self.topics_meta.contains_key(*topic));
-            .filter(|t| !topics_meta.contains_key(*t)).collect();
+            .filter(|t| !topics_meta.contains_key(*t))
+            .collect();
         debug!("Missing topics, will request resolution: {:?}", missings);
 
         for missing in &missings {
-            self.meta_discover_tx.send((*missing).clone()).await
+            self.meta_discover_tx
+                .send((*missing).clone())
+                .await
                 .map_err(|e| BrokerFailureSource::Internal(e.into()))?
         }
 
         debug!("Awaiting for missing topics to resolve");
         for missing in missings {
-            let meta = self.meta_cache.get_or_await(move |data| data.topics_meta.get(missing).cloned()).await;
+            let meta = self
+                .meta_cache
+                .get_or_await(move |data| data.topics_meta.get(missing).cloned())
+                .await;
             match meta {
-                Some(meta) => {topics_meta.insert(meta.topic.clone(), meta); },
+                Some(meta) => {
+                    topics_meta.insert(meta.topic.clone(), meta);
+                }
                 // TODO: get_or_await should return `Err`
-                None => return Err(BrokerFailureSource::Internal(anyhow!("Can't resolve topic: {}", missing)))
+                None => {
+                    return Err(BrokerFailureSource::Internal(anyhow!(
+                        "Can't resolve topic: {}",
+                        missing
+                    )))
+                }
             }
         }
 
@@ -279,7 +344,10 @@ impl Cluster {
     // }
 
     #[instrument(ret, err)]
-    pub async fn fetch_topic_meta_no_update(&mut self, topics: Vec<String>) -> BrokerResult<MetadataResponse0> {
+    pub async fn fetch_topic_meta_no_update(
+        &mut self,
+        topics: Vec<String>,
+    ) -> BrokerResult<MetadataResponse0> {
         // TODO: use resolver?
         let request = MetadataRequest0 { topics };
         self.request_any(request).await
@@ -319,13 +387,19 @@ mod tests {
 
         // TODO: when brokers are down, `some_offsets: Ok([])` is returned. Return actual error.
 
-        let mut cluster = Cluster::new(bootstrap, Some(Duration::from_secs(10)), SslOptions::default());
+        let mut cluster = Cluster::new(
+            bootstrap,
+            Some(Duration::from_secs(10)),
+            SslOptions::default(),
+        );
         let zero_offsets = cluster.list_offsets(vec!["test1".to_owned()]).await;
         let some_offsets = cluster.list_offsets(vec!["topic2".to_owned()]).await;
         println!("zero_offsets: {:?}", zero_offsets);
         println!("some_offsets: {:?}", some_offsets);
 
-        let count = cluster.get_or_fetch_partition_count("test1".to_string()).await?;
+        let count = cluster
+            .get_or_fetch_partition_count("test1".to_string())
+            .await?;
         println!("count: {count}");
 
         Ok(())

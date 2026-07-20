@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::broadcast::Receiver;
 use crate::protocol;
-use crate::types::{BrokerId, Partition, TopicMeta};
+use crate::types::{BrokerAddress, BrokerId, Partition, TopicMeta};
 use tracing::{debug, instrument};
 use crate::cluster::LeaderMap;
 
@@ -15,7 +15,7 @@ pub struct MetaCache {
 }
 
 pub struct Data {
-    pub(crate) broker_addr_map: HashMap<BrokerId, SocketAddr>,
+    pub(crate) broker_addr_map: HashMap<BrokerId, BrokerAddress>,
     /// topic -> partition[] -> leader (if known). Leader is None if it is down and requires re-discovery
     pub(crate) leader_cache: HashMap<String, Vec<Option<BrokerId>>>,
     pub(crate) topics_meta: HashMap<String, TopicMeta>,
@@ -132,7 +132,7 @@ impl MetaCache {
         }
     }
 
-    pub fn get_addr_by_broker(&self, broker: &BrokerId) -> Option<SocketAddr> {
+    pub fn get_addr_by_broker(&self, broker: &BrokerId) -> Option<BrokerAddress> {
         let data = self.data.read().expect("Lock failed");
         data.broker_addr_map.get(broker).cloned()
     }
@@ -179,13 +179,19 @@ impl Data {
 
         for broker in &meta.brokers {
             if let Ok(addr) = broker.host.parse::<IpAddr>() {
-                self.broker_addr_map.insert(broker.node_id, SocketAddr::new(addr, broker.port as u16));
+                self.broker_addr_map.insert(broker.node_id, BrokerAddress {
+                    addr: SocketAddr::new(addr, broker.port as u16),
+                    hostname: broker.host.clone(),
+                });
                 continue
             }
-            if let Ok(addr) = (broker.host.as_str(), broker.port as u16).to_socket_addrs() {
-                let addr: Vec<_> = addr.collect();
+            if let Ok(addrs) = (broker.host.as_str(), broker.port as u16).to_socket_addrs() {
+                let addr: Vec<_> = addrs.collect();
                 if !addr.is_empty() {
-                    self.broker_addr_map.insert(broker.node_id, addr[0]);
+                    self.broker_addr_map.insert(broker.node_id, BrokerAddress {
+                        addr: addr[0],
+                        hostname: broker.host.clone(),
+                    });
                     continue;
                 }
             }

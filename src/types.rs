@@ -3,6 +3,22 @@ pub(crate) type BrokerId = i32;
 pub(crate) type Partition = u32;
 pub(crate) type Offset = u64;
 
+use std::net::SocketAddr;
+use std::fmt;
+
+/// Represents a broker address with both IP and hostname for TLS connections
+#[derive(Clone, Debug)]
+pub(crate) struct BrokerAddress {
+    pub(crate) addr: SocketAddr,
+    pub(crate) hostname: String,
+}
+
+impl fmt::Display for BrokerAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.hostname)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct TopicMeta {
     pub topic: String,

@@ -21,6 +21,7 @@
 
 use anyhow::Context;
 use bytes::{Buf, BytesMut};
+use std::convert::TryFrom;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -29,13 +30,14 @@ use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::CertificateDer;
+use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::ClientConfig;
 use tokio_rustls::rustls::RootCertStore;
 
 use crate::error::{BrokerFailureSource, BrokerResult};
 use crate::protocol::{self, FromKafka, TypedBuffer};
 use crate::protocol::{read_response, write_request};
-use crate::types::BrokerId;
+use crate::types::{BrokerAddress, BrokerId};
 use crate::{SecurityProtocol, SslOptions};
 use std::fmt::{Debug, Formatter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -66,18 +68,17 @@ impl BrokerConnection {
     /// Keys
     #[instrument(level = "debug")]
     pub async fn connect(
-        addr: SocketAddr,
+        broker_addr: BrokerAddress,
         broker_id: BrokerId,
         ssl_options: &SslOptions,
     ) -> BrokerResult<Self> {
-        let tcp = TcpStream::connect(&addr).await?;
-        debug!("Connected to {}", addr);
+        let tcp = TcpStream::connect(&broker_addr.addr).await?;
+        debug!("Connected to {}", broker_addr.addr);
 
         let stream: TcpOrTls = if let SecurityProtocol::SSL = ssl_options.security_protocol {
             let mut ca_store = RootCertStore::empty();
             match &ssl_options.truststore_location {
                 Some(truststore_location) => {
-                    //cert_store.extend(webkpi_roots::TLS_SERVER_ROOTS.iter().clened());
                     let truststore_location = Path::new(&truststore_location);
                     for cert in CertificateDer::pem_file_iter(truststore_location)
                         .context("reading truststore cert")
@@ -100,7 +101,19 @@ impl BrokerConnection {
                     .with_no_client_auth(),
             ));
 
-            let connect = tls_connector.connect(addr.ip().into(), tcp).await?;
+            let connect = tls_connector
+                .connect(
+                    ServerName::try_from(broker_addr.hostname.clone())
+                        .with_context(|| {
+                            format!(
+                                "server name parsing failed: '{}'",
+                                broker_addr.hostname.clone()
+                            )
+                        })
+                        .map_err(|e| BrokerFailureSource::Internal(e))?,
+                    tcp,
+                )
+                .await?;
             TcpOrTls::Tls(connect)
         } else {
             TcpOrTls::Tcp(tcp)
@@ -109,7 +122,7 @@ impl BrokerConnection {
         // let tcp = TcpStream::connect(&addr).await?;
         // debug!("Connected to {}", addr);
         let mut conn = BrokerConnection {
-            addr,
+            addr: broker_addr.addr,
             broker_id,
             negotiated_api_version: vec![],
             stream,
@@ -339,20 +352,18 @@ mod tests {
 
     use super::*;
     use std::env;
-    use std::net::ToSocketAddrs;
 
     #[tokio::test]
     async fn it_works() -> anyhow::Result<()> {
         utils::init_console_tracer();
 
         let bootstrap = env::var("kafka-bootstrap").unwrap_or("127.0.0.1:9092".to_string());
-        let addr = bootstrap
-            .to_socket_addrs()
-            .unwrap()
+        let broker_addr = utils::resolve_addr(&bootstrap)
+            .into_iter()
             .next()
             .expect(format!("Host '{}' not found", bootstrap).as_str());
 
-        let mut conn = BrokerConnection::connect(addr, 0, &SslOptions::default()).await?;
+        let mut conn = BrokerConnection::connect(broker_addr, 0, &SslOptions::default()).await?;
         let meta = conn
             .fetch_topic_with_broker(vec!["test1".to_string()], Duration::from_secs(10))
             .await?;

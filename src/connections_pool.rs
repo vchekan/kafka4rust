@@ -1,7 +1,7 @@
 use crate::connection::BrokerConnection;
 use crate::error::BrokerFailureSource;
 use crate::meta_cache::MetaCache;
-use crate::types::BrokerId;
+use crate::types::{BrokerAddress, BrokerId};
 use crate::SslOptions;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -86,11 +86,11 @@ impl ConnectionPool {
     #[instrument(level = "debug")]
     fn new_connection(&self, broker_id: BrokerId) {
         match self.meta_cache.get_addr_by_broker(&broker_id) {
-            Some(addr) => {
-                debug!("Connecting to broker {broker_id}/{addr}");
+            Some(broker_addr) => {
+                debug!("Connecting to broker {broker_id}/{broker_addr}");
                 let ssl_options = self.ssl_options.clone();
                 self.connecting.push(Box::pin(async move {
-                    match BrokerConnection::connect(addr, broker_id, &ssl_options).await {
+                    match BrokerConnection::connect(broker_addr, broker_id, &ssl_options).await {
                         Ok(conn) => {
                             debug!(name: "Connected", %broker_id, addr = %conn.addr);
                             Ok(conn)
@@ -105,7 +105,7 @@ impl ConnectionPool {
                 todo!()
             }
         }
-        
+
     }
 
     pub(crate) fn is_empty(&self) -> bool {
